@@ -1,0 +1,7 @@
+# Optional: enables the live progress bar in set_stereo_default.py.
+# Without it, the script falls back to a plain "[i/N]" counter.
+tqdm>=4.60
+
+# Non-Python dependencies (install separately, not via pip):
+#   ffmpeg / ffprobe  https://ffmpeg.org
+#   mkvmerge          https://mkvtoolnix.download  (only needed for .mkv/.webm files)

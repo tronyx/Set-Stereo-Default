@@ -1,0 +1,21 @@
+# Logs (e.g. --log-file run.log)
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# This script's own remux artifacts, in case test files ever live in-repo
+*.tmp_remux.*
+*.bak
+
+# Editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
