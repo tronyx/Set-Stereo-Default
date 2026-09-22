@@ -174,7 +174,7 @@ I'd rather say that plainly than let it pass as fully hand-written. There's a lo
 
 ## Exit status
 
-The script exits `1` if no matching files are found or a required tool is missing, and `0` otherwise — including when individual files ended up in the `error:` bucket of the summary. If you're scripting this (cron, CI, etc.), check the printed `error:` count rather than relying on the exit code to catch per-file failures.
+The script exits `1` if no matching files are found, a required tool is missing, or one or more files ended up in the `error:` bucket of the summary; it exits `0` otherwise. If you're scripting this (cron, CI, etc.), the exit code alone tells you whether anything went wrong, but check the printed summary for the `changed`/`unchanged`/`skipped`/`error` breakdown.
 
 ## License
 
