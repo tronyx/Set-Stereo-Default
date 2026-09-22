@@ -70,6 +70,7 @@ Usage:
   python3 set_stereo_default.py /path/to/videos --no-progress
   python3 set_stereo_default.py /path/to/videos --log-file run.log
   python3 set_stereo_default.py /path/to/videos --log-file run.log --no-progress
+  python3 set_stereo_default.py /path/to/videos --jobs 4
 
 Safe by default:
   - Skips any file already in the correct state (no unnecessary work).
@@ -92,6 +93,7 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 try:
@@ -234,8 +236,9 @@ def probe_audio_streams(path):
 
 def choose_target(streams, prefer_lang):
     """Return (stream, note): the 2-channel audio stream to mark default.
-    stream is None if none qualify; note explains a skip, or an ambiguous
-    pick among multiple 2-channel tracks that --prefer-lang didn't resolve."""
+    stream is None if none qualify -- either no 2-channel track exists, or
+    multiple do and --prefer-lang didn't narrow it to exactly one; note
+    explains the skip in both cases."""
     candidates = [s for s in streams if s["channels"] == 2]
     if not candidates:
         return None, "no 2-channel audio track found"
@@ -248,9 +251,8 @@ def choose_target(streams, prefer_lang):
     desc = ", ".join(
         f"stream#{s['index']} ({s['language'] or 'und'}/{s['codec']})" for s in candidates
     )
-    return candidates[0], (
-        f"multiple 2-channel tracks found [{desc}] -- picked stream#{candidates[0]['index']} "
-        f"(use --prefer-lang to disambiguate)"
+    return None, (
+        f"multiple 2-channel tracks found [{desc}] -- use --prefer-lang to disambiguate"
     )
 
 
@@ -415,6 +417,16 @@ def process_file(path, args, need_mkv):
     was already right, so a normal run would have skipped them and left the
     moov-at-the-end problem in place).
     """
+    try:
+        return _process_file(path, args)
+    except Exception as exc:
+        log.error(f"  {path.name}: unexpected error, skipping rest of file ({exc})")
+        return "error"
+
+
+def _process_file(path, args):
+    """Does the actual work for process_file(); split out so process_file can
+    wrap it in one try/except without duplicating the wrapper's logic."""
     streams, duration = probe_audio_streams(path)
     if streams is None:
         return "error"
@@ -426,8 +438,6 @@ def process_file(path, args, need_mkv):
     if target is None:
         log.info(f"  {path.name}: SKIP ({note})")
         return "skipped"
-    if note:
-        log.info(f"  {path.name}: {note}")
 
     ext = path.suffix.lower()
     is_avi_reorder = ext in AVI_EXTS and args.avi_reorder
@@ -448,7 +458,9 @@ def process_file(path, args, need_mkv):
     log.info(f"  {path.name}: setting stream#{target['index']} "
              f"({target['language'] or 'und'}, {target['codec']}) as default audio")
 
-    show_progress = HAVE_TQDM and not args.no_progress
+    # Per-file % bars all render at the same tqdm position, so they only make
+    # sense with one file in flight at a time -- disabled under --jobs > 1.
+    show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1
 
     if ext in MKV_EXTS:
         ok = apply_mkv(path, streams, target["index"], args.dry_run, args.backup,
@@ -481,15 +493,26 @@ def iter_files(paths, exts, recursive):
 
 
 def main():
-    """Parse args, discover matching files, process them one at a time, and
-    print a final summary.
+    """Parse args, discover matching files, process them (sequentially or
+    concurrently, depending on --jobs), and print a final summary.
 
     The "Found N file(s)" header is logged (so it lands in --log-file too)
     and then printed again directly when --log-file is set, since it should
     stay visible on the console even though the per-file details are being
     routed to the log file instead.
 
-    Progress-bar row stack (top to bottom) when a bar is active:
+    --jobs 1 (default) uses the sequential path described below. --jobs N>1
+    instead submits every file to a ThreadPoolExecutor up front (threads,
+    not processes, since the work is waiting on ffmpeg/mkvmerge subprocesses
+    rather than CPU-bound) and only the main thread -- iterating via
+    as_completed() -- touches stats/the progress bar, so no locking is
+    needed. There's no live per-file % bar in that path (N files in flight
+    would fight over the same bar position), just one overall bar updated
+    as each file finishes; log lines from different files' workers can
+    interleave, though each line itself stays intact since logging is
+    thread-safe.
+
+    Progress-bar row stack (top to bottom) when a bar is active and --jobs 1:
       position=0  per-file bar (created/closed per file by run_with_progress)
       position=1  spacer: a real, blank tqdm row so the gap below the
                   per-file bar survives every redraw -- a plain print() here
@@ -538,7 +561,16 @@ def main():
                           "The console still shows a progress bar and the final summary.")
     ap.add_argument("--no-progress", action="store_true",
                      help="Disable the progress bar (e.g. for non-interactive/CI logs)")
+    ap.add_argument("--jobs", type=int, default=1, metavar="N",
+                     help="Number of files to remux concurrently (default: 1 = sequential). "
+                          "This work is I/O-bound, not CPU-bound, so pick a value based on "
+                          "what your storage can sustain rather than core count. The live "
+                          "per-file %% bar is disabled when N > 1; log lines from different "
+                          "files may interleave.")
     args = ap.parse_args()
+
+    if args.jobs < 1:
+        ap.error("--jobs must be >= 1")
 
     setup_logging(args.log_file)
 
@@ -558,25 +590,53 @@ def main():
         print(header)
 
     stats = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
-
     use_bar = HAVE_TQDM and not args.no_progress
-    spacer = tqdm(total=1, position=1, bar_format="{desc}", desc="", leave=False) if use_bar else None
-    iterator = tqdm(files, unit="file", desc="Processing", position=2, leave=False) if use_bar else files
     show_fallback_counter = args.log_file and not use_bar
 
-    for i, f in enumerate(iterator, 1):
-        if show_fallback_counter:
-            print(f"\rProcessing {i}/{len(files)}...", end="", flush=True)
-        log.info(f"\n[{i}/{len(files)}] {f}")
-        result = process_file(f, args, need_mkv)
-        stats[result] = stats.get(result, 0) + 1
+    if args.jobs == 1:
+        spacer = tqdm(total=1, position=1, bar_format="{desc}", desc="", leave=False) if use_bar else None
+        iterator = tqdm(files, unit="file", desc="Processing", position=2, leave=False) if use_bar else files
 
-    if use_bar:
-        iterator.close()
-        spacer.close()
-        print()
-    if show_fallback_counter:
-        print()
+        for i, f in enumerate(iterator, 1):
+            if show_fallback_counter:
+                print(f"\rProcessing {i}/{len(files)}...", end="", flush=True)
+            log.info(f"\n[{i}/{len(files)}] {f}")
+            result = process_file(f, args, need_mkv)
+            stats[result] = stats.get(result, 0) + 1
+
+        if use_bar:
+            iterator.close()
+            spacer.close()
+            print()
+        if show_fallback_counter:
+            print()
+    else:
+        # Concurrent path: no per-file bar (they'd all fight over the same tqdm
+        # position), just one overall bar/counter updated as each file finishes.
+        # Files are submitted in list order but may complete out of order.
+        def run_one(i, f):
+            log.info(f"\n[{i}/{len(files)}] {f}")
+            return process_file(f, args, need_mkv)
+
+        overall = tqdm(total=len(files), unit="file", desc="Processing", leave=False) if use_bar else None
+        completed = 0
+
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures = {pool.submit(run_one, i, f): f for i, f in enumerate(files, 1)}
+            for fut in as_completed(futures):
+                completed += 1
+                if show_fallback_counter:
+                    print(f"\rProcessing {completed}/{len(files)}...", end="", flush=True)
+                result = fut.result()
+                stats[result] = stats.get(result, 0) + 1
+                if overall:
+                    overall.update(1)
+
+        if overall:
+            overall.close()
+            print()
+        if show_fallback_counter:
+            print()
 
     summary_lines = ["", "----- Summary -----"]
     for k in ("changed", "unchanged", "skipped", "error"):
@@ -586,6 +646,9 @@ def main():
     if args.log_file:
         for line in summary_lines:
             print(line)
+
+    if stats["error"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

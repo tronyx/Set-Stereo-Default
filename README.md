@@ -12,6 +12,7 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 - **Format-aware.** Uses `mkvmerge` for `.mkv`/`.webm` and `ffmpeg` for everything else, each with format-specific fixes (see [How it works](#how-it-works)) so tools like Windows Explorer don't lose video thumbnails on the files it touches.
 - **Live progress.** A per-file and overall progress bar (via `tqdm`, if installed) so you can see how a large batch is going.
 - **Flexible logging.** Send detailed output to a log file with `--log-file` while the console stays clean.
+- **Concurrent processing.** `--jobs N` remuxes several files at once (default: `1`, one at a time) — useful since this work is mostly waiting on disk I/O, not CPU.
 
 ## Requirements
 
@@ -49,6 +50,9 @@ python3 set_stereo_default.py /path/to/videos --prefer-lang eng
 
 # Log details to a file, keep the console output to just the progress bar
 python3 set_stereo_default.py /path/to/videos --log-file run.log
+
+# Remux up to 4 files at once instead of one at a time
+python3 set_stereo_default.py /path/to/videos --jobs 4
 ```
 
 ### Options
@@ -64,8 +68,11 @@ python3 set_stereo_default.py /path/to/videos --log-file run.log
 | `--force` | Re-apply even to files that already look correct |
 | `--log-file PATH` | Write detailed output to a file instead of the console |
 | `--no-progress` | Disable the progress bar |
+| `--jobs N` | Remux up to `N` files concurrently (default: `1`, sequential) |
 
 `--ext` replaces the default extension list rather than adding to it — pass every extension you want included.
+
+`--jobs` is I/O-bound work, not CPU-bound, so pick a value based on what your storage can sustain rather than core count. Above `1`, the live per-file `%` bar is disabled (only the overall batch bar remains) and log lines from different files may interleave, since several files are being remuxed at the same time.
 
 Run `python3 set_stereo_default.py --help` for the full list with details.
 
