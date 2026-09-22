@@ -19,6 +19,7 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 - [ffmpeg / ffprobe](https://ffmpeg.org)
 - [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) — only needed if you have `.mkv`/`.webm` files
 - `tqdm` — optional, enables the progress bar (see [requirements.txt](requirements.txt))
+- Free disk space: every remux writes a full temp copy of the file next to the original before swapping it in, so you need free space roughly equal to your largest file (double that if you're also using `--backup`)
 
 ## Installation
 
@@ -26,7 +27,7 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 pip install -r requirements.txt
 ```
 
-Then make sure `ffmpeg`, `ffprobe`, and (if you have MKV/WebM files) `mkvmerge` are on your `PATH`.
+Then make sure `ffmpeg`, `ffprobe`, and (if you have MKV/WebM files) `mkvmerge` are installed and on your `PATH`.
 
 ## Usage
 
@@ -63,6 +64,8 @@ python3 set_stereo_default.py /path/to/videos --log-file run.log
 | `--force` | Re-apply even to files that already look correct |
 | `--log-file PATH` | Write detailed output to a file instead of the console |
 | `--no-progress` | Disable the progress bar |
+
+`--ext` replaces the default extension list rather than adding to it — pass every extension you want included.
 
 Run `python3 set_stereo_default.py --help` for the full list with details.
 
@@ -138,6 +141,12 @@ error: 0
 
 For each file, the script inspects every audio stream's channel count. The one stream with exactly 2 channels becomes "default"; every other audio stream gets its default flag cleared. If a file has zero or multiple 2-channel tracks, it's skipped and logged (use `--prefer-lang` to break ties).
 
+A file is skipped (and counted under `skipped:` in the summary) when:
+
+- It has no audio streams at all.
+- It has zero or multiple 2-channel tracks and `--prefer-lang` doesn't resolve the ambiguity.
+- It's an `.avi` file and `--avi-reorder` wasn't passed (AVI has no real "default" flag to set).
+
 How the change actually gets applied depends on the container:
 
 - **`.mkv` / `.webm`** — a clean single-pass remux via `mkvmerge`, rather than editing the file header in place. In-place edits can push the file's track metadata to the very end of the file, which is exactly the shape of file that breaks Windows Explorer's thumbnail generation even though the video plays fine everywhere else.
@@ -155,6 +164,10 @@ How the change actually gets applied depends on the container:
 This script was largely written with [Claude](https://claude.ai), Anthropic's AI coding assistant — I described what I needed, directed the design, and asked for changes across many iterations rather than writing most of the code by hand myself. Every feature went through real testing before landing here, including dry-run checks and stubbed test runs simulating `ffmpeg`/`mkvmerge` output, and the safety measures baked into the script (dry-run mode, temp-file-first remuxing, post-remux sanity checks) are exactly the kind of thing I insisted on because this touches a media library I actually care about.
 
 I'd rather say that plainly than let it pass as fully hand-written. There's a lot of AI-generated code floating around that hasn't been reviewed or tested and ends up breaking people's setups, and I don't want this to be mistaken for that. If something looks off, please open an issue.
+
+## Exit status
+
+The script exits `1` if no matching files are found or a required tool is missing, and `0` otherwise — including when individual files ended up in the `error:` bucket of the summary. If you're scripting this (cron, CI, etc.), check the printed `error:` count rather than relying on the exit code to catch per-file failures.
 
 ## License
 
