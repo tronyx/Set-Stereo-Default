@@ -4,6 +4,7 @@ and subprocess behavior is exercised with small Python child processes."""
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -275,6 +276,26 @@ def test_interrupted_remux_keeps_the_original(remux):
         apply()
     assert video.read_bytes() == b"original"
     assert not leftover_temp_files(video)
+
+
+@pytest.mark.parametrize("apply, tool", [
+    (lambda p: ssd.apply_mkv(p, ORIGINAL_AUDIO, 2, dry_run=True, backup=False), "mkvmerge"),
+    (lambda p: ssd.apply_remux(p, ORIGINAL_AUDIO, 2, dry_run=True, backup=False,
+                               reorder_for_avi=False), "ffmpeg"),
+], ids=["mkvmerge", "ffmpeg"])
+def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, caplog, apply, tool):
+    caplog.set_level("INFO")
+    video = tmp_path / "Show (2026) - S01E01 [WEBDL-1080p][AAC 2.0] Joey's.mkv"
+    video.write_bytes(b"original")
+
+    assert apply(video) is True
+
+    printed = caplog.text.split("[dry-run] ", 1)[1].strip()
+    args = shlex.split(printed)
+    assert args[0] == tool
+    assert str(video) in args
+    assert str(video) + ssd.TMP_MARKER + ".mkv" in args
+    assert video.read_bytes() == b"original"
 
 
 def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatch):

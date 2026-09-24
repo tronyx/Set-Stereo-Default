@@ -69,6 +69,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -397,7 +398,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     args += [str(path)]
 
     if dry_run:
-        log.info("    [dry-run] " + " ".join(args))
+        log.info("    [dry-run] " + shlex.join(args))
         return True
 
     pct_re = re.compile(r"#GUI#progress\s+(\d+)%")
@@ -478,7 +479,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     ] + disp_args + extra_args + [str(tmp_path)]
 
     if dry_run:
-        log.info("    [dry-run] " + " ".join(cmd))
+        log.info("    [dry-run] " + shlex.join(cmd))
         return True
 
     def parse_pct(line):

@@ -147,7 +147,7 @@ Processing:  27%|█████████████████████
 
 ### Dry run
 
-`--dry-run` prints exactly what it would do — including the literal `mkvmerge`/`ffmpeg` command it would run — without touching any files:
+`--dry-run` prints exactly what it would do without touching any files, including the `mkvmerge`/`ffmpeg` command it would run, quoted so you can paste it into a shell:
 
 ```text
 $ python3 set_stereo_default.py "/path/to/videos/TV Shows/Awesome Show (2026)/Season 04/" --dry-run
@@ -155,17 +155,17 @@ Found 8 file(s) (dry run).
 
 [1/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
   Awesome Show (2026) - S04E01 - Episode 25.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode -o .../S04E01 - Episode 25.mkv.tmp_remux.mkv --default-track-flag 1:yes --default-track-flag 4:no .../S04E01 - Episode 25.mkv
+    [dry-run] mkvmerge --gui-mode -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --default-track-flag 1:yes --default-track-flag 4:no '.../S04E01 - Episode 25.mkv'
 
 [2/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E02 - Episode 26.mkv
   Awesome Show (2026) - S04E02 - Episode 26.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode -o .../S04E02 - Episode 26.mkv.tmp_remux.mkv --default-track-flag 1:yes --default-track-flag 3:no .../S04E02 - Episode 26.mkv
+    [dry-run] mkvmerge --gui-mode -o '.../S04E02 - Episode 26.mkv.tmp_remux.mkv' --default-track-flag 1:yes --default-track-flag 3:no '.../S04E02 - Episode 26.mkv'
 
 ...
 
 [8/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E08 - Episode 32.mkv
   Awesome Show (2026) - S04E08 - Episode 32.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode -o .../S04E08 - Episode 32.mkv.tmp_remux.mkv --default-track-flag 1:yes --default-track-flag 4:no .../S04E08 - Episode 32.mkv
+    [dry-run] mkvmerge --gui-mode -o '.../S04E08 - Episode 32.mkv.tmp_remux.mkv' --default-track-flag 1:yes --default-track-flag 4:no '.../S04E08 - Episode 32.mkv'
 
 ----- Summary -----
 changed: 8
