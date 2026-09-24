@@ -123,20 +123,20 @@ error: 0
 $ python3 scripts/fix_default_audio_track.py /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/ --jobs 5
 Found 5 file(s).
 
-[5/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E05 - Episode 52.mkv                                                                                                                                            
+[5/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E05 - Episode 45.mkv                                                                                                                                            
   Awesome Show (2026) - S06E05 - Episode 52.mkv: setting stream#1 (eng, aac) as default audio
 
-[3/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E15 - The One That Could Have Been 1 [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv                                                                                                                                
-  Awesome Show (2026) - S06E15 - The One That Could Have Been 1 [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv: setting stream#1 (eng, aac) as default audio
+[3/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E03 - Episode 43.mkv                                                                                                                                
+  Awesome Show (2026) - S06E03 - Episode 43.mkv: setting stream#1 (eng, aac) as default audio
 
-[2/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E14 - The One Where Chandler Cant Cry [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv                                                                                                                               
-  Awesome Show (2026) - S06E14 - The One Where Chandler Cant Cry [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv: setting stream#1 (eng, aac) as default audio
+[2/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E02 - Episode 42.mkv                                                                                                                               
+  Awesome Show (2026) - S06E02 - Episode 42.mkv: setting stream#1 (eng, aac) as default audio
 
-[1/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E13 - The One with Rachels Sister [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv                                                                                                                                   
-  Awesome Show (2026) - S06E13 - The One with Rachels Sister [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv: setting stream#1 (eng, aac) as default audio
+[1/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E01 - Episode 41.mkv                                                                                                                                   
+  Awesome Show (2026) - S06E01 - Episode 41.mkv: setting stream#1 (eng, aac) as default audio
 
-[4/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E16 - The One That Could Have Been 2 [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv                                                                                                                                
-  Awesome Show (2026) - S06E16 - The One That Could Have Been 2 [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv: setting stream#1 (eng, aac) as default audio
+[4/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E04 - Episode 44.mkv                                                                                                                                
+  Awesome Show (2026) - S06E04 - Episode 44.mkv: setting stream#1 (eng, aac) as default audio
 
 Processing:  27%|██████████████████████████████████████████████████████▊                                                                                                                                                    | 1.35/5 [00:04<00:12,  3.56s/file]
 
