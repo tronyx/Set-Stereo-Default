@@ -567,15 +567,13 @@ def main():
     Either way, each file's "[i/N] path" header and outcome are logged
     together as one call (see process_file()'s docstring for why).
 
-    Under --jobs N>1, the overall bar's count is a live, fractional sum of
-    every in-flight file's own progress (via on_progress, see
-    run_with_progress()) rather than only jumping by whole files as each
-    completes: with --jobs close to the file count, files tend to start
-    and finish together, so a whole-file-count bar would sit at 0% until
-    the very end. Its bar_format pins the count to 2 decimals to avoid
-    binary-float noise (e.g. "2.4300000000000006"), and updates from
-    different worker threads are serialized with a lock. Under --jobs 1
-    the overall bar simply counts whole files.
+    The overall bar's count is a live, fractional sum of every in-flight
+    file's own progress (via on_progress, see run_with_progress()) rather
+    than only jumping by whole files as each completes, so it keeps moving
+    during a long remux instead of sitting still until the file finishes.
+    Its bar_format pins the count to 2 decimals to avoid binary-float
+    noise (e.g. "2.4300000000000006"), and updates are serialized with a
+    lock since under --jobs N>1 several worker threads report at once.
 
     tqdm row layout (top to bottom): under --jobs N>1, a spacer then the
     overall bar; under --jobs 1, the per-file bar then that same spacer
@@ -660,57 +658,43 @@ def main():
     active_bars = []
 
     try:
-        if args.jobs == 1:
-            spacer = tqdm(total=1, position=1, bar_format="{desc}", desc="", leave=False) if use_bar else None
-            iterator = tqdm(files, unit="file", desc="Processing", position=2, leave=False) if use_bar else files
-            if use_bar:
-                active_bars += [spacer, iterator]
+        first_row = 1 if args.jobs == 1 else 0
+        spacer = tqdm(total=1, position=first_row, bar_format="{desc}", desc="", leave=False) if use_bar else None
+        overall = tqdm(total=len(files), unit="file", desc="Processing", position=first_row + 1,
+                        bar_format="{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                        leave=False) if use_bar else None
+        if use_bar:
+            active_bars += [spacer, overall]
+        overall_lock = threading.Lock()
 
-            for i, f in enumerate(iterator, 1):
+        def run_one(i, f):
+            last_reported = 0.0
+
+            def on_progress(pct):
+                nonlocal last_reported
+                frac = pct / 100.0
+                with overall_lock:
+                    overall.n += frac - last_reported
+                    overall.refresh()
+                last_reported = frac
+
+            result = process_file(f, args, header=f"[{i}/{len(files)}] {f}",
+                                   on_progress=on_progress if overall else None)
+
+            if overall:
+                with overall_lock:
+                    overall.n += 1.0 - last_reported
+                    overall.refresh()
+            return result
+
+        if args.jobs == 1:
+            for i, f in enumerate(files, 1):
                 if show_fallback_counter:
                     print(f"\rProcessing {i}/{len(files)}...", end="", flush=True)
-                result = process_file(f, args, header=f"[{i}/{len(files)}] {f}")
+                result = run_one(i, f)
                 stats[result] = stats.get(result, 0) + 1
-
-            if use_bar:
-                iterator.close()
-                spacer.close()
-                print()
-            if show_fallback_counter:
-                print()
         else:
-            spacer = tqdm(total=1, position=0, bar_format="{desc}", desc="", leave=False) if use_bar else None
-            overall = tqdm(total=len(files), unit="file", desc="Processing", position=1,
-                            bar_format="{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
-                            leave=False) if use_bar else None
-            if use_bar:
-                active_bars += [spacer, overall]
-            overall_lock = threading.Lock()
-
-            def run_one(i, f):
-                header = f"[{i}/{len(files)}] {f}"
-
-                last_reported = 0.0
-
-                def on_progress(pct):
-                    nonlocal last_reported
-                    frac = pct / 100.0
-                    with overall_lock:
-                        overall.n += frac - last_reported
-                        overall.refresh()
-                    last_reported = frac
-
-                result = process_file(f, args, header=header,
-                                       on_progress=on_progress if overall else None)
-
-                if overall:
-                    with overall_lock:
-                        overall.n += 1.0 - last_reported
-                        overall.refresh()
-                return result
-
             completed = 0
-
             with ThreadPoolExecutor(max_workers=args.jobs) as pool:
                 futures = {pool.submit(run_one, i, f): f for i, f in enumerate(files, 1)}
                 for fut in as_completed(futures):
@@ -720,12 +704,12 @@ def main():
                     result = fut.result()
                     stats[result] = stats.get(result, 0) + 1
 
-            if overall:
-                overall.close()
-                spacer.close()
-                print()
-            if show_fallback_counter:
-                print()
+        if overall:
+            overall.close()
+            spacer.close()
+            print()
+        if show_fallback_counter:
+            print()
     except KeyboardInterrupt:
         for bar in active_bars:
             try:
