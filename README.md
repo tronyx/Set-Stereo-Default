@@ -204,6 +204,17 @@ I'd rather say that plainly than let it pass as fully hand-written. There's a lo
 
 The script exits `1` if no matching files are found, a required tool is missing, or one or more files ended up in the `error:` bucket of the summary; `130` if you interrupt it with Ctrl+C; and `0` otherwise. If you're scripting this (cron, CI, etc.), the exit code alone tells you whether anything went wrong, but check the printed summary for the `changed`/`unchanged`/`skipped`/`error` breakdown.
 
+## Running the tests
+
+The tests cover the script's own logic: choosing the track, finding files, backups, checking a remux before it replaces the original, progress reporting, and Ctrl+C cleanup. Anything that would call ffmpeg, ffprobe or mkvmerge is replaced with a stand-in, so none of those need to be installed:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Because the real tools are never run, the tests can't tell you whether ffmpeg or mkvmerge will accept a changed command. If you change how the script calls them, also try it on a few real files, starting with `--dry-run`.
+
 ## License
 
 MIT — see [LICENSE.md](LICENSE.md).
