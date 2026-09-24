@@ -299,6 +299,19 @@ def plan_changes(streams, target_index):
     return desired, changed
 
 
+def make_backup(path):
+    """Keep the pre-change original as <name>.bak. A hard link is instant
+    and takes no extra space -- once os.replace() swaps the new file in,
+    the original's data stays reachable through the .bak link -- so a full
+    copy is only made where hard links aren't supported."""
+    bak_path = path.with_name(path.name + ".bak")
+    bak_path.unlink(missing_ok=True)
+    try:
+        os.link(path, bak_path)
+    except OSError:
+        shutil.copy2(path, bak_path)
+
+
 def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
               on_progress=None):
     """Clean single-pass remux via mkvmerge (not an in-place mkvpropedit
@@ -347,7 +360,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         return False
 
     if backup:
-        shutil.copy2(path, path.with_name(path.name + ".bak"))
+        make_backup(path)
 
     os.replace(tmp_path, path)
     return True
@@ -433,8 +446,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
         return False
 
     if backup:
-        bak_path = path.with_name(path.name + ".bak")
-        shutil.copy2(path, bak_path)
+        make_backup(path)
 
     os.replace(tmp_path, path)
     return True
