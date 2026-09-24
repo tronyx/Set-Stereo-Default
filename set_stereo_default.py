@@ -643,7 +643,10 @@ def main():
     than only jumping by whole files as each completes, so it keeps moving
     during a long remux instead of sitting still until the file finishes.
     Its bar_format pins the count to 2 decimals to avoid binary-float
-    noise (e.g. "2.4300000000000006"), and updates are serialized with a
+    noise (e.g. "2.4300000000000006"). Each update is also rounded and
+    capped at the total, since adding up hundreds of small steps can drift
+    just past it (2.0000000000000004 of 2 files), which makes tqdm print a
+    warning and a negative time remaining. Updates are serialized with a
     lock since under --jobs N>1 several worker threads report at once.
 
     tqdm row layout (top to bottom): under --jobs N>1, a spacer then the
@@ -738,24 +741,25 @@ def main():
             active_bars += [spacer, overall]
         overall_lock = threading.Lock()
 
+        def advance_overall(delta):
+            with overall_lock:
+                overall.n = min(round(overall.n + delta, 6), overall.total)
+                overall.refresh()
+
         def run_one(i, f):
             last_reported = 0.0
 
             def on_progress(pct):
                 nonlocal last_reported
                 frac = pct / 100.0
-                with overall_lock:
-                    overall.n += frac - last_reported
-                    overall.refresh()
+                advance_overall(frac - last_reported)
                 last_reported = frac
 
             result = process_file(f, args, header=f"[{i}/{len(files)}] {f}",
                                    on_progress=on_progress if overall else None)
 
             if overall:
-                with overall_lock:
-                    overall.n += 1.0 - last_reported
-                    overall.refresh()
+                advance_overall(1.0 - last_reported)
             return result
 
         if args.jobs == 1:

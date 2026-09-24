@@ -435,3 +435,34 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
 
     assert {round(0.25 * i, 2) for i in range(1, 13)} <= set(shown)
     assert max(shown) == 3.0
+
+
+@pytest.mark.filterwarnings("error")
+def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
+    """Two files reporting 1% at a time used to add up to
+    2.0000000000000004, which made tqdm warn and show a negative ETA."""
+    pytest.importorskip("tqdm")
+    for name in ("a.mkv", "b.mkv"):
+        (tmp_path / name).write_text("x")
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        for pct in range(1, 99):
+            on_progress(pct)
+        return "changed"
+
+    finals = []
+
+    class RecordingTqdm(ssd.tqdm):
+        def close(self):
+            if self.desc == "Processing":
+                finals.append(self.n)
+            return super().close()
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path)])
+
+    ssd.main()
+
+    assert finals and set(finals) == {2}
