@@ -180,6 +180,8 @@ A file is skipped (and counted under `skipped:` in the summary) when:
 - It has zero or multiple 2-channel tracks and `--prefer-lang` doesn't resolve the ambiguity.
 - It's an `.avi` file and `--avi-reorder` wasn't passed (AVI has no real "default" flag to set).
 
+If a run is killed outright (`kill -9`, a reboot, a container stopping) rather than stopped with Ctrl+C, a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning instead of treating them as videos. They're safe to delete, since the original is only replaced after a remux fully succeeds.
+
 How the change actually gets applied depends on the container:
 
 - **`.mkv` / `.webm`** — a clean single-pass remux via `mkvmerge`, rather than editing the file header in place. In-place edits can push the file's track metadata to the very end of the file, which is exactly the shape of file that breaks Windows Explorer's thumbnail generation even though the video plays fine everywhere else.
