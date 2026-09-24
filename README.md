@@ -213,6 +213,8 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
+GitHub also runs them automatically on every push and pull request, on the oldest and newest supported Python versions (see [.github/workflows/tests.yml](.github/workflows/tests.yml)).
+
 Because the real tools are never run, the tests can't tell you whether ffmpeg or mkvmerge will accept a changed command. If you change how the script calls them, also try it on a few real files, starting with `--dry-run`.
 
 ## License
