@@ -71,6 +71,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -162,7 +163,9 @@ def run(cmd, **kw):
 def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
     """Run cmd, streaming stdout+stderr line by line so a live bar can be
     driven while the subprocess is still running. Returns (returncode,
-    combined_output).
+    output), where output is only the last 50 lines -- that's where a
+    failure's error message ends up, and ffmpeg's -progress output would
+    otherwise pile up thousands of lines on a long file.
 
     parse_pct(line) returns an int 0-100 for progress lines, else None.
     show_progress/position control an optional tqdm bar; label (truncated)
@@ -184,7 +187,7 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     if show_progress and HAVE_TQDM:
         bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=position)
     last_pct = 0
-    lines = []
+    lines = deque(maxlen=50)
     try:
         for line in proc.stdout:
             lines.append(line)
