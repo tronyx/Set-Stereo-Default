@@ -325,8 +325,10 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     """Clean single-pass remux via mkvmerge (not an in-place mkvpropedit
     edit -- see the module docstring). mkvmerge track IDs happen to match
     ffprobe's stream index for mkv containers, so each stream's ffprobe
-    index doubles as its mkvmerge TID below. Returns True on success,
-    False on failure (already logged).
+    index doubles as its mkvmerge TID below. The original file isn't
+    touched until the final swap, so if the remux fails or is interrupted
+    the temp file is simply deleted. Returns True on success, False on
+    failure (already logged).
     """
     tmp_path = path.with_name(path.name + ".tmp_remux" + path.suffix)
 
@@ -349,7 +351,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     try:
         returncode, output = run_with_progress(args, path.name, show_progress, parse_pct, position, on_progress)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)  # never the original file; always safe to discard
+        tmp_path.unlink(missing_ok=True)
         raise
     if returncode != 0 or not tmp_path.exists():
         if _cancelled.is_set():
@@ -381,8 +383,10 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     first, since AVI has no real "default" flag). mp4/m4v/mov gets
     -movflags +faststart so the moov atom stays at the front of the file
     (see the module docstring). A post-remux ffprobe sanity check runs
-    before the atomic os.replace() that swaps the temp file in. Returns
-    True on success, False on failure (already logged).
+    before the atomic os.replace() that swaps the temp file in; until then
+    the original is untouched, so a failed or interrupted remux just
+    deletes the temp file. Returns True on success, False on failure
+    (already logged).
     """
     suffix = path.suffix
     tmp_path = path.with_name(path.name + ".tmp_remux" + suffix)
@@ -432,7 +436,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     try:
         returncode, output = run_with_progress(cmd, path.name, show_progress, parse_pct, position, on_progress)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)  # never the original file; always safe to discard
+        tmp_path.unlink(missing_ok=True)
         raise
     if returncode != 0 or not tmp_path.exists():
         if _cancelled.is_set():
@@ -517,7 +521,7 @@ def _process_file(path, args, position=0, header="", on_progress=None):
     log.info(f"{prefix}  {path.name}: setting stream#{target['index']} "
              f"({target['language'] or 'und'}, {target['codec']}) as default audio")
 
-    show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1  # per-file bar: --jobs 1 only
+    show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1
 
     if ext in MKV_EXTS:
         ok = apply_mkv(path, streams, target["index"], args.dry_run, args.backup,
