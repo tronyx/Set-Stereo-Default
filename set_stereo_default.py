@@ -411,8 +411,6 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
         log.info("    [dry-run] " + " ".join(cmd))
         return True
 
-    duration = duration if show_progress else None
-
     def parse_pct(line):
         line = line.strip()
         if duration and line.startswith("out_time_us="):
