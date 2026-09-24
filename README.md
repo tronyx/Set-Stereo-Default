@@ -94,9 +94,9 @@ Found 32 file(s).
 
 [12/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 02/Awesome Show (2026) - S02E04 - Episode 12.mkv
   Awesome Show (2026) - S02E04 - Episode 12.mkv: setting stream#1 (eng, aac) as default audio
-  Awesome Show (2026) - S02E04 - A Night at t: 100%|████████████████████████████| 100/100 [00:21<00:00,  7.07%/s]
+  Awesome Show (2026) - S02E04 - A Night at t:  45%|████████████▌               | 45/100 [00:09<00:11,  4.87%/s]
 
-Processing:  34%|██████████████                                    | 11/32 [06:05<09:51, 28.14s/file]
+Processing:  36%|██████████████▊                                   | 11.45/32 [06:05<10:48, 31.56s/file]
 
 ...
 
@@ -107,7 +107,7 @@ Processing:  34%|██████████████                     
   Awesome Show (2026) - S04E02 - Episode 26.mkv: already correct (stream#1 is default), skipping
 ```
 
-Files that already have the right track marked default are left untouched — no remux, no per-file progress bar, just a one-line note before the script moves on. This example is a sequential (`--jobs 1`) run: the top bar tracks the file currently remuxing, and the bottom one tracks the whole batch and stays pinned to the last line. Under `--jobs N > 1` there's no per-file bar, just the batch one (see [Options](#options)). Once every file's been processed, you'll get a summary like:
+Files that already have the right track marked default are left untouched — no remux, no per-file progress bar, just a one-line note before the script moves on. This example is a sequential (`--jobs 1`) run: the top bar tracks the file currently remuxing, and the bottom one tracks the whole batch and stays pinned to the last line. The batch bar moves as the current file progresses rather than waiting for it to finish, which is why its count is fractional (11.45 files done out of 32). Under `--jobs N > 1` there's no per-file bar, just the batch one (see [Options](#options)). Once every file's been processed, you'll get a summary like:
 
 ```text
 ----- Summary -----
