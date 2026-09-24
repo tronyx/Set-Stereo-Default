@@ -53,7 +53,8 @@ Safe by default:
   - Already-correct files are skipped; --dry-run previews changes without
     touching anything.
   - Every remux goes to a temp file first and only replaces the original
-    after a sanity check passes.
+    after a check confirms no streams were lost and the right audio track
+    is now the default.
   - --backup keeps the pre-change original as "<name>.bak" (a hard link
     where supported, so it takes no extra space).
   - --force re-applies even to files that already look correct, e.g. to
@@ -308,6 +309,61 @@ def needs_change(streams, target_index):
     return any((s["index"] == target_index) != s["default"] for s in streams)
 
 
+def probe_layout(path):
+    """Return every stream in path (type, codec, channels, language and
+    default flag, in file order), or None if ffprobe can't read the file."""
+    res = run([
+        "ffprobe", "-v", "error", "-print_format", "json", "-show_entries",
+        "stream=index,codec_type,codec_name,channels:stream_disposition=default:stream_tags=language",
+        str(path),
+    ])
+    if res.returncode != 0:
+        return None
+    try:
+        return json.loads(res.stdout).get("streams", [])
+    except json.JSONDecodeError:
+        return None
+
+
+def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
+    """Check a finished remux before it replaces the original. Returns None
+    if it looks right, otherwise a short reason why not.
+
+    The new file must have the same number of streams as the original, so
+    nothing was dropped. Then the target audio track must be where it
+    belongs. Normally that means it's the only audio track flagged default;
+    remuxing keeps audio tracks in their original order, so the target is
+    identified by its position among them. After an AVI reorder
+    (reordered=True), the first audio track must match the target's codec,
+    channel count and language instead, since AVI has no default flag."""
+    before = probe_layout(orig_path)
+    after = probe_layout(tmp_path)
+    if before is None or after is None:
+        return "ffprobe couldn't read the file"
+    if len(after) != len(before):
+        return f"stream count changed from {len(before)} to {len(after)}"
+
+    audio = [s for s in after if s.get("codec_type") == "audio"]
+    if len(audio) != len(streams):
+        return f"expected {len(streams)} audio tracks, found {len(audio)}"
+
+    target = next(s for s in streams if s["index"] == target_index)
+    if reordered:
+        first = audio[0]
+        lang = (first.get("tags") or {}).get("language", "")
+        if (first.get("codec_name") != target["codec"] or first.get("channels") != target["channels"]
+                or (target["language"] and lang != target["language"])):
+            return "target audio track didn't end up first"
+        return None
+
+    expected = audio[streams.index(target)]["index"]
+    defaults = [s["index"] for s in audio if (s.get("disposition") or {}).get("default")]
+    if defaults != [expected]:
+        found = ", ".join(f"stream#{i}" for i in defaults) or "no track"
+        return f"default flag is on {found}, expected only stream#{expected}"
+    return None
+
+
 def make_backup(path):
     """Keep the pre-change original as <name>.bak. A hard link is instant
     and takes no extra space -- once os.replace() swaps the new file in,
@@ -327,9 +383,10 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     edit -- see the module docstring). mkvmerge track IDs happen to match
     ffprobe's stream index for mkv containers, so each stream's ffprobe
     index doubles as its mkvmerge TID below. The original file isn't
-    touched until the final swap, so if the remux fails or is interrupted
-    the temp file is simply deleted. Returns True on success, False on
-    failure (already logged).
+    touched until verify_remux() has checked the result and the final swap
+    happens, so if the remux fails, is interrupted or is rejected, the temp
+    file is simply deleted. Returns True on success, False on failure
+    (already logged).
     """
     tmp_path = path.with_name(path.name + TMP_MARKER + path.suffix)
 
@@ -363,10 +420,9 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
             tmp_path.unlink(missing_ok=True)
         return False
 
-    check = run(["ffprobe", "-v", "error", "-show_entries", "format=nb_streams",
-                 "-of", "json", str(tmp_path)])
-    if check.returncode != 0:
-        log.error("    post-remux verification failed, keeping original untouched")
+    problem = verify_remux(path, tmp_path, streams, target_index, reordered=False)
+    if problem:
+        log.error(f"    post-remux check failed ({problem}), keeping original untouched")
         tmp_path.unlink(missing_ok=True)
         return False
 
@@ -383,9 +439,9 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     with reorder_for_avi, reordering streams so the target audio track is
     first, since AVI has no real "default" flag). mp4/m4v/mov gets
     -movflags +faststart so the moov atom stays at the front of the file
-    (see the module docstring). A post-remux ffprobe sanity check runs
-    before the atomic os.replace() that swaps the temp file in; until then
-    the original is untouched, so a failed or interrupted remux just
+    (see the module docstring). verify_remux() checks the result before
+    the atomic os.replace() that swaps the temp file in; until then the
+    original is untouched, so a failed, interrupted or rejected remux just
     deletes the temp file. Returns True on success, False on failure
     (already logged).
     """
@@ -393,8 +449,9 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     tmp_path = path.with_name(path.name + TMP_MARKER + suffix)
 
     audio_indices = [s["index"] for s in streams]
+    reordered = reorder_for_avi and suffix.lower() in AVI_EXTS
 
-    if reorder_for_avi and suffix.lower() in AVI_EXTS:
+    if reordered:
         others = [i for i in audio_indices if i != target_index]
         map_args = ["-map", "0:v?"]
         map_args += ["-map", f"0:{target_index}"]
@@ -448,11 +505,9 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
             tmp_path.unlink(missing_ok=True)
         return False
 
-    check = run(["ffprobe", "-v", "error", "-show_entries", "format=nb_streams",
-                 "-of", "json", str(tmp_path)])
-    ok = check.returncode == 0
-    if not ok:
-        log.error("    post-remux verification failed, keeping original untouched")
+    problem = verify_remux(path, tmp_path, streams, target_index, reordered)
+    if problem:
+        log.error(f"    post-remux check failed ({problem}), keeping original untouched")
         tmp_path.unlink(missing_ok=True)
         return False
 

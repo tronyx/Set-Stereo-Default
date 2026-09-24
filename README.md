@@ -8,7 +8,7 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 
 ## Features
 
-- **Safe by default.** Files already in the correct state are skipped. `--dry-run` shows exactly what would change without touching anything. Every remux goes to a temp file first and is only swapped in after a sanity check passes. Ctrl+C stops cleanly, too — in-flight remuxes are killed and their partial temp files removed; already-finished files are unaffected. (Exception: hardlinks & cross-seeding — see [Limitations](#limitations).)
+- **Safe by default.** Files already in the correct state are skipped. `--dry-run` shows exactly what would change without touching anything. Every remux goes to a temp file first and is only swapped in after a check confirms no streams were lost and the right audio track is now the default; if that check fails, the original is left untouched and the file is counted as an error. Ctrl+C stops cleanly, too — in-flight remuxes are killed and their partial temp files removed; already-finished files are unaffected. (Exception: hardlinks & cross-seeding — see [Limitations](#limitations).)
 - **Format-aware.** Uses `mkvmerge` for `.mkv`/`.webm` and `ffmpeg` for everything else, each with format-specific fixes (see [How it works](#how-it-works)) so tools like Windows Explorer don't lose video thumbnails on the files it touches.
 - **Live progress.** A live per-file `%` bar plus an overall batch bar (via `tqdm`, if installed) so you can see how a large batch is going. The per-file bar only shows up on sequential (`--jobs 1`) runs — see [Options](#options).
 - **Flexible logging.** Send detailed output to a log file with `--log-file` while the console stays clean.
