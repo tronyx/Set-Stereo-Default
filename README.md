@@ -8,9 +8,9 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 
 ## Features
 
-- **Safe by default.** Files already in the correct state are skipped. `--dry-run` shows exactly what would change without touching anything. Every remux goes to a temp file first and is only swapped in after a sanity check passes. (Exception: hardlinks & cross-seeding — see [Limitations](#limitations).)
+- **Safe by default.** Files already in the correct state are skipped. `--dry-run` shows exactly what would change without touching anything. Every remux goes to a temp file first and is only swapped in after a sanity check passes. Ctrl+C stops cleanly, too — in-flight remuxes are killed and their partial temp files removed; already-finished files are unaffected. (Exception: hardlinks & cross-seeding — see [Limitations](#limitations).)
 - **Format-aware.** Uses `mkvmerge` for `.mkv`/`.webm` and `ffmpeg` for everything else, each with format-specific fixes (see [How it works](#how-it-works)) so tools like Windows Explorer don't lose video thumbnails on the files it touches.
-- **Live progress.** A per-file and overall progress bar (via `tqdm`, if installed) so you can see how a large batch is going.
+- **Live progress.** A live per-file `%` bar plus an overall batch bar (via `tqdm`, if installed) so you can see how a large batch is going. The per-file bar only shows up on sequential (`--jobs 1`) runs — see [Options](#options).
 - **Flexible logging.** Send detailed output to a log file with `--log-file` while the console stays clean.
 - **Concurrent processing.** `--jobs N` remuxes several files at once (default: `1`, one at a time) — useful since this work is mostly waiting on disk I/O, not CPU.
 
@@ -72,25 +72,27 @@ python3 set_stereo_default.py /path/to/videos --jobs 4
 
 `--ext` replaces the default extension list rather than adding to it — pass every extension you want included.
 
-`--jobs` is I/O-bound work, not CPU-bound, so pick a value based on what your storage can sustain rather than core count. Above `1`, the live per-file `%` bar is disabled (only the overall batch bar remains) and log lines from different files may interleave, since several files are being remuxed at the same time.
+`--jobs` is I/O-bound work, not CPU-bound, so pick a value based on what your storage can sustain rather than core count. Above `1`, there's no per-file `%` bar — just the overall batch bar, which tracks the combined progress of every in-flight file — and log lines from different files may interleave, since several files are being remuxed at the same time.
 
 Run `python3 set_stereo_default.py --help` for the full list with details.
 
 ## Sample output
 
+### One Job At A Time
+
 ```text
-$ python3 set_stereo_default.py /path/to/videos/TV\ Shows/Awesome Show/
+$ python3 set_stereo_default.py /path/to/videos/TV\ Shows/Awesome Show (2026)/
 Found 32 file(s).
 
-[1/32] /path/to/videos/TV Shows/Awesome Show/Season 01/Awesome Show (2026) - S01E01 - Episode 1.mkv
+[1/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 01/Awesome Show (2026) - S01E01 - Episode 1.mkv
   Awesome Show (2026) - S01E01 - Episode 1.mkv: setting stream#1 (eng, aac) as default audio
 
-[2/32] /path/to/videos/TV Shows/Awesome Show/Season 01/Awesome Show (2026) - S01E02 - Episode 2.mkv
+[2/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 01/Awesome Show (2026) - S01E02 - Episode 2.mkv
   Awesome Show (2026) - S01E02 - Episode 2.mkv: setting stream#1 (eng, aac) as default audio
 
 ...
 
-[12/32] /path/to/videos/TV Shows/Awesome Show/Season 02/Awesome Show (2026) - S02E04 - Episode 12.mkv
+[12/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 02/Awesome Show (2026) - S02E04 - Episode 12.mkv
   Awesome Show (2026) - S02E04 - Episode 12.mkv: setting stream#1 (eng, aac) as default audio
   Awesome Show (2026) - S02E04 - A Night at t: 100%|████████████████████████████| 100/100 [00:21<00:00,  7.07%/s]
 
@@ -98,14 +100,14 @@ Processing:  34%|██████████████                     
 
 ...
 
-[25/32] /path/to/videos/TV Shows/Awesome Show/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
+[25/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
   Awesome Show (2026) - S04E01 - Episode 25.mkv: already correct (stream#1 is default), skipping
 
-[26/32] /path/to/videos/TV Shows/Awesome Show/Season 04/Awesome Show (2026) - S04E02 - Episode 26.mkv
+[26/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E02 - Episode 26.mkv
   Awesome Show (2026) - S04E02 - Episode 26.mkv: already correct (stream#1 is default), skipping
 ```
 
-Files that already have the right track marked default are left untouched — no remux, no per-file progress bar, just a one-line note before the script moves on. The top bar tracks the file currently remuxing; the bottom one tracks the whole batch and stays pinned to the last line. Once every file's been processed, you'll get a summary like:
+Files that already have the right track marked default are left untouched — no remux, no per-file progress bar, just a one-line note before the script moves on. This example is a sequential (`--jobs 1`) run: the top bar tracks the file currently remuxing, and the bottom one tracks the whole batch and stays pinned to the last line. Under `--jobs N > 1` there's no per-file bar, just the batch one (see [Options](#options)). Once every file's been processed, you'll get a summary like:
 
 ```text
 ----- Summary -----
@@ -115,25 +117,48 @@ skipped: 0
 error: 0
 ```
 
+### Multiple Jobs At A Time
+
+```text
+$ python3 scripts/fix_default_audio_track.py /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/ --jobs 5
+Found 5 file(s).
+
+[5/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E05 - Episode 52.mkv                                                                                                                                            
+  Awesome Show (2026) - S06E05 - Episode 52.mkv: setting stream#1 (eng, aac) as default audio
+
+[3/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E15 - The One That Could Have Been 1 [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv                                                                                                                                
+  Awesome Show (2026) - S06E15 - The One That Could Have Been 1 [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv: setting stream#1 (eng, aac) as default audio
+
+[2/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E14 - The One Where Chandler Cant Cry [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv                                                                                                                               
+  Awesome Show (2026) - S06E14 - The One Where Chandler Cant Cry [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv: setting stream#1 (eng, aac) as default audio
+
+[1/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E13 - The One with Rachels Sister [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv                                                                                                                                   
+  Awesome Show (2026) - S06E13 - The One with Rachels Sister [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv: setting stream#1 (eng, aac) as default audio
+
+[4/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E16 - The One That Could Have Been 2 [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv                                                                                                                                
+  Awesome Show (2026) - S06E16 - The One That Could Have Been 2 [AMZN WEBDL-1080p][AAC 2.0][h264]-Kitsune.mkv: setting stream#1 (eng, aac) as default audio
+
+Processing:  27%|██████████████████████████████████████████████████████▊                                                                                                                                                    | 1.35/5 [00:04<00:12,  3.56s/file]
+
 ### Dry run
 
 `--dry-run` prints exactly what it would do — including the literal `mkvmerge`/`ffmpeg` command it would run — without touching any files:
 
 ```text
-$ python3 set_stereo_default.py "/path/to/videos/TV Shows/Awesome Show/Season 04/" --dry-run
+$ python3 set_stereo_default.py "/path/to/videos/TV Shows/Awesome Show (2026)/Season 04/" --dry-run
 Found 8 file(s) (dry run).
 
-[1/8] /path/to/videos/TV Shows/Awesome Show/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
+[1/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
   Awesome Show (2026) - S04E01 - Episode 25.mkv: setting stream#1 (eng, aac) as default audio
     [dry-run] mkvmerge --gui-mode -o .../S04E01 - Episode 25.mkv.tmp_remux.mkv --default-track-flag 1:yes --default-track-flag 4:no .../S04E01 - Episode 25.mkv
 
-[2/8] /path/to/videos/TV Shows/Awesome Show/Season 04/Awesome Show (2026) - S04E02 - Episode 26.mkv
+[2/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E02 - Episode 26.mkv
   Awesome Show (2026) - S04E02 - Episode 26.mkv: setting stream#1 (eng, aac) as default audio
     [dry-run] mkvmerge --gui-mode -o .../S04E02 - Episode 26.mkv.tmp_remux.mkv --default-track-flag 1:yes --default-track-flag 3:no .../S04E02 - Episode 26.mkv
 
 ...
 
-[8/8] /path/to/videos/TV Shows/Awesome Show/Season 04/Awesome Show (2026) - S04E08 - Episode 32.mkv
+[8/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E08 - Episode 32.mkv
   Awesome Show (2026) - S04E08 - Episode 32.mkv: setting stream#1 (eng, aac) as default audio
     [dry-run] mkvmerge --gui-mode -o .../S04E08 - Episode 32.mkv.tmp_remux.mkv --default-track-flag 1:yes --default-track-flag 4:no .../S04E08 - Episode 32.mkv
 
@@ -174,7 +199,7 @@ I'd rather say that plainly than let it pass as fully hand-written. There's a lo
 
 ## Exit status
 
-The script exits `1` if no matching files are found, a required tool is missing, or one or more files ended up in the `error:` bucket of the summary; it exits `0` otherwise. If you're scripting this (cron, CI, etc.), the exit code alone tells you whether anything went wrong, but check the printed summary for the `changed`/`unchanged`/`skipped`/`error` breakdown.
+The script exits `1` if no matching files are found, a required tool is missing, or one or more files ended up in the `error:` bucket of the summary; `130` if you interrupt it with Ctrl+C; and `0` otherwise. If you're scripting this (cron, CI, etc.), the exit code alone tells you whether anything went wrong, but check the printed summary for the `changed`/`unchanged`/`skipped`/`error` breakdown.
 
 ## License
 

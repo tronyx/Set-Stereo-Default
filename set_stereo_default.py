@@ -9,80 +9,56 @@ the default flag from every other audio track.
 Requires on PATH:
   - ffmpeg / ffprobe   (https://ffmpeg.org)
   - mkvmerge           (part of MKVToolNix, https://mkvtoolnix.download)
-    -> only needed if you have .mkv/.webm files; not required for mp4/avi-only use.
+    -> only needed for .mkv/.webm files.
 
 Optional:
-  - tqdm (pip install tqdm) -> enables a live progress bar while files are
-    processed. Without it, a simple "[i/N]" counter is used instead.
+  - tqdm (pip install tqdm) -> live progress bars. Without it, a plain
+    "[i/N]" counter is used instead.
 
 How it decides the target track:
-  For each file, it inspects every audio stream's channel count. The stream
-  with exactly 2 channels becomes "default"; every other audio stream has its
-  default flag cleared. If no 2-channel track exists, or more than one does,
-  the file is skipped and logged (use --prefer-lang to break ties).
+  Each file's audio streams are inspected by channel count. The one stream
+  with exactly 2 channels becomes "default"; every other audio stream has
+  its default flag cleared. If zero or more than one 2-channel track
+  exists, the file is skipped (use --prefer-lang to break ties).
 
 How it applies the change:
-  - .mkv / .webm  -> mkvmerge does a clean single-pass remux (-c copy,
-                     lossless) with --default-track-flag set per track.
-                     Earlier versions of this script used mkvpropedit to
-                     edit the header in place instead, which is faster but
-                     has a real downside: when it needs to grow the Tracks
-                     element (almost always, since most muxers don't bother
-                     writing an explicit "default" flag when the default is
-                     already true), it doesn't shift the file -- it voids
-                     out the old Tracks slot and appends the new Tracks
-                     element at the very end of the file, after the Cues,
-                     reachable only via a SeekHead pointer. Full players
-                     resolve that fine, but it's exactly the shape of file
-                     that breaks a lightweight/bounded-read thumbnail
-                     extractor -- which is why Windows Explorer thumbnails
-                     can disappear for mkvpropedit-edited files even though
-                     the file plays perfectly. mkvmerge always lays a fresh
-                     mux out in the normal order (Tracks stays right after
-                     the segment info, near the front), so this doesn't
-                     happen. Attachments (cover art), subtitles and chapters
-                     all survive the remux unchanged.
-  - .mp4/.m4v/.mov and everything else ffmpeg can mux
-                  -> ffmpeg remuxes with `-c copy` (no re-encode) into a temp
-                     file and atomically replaces the original, with
-                     `-movflags +faststart` so the moov atom (the index
-                     players/thumbnailers read) stays at the front of the
-                     file instead of the end -- the same class of "plays
-                     fine, no thumbnail" problem as above, just mp4's
-                     version of it.
-  - .avi          -> AVI has no standard "default track" flag that players
-                     reliably honor. With --avi-reorder, the script instead
-                     re-muxes so the target audio stream is the FIRST audio
-                     stream (closest real-world equivalent to "default" for
-                     AVI, since most players that only look at one audio
-                     track in an AVI use the first one). Without that flag,
-                     AVI files are skipped with a warning.
+  - .mkv/.webm -> a clean remux via mkvmerge (-c copy, lossless), not an
+    in-place edit via mkvpropedit: editing in place can push the file's
+    track metadata to the end of the file, which is exactly the shape of
+    file that breaks Windows Explorer's thumbnail generation even though
+    the file plays fine everywhere else.
+  - .mp4/.m4v/.mov (and anything else ffmpeg can mux) -> ffmpeg remuxes
+    with -c copy plus -movflags +faststart, so the moov atom stays at the
+    front of the file for the same reason.
+  - .avi -> AVI has no real "default track" flag. --avi-reorder instead
+    makes the target stream the first audio stream (the closest
+    equivalent most players honor); without that flag, AVI files are
+    skipped.
 
 Usage:
   python3 set_stereo_default.py /path/to/videos
   python3 set_stereo_default.py /path/to/videos --dry-run
   python3 set_stereo_default.py file1.mkv file2.mp4
-  python3 set_stereo_default.py /path/to/videos --avi-reorder
+  python3 set_stereo_default.py /path/to/videos --ext mkv,mp4 --no-recursive
   python3 set_stereo_default.py /path/to/videos --prefer-lang eng
-  python3 set_stereo_default.py /path/to/videos --no-recursive --ext mkv,mp4
+  python3 set_stereo_default.py /path/to/videos --avi-reorder
   python3 set_stereo_default.py /path/to/videos --backup
   python3 set_stereo_default.py /path/to/videos --force
   python3 set_stereo_default.py /path/to/videos --no-progress
   python3 set_stereo_default.py /path/to/videos --log-file run.log
-  python3 set_stereo_default.py /path/to/videos --log-file run.log --no-progress
   python3 set_stereo_default.py /path/to/videos --jobs 4
 
 Safe by default:
-  - Skips any file already in the correct state (no unnecessary work).
-  - --dry-run shows exactly what would change without touching anything.
-  - Every remux (mkv, mp4, avi) goes to a temp file first and only replaces
-    the original after the tool exits successfully and a sanity check
-    passes; nothing is overwritten mid-write.
-  - Use --backup to keep the pre-change original as "<name>.bak" too.
-  - Use --force to re-apply to files that already look correct -- e.g. to
-    fix up mkv/mp4 files an older version of this script already touched
-    (their disposition flag was already right, so a normal run would skip
-    them and leave the Tracks-at-the-end / moov-at-the-end problem in place).
+  - Already-correct files are skipped; --dry-run previews changes without
+    touching anything.
+  - Every remux goes to a temp file first and only replaces the original
+    after a sanity check passes.
+  - --backup keeps the pre-change original as "<name>.bak".
+  - --force re-applies even to files that already look correct, e.g. to
+    backfill this temp-file-first fix onto files an older version of this
+    script already touched in place.
+  - Ctrl+C stops cleanly: in-flight remuxes are killed and their partial
+    temp files removed; already-finished files are unaffected.
 """
 
 import argparse
@@ -91,8 +67,10 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -136,6 +114,43 @@ def setup_logging(log_file):
     log.addHandler(handler)
 
 
+_active_procs = set()
+_active_procs_lock = threading.Lock()
+_cancelled = threading.Event()
+
+
+def _terminate_active_procs():
+    """Best-effort stop of every running mkvmerge/ffmpeg subprocess:
+    terminate() first, then kill() anything still alive after 5s."""
+    with _active_procs_lock:
+        procs = list(_active_procs)
+    for proc in procs:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    for proc in procs:
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+def _sigint_handler(signum, frame):
+    """Ctrl+C handler, always run in the main thread. Kills every
+    in-flight subprocess before raising the normal KeyboardInterrupt --
+    necessary because Python only ever delivers KeyboardInterrupt to the
+    main thread, so under --jobs > 1 a worker thread blocked reading its
+    own subprocess's output would otherwise never notice a Ctrl+C and
+    would keep that subprocess running as an orphan."""
+    _cancelled.set()
+    _terminate_active_procs()
+    signal.default_int_handler(signum, frame)
+
+
 def run(cmd, **kw):
     """Run cmd to completion and capture its output; for short,
     non-interactive calls (ffprobe queries, sanity checks). For a
@@ -144,38 +159,59 @@ def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
-def run_with_progress(cmd, label, show_progress, parse_pct):
-    """Run cmd, streaming its combined stdout+stderr line by line so a
-    per-file progress bar can be driven while the subprocess is still
-    running (plain subprocess.run only returns output after it exits).
+def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
+    """Run cmd, streaming stdout+stderr line by line so a live bar can be
+    driven while the subprocess is still running. Returns (returncode,
+    combined_output).
 
-    parse_pct(line) should return an int 0-100 for lines that carry
-    progress info, or None otherwise. Returns (returncode, combined_output).
+    parse_pct(line) returns an int 0-100 for progress lines, else None.
+    show_progress/position control an optional tqdm bar; label (truncated)
+    is shown on it. on_progress(pct), if given, fires on every increase
+    (and once more with 100 on success) independently of the bar -- used
+    by main()'s concurrent path to keep the overall bar's count live even
+    though individual files get no bar of their own there.
 
-    The per-file bar renders at position=0, above the batch-level rows
-    main() manages (see main()'s docstring for that row layout), so it's
-    always the topmost line while a file is being processed.
+    The subprocess is tracked in _active_procs for the duration of the
+    call and killed on any exception -- including a Ctrl+C landing in
+    this thread directly, which only happens when running sequentially --
+    so it's never left running as an orphan.
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, bufsize=1)
+    with _active_procs_lock:
+        _active_procs.add(proc)
     bar = None
     if show_progress and HAVE_TQDM:
-        bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=0)
+        bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=position)
     last_pct = 0
     lines = []
-    for line in proc.stdout:
-        lines.append(line)
-        pct = parse_pct(line)
-        if pct is not None and bar:
-            pct = max(0, min(100, pct))
-            if pct > last_pct:
-                bar.update(pct - last_pct)
-                last_pct = pct
-    proc.wait()
-    if bar:
+    try:
+        for line in proc.stdout:
+            lines.append(line)
+            pct = parse_pct(line)
+            if pct is not None:
+                pct = max(0, min(100, pct))
+                if pct > last_pct:
+                    if bar:
+                        bar.update(pct - last_pct)
+                    last_pct = pct
+                    if on_progress:
+                        on_progress(pct)
+        proc.wait()
         if last_pct < 100 and proc.returncode == 0:
-            bar.update(100 - last_pct)
-        bar.close()
+            if bar:
+                bar.update(100 - last_pct)
+            if on_progress:
+                on_progress(100)
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        with _active_procs_lock:
+            _active_procs.discard(proc)
+        if bar:
+            bar.close()
     return proc.returncode, "".join(lines)
 
 
@@ -263,16 +299,13 @@ def plan_changes(streams, target_index):
     return desired, changed
 
 
-def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False):
-    """Clean single-pass remux via mkvmerge, setting --default-track-flag per
-    track. Deliberately NOT mkvpropedit: see the module docstring -- editing
-    in place can relocate the Tracks element to the end of the file in a way
-    that breaks Windows Explorer's video thumbnail generation even though
-    the file still plays fine.
-
-    mkvmerge track IDs are 0-based across all tracks, which happens to match
+def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
+              on_progress=None):
+    """Clean single-pass remux via mkvmerge (not an in-place mkvpropedit
+    edit -- see the module docstring). mkvmerge track IDs happen to match
     ffprobe's stream index for mkv containers, so each stream's ffprobe
-    index doubles as its mkvmerge TID below.
+    index doubles as its mkvmerge TID below. Returns True on success,
+    False on failure (already logged).
     """
     tmp_path = path.with_name(path.name + ".tmp_remux" + path.suffix)
 
@@ -292,9 +325,16 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False)
         m = pct_re.search(line)
         return int(m.group(1)) if m else None
 
-    returncode, output = run_with_progress(args, path.name, show_progress, parse_pct)
+    try:
+        returncode, output = run_with_progress(args, path.name, show_progress, parse_pct, position, on_progress)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)  # never the original file; always safe to discard
+        raise
     if returncode != 0 or not tmp_path.exists():
-        log.error(f"    mkvmerge remux failed: {output.strip()}")
+        if _cancelled.is_set():
+            log.info("    cancelled (Ctrl+C)")
+        else:
+            log.error(f"    mkvmerge remux failed: {output.strip()}")
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
         return False
@@ -314,24 +354,14 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False)
 
 
 def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
-                 duration=None, show_progress=False):
-    """Remux with ffmpeg -c copy, setting disposition flags (and, for AVI,
-    reordering so the target audio stream comes first).
-
-    AVI reorder mode (reorder_for_avi): the target audio stream is remapped
-    to be first and the rest follow; subtitle/data streams (-map 0:s? -map
-    0:d?) are carried over too, since the explicit -map list built for the
-    reorder would otherwise drop them. Disposition ordinals are then rebuilt
-    to match the new output order, since the target is always a:0 there.
-
-    For .mp4/.m4v/.mov, -movflags +faststart is added so the moov atom (the
-    index players/thumbnailers read) stays at the front of the file instead
-    of the end -- see the module docstring for why that matters.
-
-    After a successful remux, a quick ffprobe sanity check confirms the
-    output has the same stream count as the input before the original is
-    replaced -- os.replace is atomic on the same filesystem, so the original
-    is never left partially written.
+                 duration=None, show_progress=False, position=0, on_progress=None):
+    """Remux with ffmpeg -c copy, setting disposition flags per stream (or,
+    with reorder_for_avi, reordering streams so the target audio track is
+    first, since AVI has no real "default" flag). mp4/m4v/mov gets
+    -movflags +faststart so the moov atom stays at the front of the file
+    (see the module docstring). A post-remux ffprobe sanity check runs
+    before the atomic os.replace() that swaps the temp file in. Returns
+    True on success, False on failure (already logged).
     """
     suffix = path.suffix
     tmp_path = path.with_name(path.name + ".tmp_remux" + suffix)
@@ -380,9 +410,16 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
             return int(out_time_us / 1_000_000 / duration * 100)
         return None
 
-    returncode, output = run_with_progress(cmd, path.name, show_progress, parse_pct)
+    try:
+        returncode, output = run_with_progress(cmd, path.name, show_progress, parse_pct, position, on_progress)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)  # never the original file; always safe to discard
+        raise
     if returncode != 0 or not tmp_path.exists():
-        log.error(f"    ffmpeg remux failed: {output.strip()}")
+        if _cancelled.is_set():
+            log.info("    cancelled (Ctrl+C)")
+        else:
+            log.error(f"    ffmpeg remux failed: {output.strip()}")
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
         return False
@@ -403,40 +440,45 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     return True
 
 
-def process_file(path, args, need_mkv):
+def process_file(path, args, need_mkv, position=0, header="", on_progress=None):
     """Probe one file, decide whether its default-audio flag needs fixing,
-    apply the fix, and return "changed"/"unchanged"/"skipped"/"error" for
-    the run's summary counts.
+    apply the fix, and return "changed"/"unchanged"/"skipped"/"error".
 
-    AVI carries no default-flag disposition, so idempotency there is judged
-    by stream order instead: is the target already the first audio stream?
+    AVI has no default-flag disposition, so idempotency there is judged by
+    stream order instead: is the target already the first audio stream?
+    --force re-applies even when the file already looks correct, e.g. to
+    backfill a fix an older version of this script already applied.
 
-    --force re-applies even when the disposition/order already looks
-    correct, e.g. to backfill -movflags faststart onto mp4/mov files an
-    older version of this script already touched (their disposition flag
-    was already right, so a normal run would have skipped them and left the
-    moov-at-the-end problem in place).
+    header, if given, is the file's "[i/N] path" line, logged together
+    with -- not separately from -- whatever outcome follows: under
+    --jobs > 1 several files are decided concurrently, and logging the
+    header and outcome as two separate calls let another file's messages
+    land in between them. position is passed straight through to the
+    per-file progress bar (--jobs 1 only; see main()'s docstring).
     """
     try:
-        return _process_file(path, args)
+        return _process_file(path, args, position, header, on_progress)
     except Exception as exc:
-        log.error(f"  {path.name}: unexpected error, skipping rest of file ({exc})")
+        prefix = f"\n{header}\n" if header else ""
+        log.error(f"{prefix}  {path.name}: unexpected error, skipping rest of file ({exc})")
         return "error"
 
 
-def _process_file(path, args):
+def _process_file(path, args, position=0, header="", on_progress=None):
     """Does the actual work for process_file(); split out so process_file can
     wrap it in one try/except without duplicating the wrapper's logic."""
+    prefix = f"\n{header}\n" if header else ""
+
     streams, duration = probe_audio_streams(path)
     if streams is None:
         return "error"
     if not streams:
-        log.info(f"  {path.name}: no audio streams found, skipping")
+        log.info(f"{prefix}  {path.name}: no audio streams found, skipping")
         return "skipped"
 
     target, note = choose_target(streams, args.prefer_lang)
     if target is None:
-        log.info(f"  {path.name}: SKIP ({note})")
+        log.info(f"{prefix}  {path.name}: SKIP ({note})")
         return "skipped"
 
     ext = path.suffix.lower()
@@ -452,19 +494,17 @@ def _process_file(path, args):
 
     if not changed:
         what = "is first audio stream" if is_avi_reorder else "is default"
-        log.info(f"  {path.name}: already correct (stream#{target['index']} {what}), skipping")
+        log.info(f"{prefix}  {path.name}: already correct (stream#{target['index']} {what}), skipping")
         return "unchanged"
 
-    log.info(f"  {path.name}: setting stream#{target['index']} "
+    log.info(f"{prefix}  {path.name}: setting stream#{target['index']} "
              f"({target['language'] or 'und'}, {target['codec']}) as default audio")
 
-    # Per-file % bars all render at the same tqdm position, so they only make
-    # sense with one file in flight at a time -- disabled under --jobs > 1.
-    show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1
+    show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1  # per-file bar: --jobs 1 only
 
     if ext in MKV_EXTS:
         ok = apply_mkv(path, streams, target["index"], args.dry_run, args.backup,
-                        show_progress)
+                        show_progress, position, on_progress)
     elif ext in AVI_EXTS and not args.avi_reorder:
         log.info(f"    SKIP: AVI has no reliable default-track flag; re-run with "
                  f"--avi-reorder to reorder streams instead (or convert to mkv).")
@@ -472,7 +512,7 @@ def _process_file(path, args):
     else:
         ok = apply_remux(path, streams, target["index"], args.dry_run,
                           args.backup, args.avi_reorder and ext in AVI_EXTS,
-                          duration, show_progress)
+                          duration, show_progress, position, on_progress)
 
     return "changed" if ok else "error"
 
@@ -501,41 +541,34 @@ def main():
     stay visible on the console even though the per-file details are being
     routed to the log file instead.
 
-    --jobs 1 (default) uses the sequential path described below. --jobs N>1
-    instead submits every file to a ThreadPoolExecutor up front (threads,
-    not processes, since the work is waiting on ffmpeg/mkvmerge subprocesses
-    rather than CPU-bound) and only the main thread -- iterating via
-    as_completed() -- touches stats/the progress bar, so no locking is
-    needed. There's no live per-file % bar in that path (N files in flight
-    would fight over the same bar position), just one overall bar updated
-    as each file finishes; log lines from different files' workers can
-    interleave, though each line itself stays intact since logging is
-    thread-safe.
+    --jobs 1 processes files one at a time with a live per-file bar.
+    --jobs N>1 submits every file to a ThreadPoolExecutor up front
+    (threads, since the work waits on subprocesses rather than being
+    CPU-bound) and shows only the overall bar -- with several files in
+    flight there's no single row a per-file bar could usefully occupy.
+    Either way, each file's "[i/N] path" header and outcome are logged
+    together as one call (see process_file()'s docstring for why).
 
-    Progress-bar row stack (top to bottom) when a bar is active and --jobs 1:
-      position=0  per-file bar (created/closed per file by run_with_progress)
-      position=1  spacer: a real, blank tqdm row so the gap below the
-                  per-file bar survives every redraw -- a plain print() here
-                  gets swallowed, since tqdm doesn't know about it and
-                  recalculates cursor offsets on its own.
-      position=2  overall "Processing" bar, pinned to the bottom line.
-    Both bars use leave=False: tqdm's leave=True close() path force-redraws
-    via display(pos=0), ignoring the bar's actual position -- with multiple
-    positioned bars that produces a garbled duplicate render. The summary
-    printed afterward is what's meant to persist on screen, not the bar
-    itself.
+    The overall bar's count is a live, fractional sum of every in-flight
+    file's own progress (via on_progress, see run_with_progress()) rather
+    than only jumping by whole files as each completes: with --jobs close
+    to the file count, files tend to start and finish together, so a
+    whole-file-count bar would otherwise sit at 0% until the very end.
+    Its bar_format pins the count to 2 decimals to avoid binary-float
+    noise (e.g. "2.4300000000000006"), and updates from different worker
+    threads are serialized with a lock.
 
-    Both bars are explicitly closed before the summary is printed, since a
-    still-"active" bar keeps getting redrawn under every subsequent log
-    line. A closed bar's last write also ends mid-line (a carriage return,
-    not a newline), so one more bare print() forces a real newline first --
-    otherwise the summary's own blank-line separator just terminates that
-    dangling line instead of adding a new one.
+    tqdm row layout (top to bottom): under --jobs N>1, a spacer then the
+    overall bar; under --jobs 1, the per-file bar then that same spacer
+    and overall bar. The spacer is a real blank tqdm row rather than a
+    plain print(), since tqdm doesn't know about output it didn't produce
+    and would miscalculate cursor offsets around it.
 
-    When --no-progress is combined with --log-file (no tqdm bar, but still
-    writing details to a file), a plain "Processing i/N..." counter takes
-    the bar's place on the console; the print() right after the loop clears
-    that counter line.
+    Ctrl+C is caught around the whole processing section: by then
+    _sigint_handler (see above run()) has already killed every in-flight
+    subprocess and each apply_mkv()/apply_remux() call has cleaned up its
+    own partial temp file, so this just closes any open bars, prints a
+    partial summary, and exits 130.
     """
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -564,15 +597,16 @@ def main():
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
                      help="Number of files to remux concurrently (default: 1 = sequential). "
                           "This work is I/O-bound, not CPU-bound, so pick a value based on "
-                          "what your storage can sustain rather than core count. The live "
-                          "per-file %% bar is disabled when N > 1; log lines from different "
-                          "files may interleave.")
+                          "what your storage can sustain rather than core count. Above 1, "
+                          "there's no per-file %% bar, just the overall batch bar; log lines "
+                          "from different files may interleave.")
     args = ap.parse_args()
 
     if args.jobs < 1:
         ap.error("--jobs must be >= 1")
 
     setup_logging(args.log_file)
+    signal.signal(signal.SIGINT, _sigint_handler)
 
     exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")} if args.ext else DEFAULT_EXTS
     files = sorted(set(iter_files(args.paths, exts, not args.no_recursive)))
@@ -593,59 +627,98 @@ def main():
     use_bar = HAVE_TQDM and not args.no_progress
     show_fallback_counter = args.log_file and not use_bar
 
-    if args.jobs == 1:
-        spacer = tqdm(total=1, position=1, bar_format="{desc}", desc="", leave=False) if use_bar else None
-        iterator = tqdm(files, unit="file", desc="Processing", position=2, leave=False) if use_bar else files
+    def print_summary(label="Summary"):
+        lines = ["", f"----- {label} -----"]
+        for k in ("changed", "unchanged", "skipped", "error"):
+            lines.append(f"{k}: {stats[k]}")
+        for line in lines:
+            log.info(line)
+        if args.log_file:
+            for line in lines:
+                print(line)
 
-        for i, f in enumerate(iterator, 1):
-            if show_fallback_counter:
-                print(f"\rProcessing {i}/{len(files)}...", end="", flush=True)
-            log.info(f"\n[{i}/{len(files)}] {f}")
-            result = process_file(f, args, need_mkv)
-            stats[result] = stats.get(result, 0) + 1
+    active_bars = []
 
-        if use_bar:
-            iterator.close()
-            spacer.close()
-            print()
-        if show_fallback_counter:
-            print()
-    else:
-        # Concurrent path: no per-file bar (they'd all fight over the same tqdm
-        # position), just one overall bar/counter updated as each file finishes.
-        # Files are submitted in list order but may complete out of order.
-        def run_one(i, f):
-            log.info(f"\n[{i}/{len(files)}] {f}")
-            return process_file(f, args, need_mkv)
+    try:
+        if args.jobs == 1:
+            spacer = tqdm(total=1, position=1, bar_format="{desc}", desc="", leave=False) if use_bar else None
+            iterator = tqdm(files, unit="file", desc="Processing", position=2, leave=False) if use_bar else files
+            if use_bar:
+                active_bars += [spacer, iterator]
 
-        overall = tqdm(total=len(files), unit="file", desc="Processing", leave=False) if use_bar else None
-        completed = 0
-
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            futures = {pool.submit(run_one, i, f): f for i, f in enumerate(files, 1)}
-            for fut in as_completed(futures):
-                completed += 1
+            for i, f in enumerate(iterator, 1):
                 if show_fallback_counter:
-                    print(f"\rProcessing {completed}/{len(files)}...", end="", flush=True)
-                result = fut.result()
+                    print(f"\rProcessing {i}/{len(files)}...", end="", flush=True)
+                result = process_file(f, args, need_mkv, header=f"[{i}/{len(files)}] {f}")
                 stats[result] = stats.get(result, 0) + 1
+
+            if use_bar:
+                iterator.close()
+                spacer.close()
+                print()
+            if show_fallback_counter:
+                print()
+        else:
+            spacer = tqdm(total=1, position=0, bar_format="{desc}", desc="", leave=False) if use_bar else None
+            overall = tqdm(total=len(files), unit="file", desc="Processing", position=1,
+                            bar_format="{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                            leave=False) if use_bar else None
+            if use_bar:
+                active_bars += [spacer, overall]
+            overall_lock = threading.Lock()
+
+            def run_one(i, f):
+                header = f"[{i}/{len(files)}] {f}"
+
+                last_reported = 0.0
+
+                def on_progress(pct):
+                    nonlocal last_reported
+                    frac = pct / 100.0
+                    with overall_lock:
+                        overall.n += frac - last_reported
+                        overall.refresh()
+                    last_reported = frac
+
+                result = process_file(f, args, need_mkv, header=header,
+                                       on_progress=on_progress if overall else None)
+
                 if overall:
-                    overall.update(1)
+                    with overall_lock:
+                        overall.n += 1.0 - last_reported
+                        overall.refresh()
+                return result
 
-        if overall:
-            overall.close()
-            print()
-        if show_fallback_counter:
-            print()
+            completed = 0
 
-    summary_lines = ["", "----- Summary -----"]
-    for k in ("changed", "unchanged", "skipped", "error"):
-        summary_lines.append(f"{k}: {stats[k]}")
-    for line in summary_lines:
-        log.info(line)
-    if args.log_file:
-        for line in summary_lines:
-            print(line)
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                futures = {pool.submit(run_one, i, f): f for i, f in enumerate(files, 1)}
+                for fut in as_completed(futures):
+                    completed += 1
+                    if show_fallback_counter:
+                        print(f"\rProcessing {completed}/{len(files)}...", end="", flush=True)
+                    result = fut.result()
+                    stats[result] = stats.get(result, 0) + 1
+
+            if overall:
+                overall.close()
+                spacer.close()
+                print()
+            if show_fallback_counter:
+                print()
+    except KeyboardInterrupt:
+        for bar in active_bars:
+            try:
+                bar.close()
+            except Exception:
+                pass
+        print()
+        log.error("Interrupted by user (Ctrl+C). In-flight remuxes were stopped and their "
+                  "partial temp files removed; already-finished files are unaffected.")
+        print_summary("Summary (partial -- interrupted)")
+        sys.exit(130)
+
+    print_summary()
 
     if stats["error"]:
         sys.exit(1)
