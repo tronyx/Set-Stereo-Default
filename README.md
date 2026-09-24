@@ -20,7 +20,7 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 - [ffmpeg / ffprobe](https://ffmpeg.org)
 - [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) — only needed if you have `.mkv`/`.webm` files
 - `tqdm` — optional, enables the progress bar (see [requirements.txt](requirements.txt))
-- Free disk space: every remux writes a full temp copy of the file next to the original before swapping it in, so you need free space roughly equal to your largest file (double that if you're also using `--backup`)
+- Free disk space: every remux writes a full temp copy of the file next to the original before swapping it in, so you need free space roughly equal to your largest file. `--backup` normally costs no extra space, since the `.bak` is a hard link to the original; on filesystems without hard-link support it falls back to a full copy, which doubles that
 
 ## Installation
 
@@ -62,7 +62,7 @@ python3 set_stereo_default.py /path/to/videos --jobs 4
 | `--ext EXT1,EXT2` | Comma-separated extensions to include (default: `mkv,webm,mp4,m4v,mov,avi`) |
 | `--no-recursive` | Don't recurse into subdirectories |
 | `--dry-run` | Show what would change without touching any files |
-| `--backup` | Keep the pre-change original as `<name>.bak` |
+| `--backup` | Keep the pre-change original as `<name>.bak` (a hard link where supported, so no extra disk space) |
 | `--prefer-lang LANG` | If multiple 2-channel tracks exist, prefer this language code (e.g. `eng`) |
 | `--avi-reorder` | For `.avi` files (which have no real "default" flag), reorder streams instead so the target track comes first |
 | `--force` | Re-apply even to files that already look correct |
