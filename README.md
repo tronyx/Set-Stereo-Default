@@ -1,5 +1,7 @@
 # set_stereo_default
 
+[![Tests](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml)
+
 > **Beta.** This has been tested pretty heavily on my own library, but it's still early — use it with caution. Try it on a handful of files (or with `--dry-run`) before pointing it at your whole collection, and keep backups (`--backup`) until you've seen it behave the way you expect.
 
 A small command-line tool that bulk-fixes a common annoyance in ripped or downloaded video files: the audio track flagged as "default" isn't the 2-channel stereo track, so playback starts on a 5.1/7.1 track that sounds wrong on a TV soundbar or laptop speakers.
