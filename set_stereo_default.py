@@ -299,11 +299,10 @@ def choose_target(streams, prefer_lang):
     )
 
 
-def plan_changes(streams, target_index):
-    """Return dict stream_index -> desired bool default, and whether any change is needed."""
-    desired = {s["index"]: (s["index"] == target_index) for s in streams}
-    changed = any(desired[s["index"]] != s["default"] for s in streams)
-    return desired, changed
+def needs_change(streams, target_index):
+    """Return True if any audio stream's default flag differs from what it
+    should be (set on the target stream, cleared on every other one)."""
+    return any((s["index"] == target_index) != s["default"] for s in streams)
 
 
 def make_backup(path):
@@ -457,7 +456,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     return True
 
 
-def process_file(path, args, need_mkv, position=0, header="", on_progress=None):
+def process_file(path, args, position=0, header="", on_progress=None):
     """Probe one file, decide whether its default-audio flag needs fixing,
     apply the fix, and return "changed"/"unchanged"/"skipped"/"error".
 
@@ -504,7 +503,7 @@ def _process_file(path, args, position=0, header="", on_progress=None):
     if is_avi_reorder:
         changed = streams[0]["index"] != target["index"]
     else:
-        desired, changed = plan_changes(streams, target["index"])
+        changed = needs_change(streams, target["index"])
 
     if args.force:
         changed = True
@@ -668,7 +667,7 @@ def main():
             for i, f in enumerate(iterator, 1):
                 if show_fallback_counter:
                     print(f"\rProcessing {i}/{len(files)}...", end="", flush=True)
-                result = process_file(f, args, need_mkv, header=f"[{i}/{len(files)}] {f}")
+                result = process_file(f, args, header=f"[{i}/{len(files)}] {f}")
                 stats[result] = stats.get(result, 0) + 1
 
             if use_bar:
@@ -699,7 +698,7 @@ def main():
                         overall.refresh()
                     last_reported = frac
 
-                result = process_file(f, args, need_mkv, header=header,
+                result = process_file(f, args, header=header,
                                        on_progress=on_progress if overall else None)
 
                 if overall:
