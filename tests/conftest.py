@@ -16,6 +16,7 @@ import set_stereo_default as ssd
 def _reset():
     ssd._active_procs.clear()
     ssd._cancelled.clear()
+    ssd._chown_warned.clear()
     ssd.log.handlers.clear()
     ssd.log.propagate = True
 

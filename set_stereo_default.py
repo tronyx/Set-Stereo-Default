@@ -124,6 +124,7 @@ def setup_logging(log_file):
 _active_procs = set()
 _active_procs_lock = threading.Lock()
 _cancelled = threading.Event()
+_chown_warned = threading.Event()
 
 
 def _terminate_active_procs():
@@ -378,6 +379,41 @@ def make_backup(path):
         shutil.copy2(path, bak_path)
 
 
+def copy_ownership(src, dst):
+    """Give dst the same permissions and owner as src. The remuxed file is
+    brand new, so otherwise it would belong to whoever ran the script, and
+    tools that share your media through a group (Sonarr, Radarr, Plex, other
+    containers) could lose access to it.
+
+    Changing the owner needs root, and on a network share root may be
+    mapped to "nobody", so that step can fail. When it does, the owner is
+    left as is and a warning is logged once per run; the permissions are
+    still copied either way."""
+    shutil.copymode(src, dst)
+    if not hasattr(os, "chown"):
+        return
+    st = os.stat(src)
+    try:
+        os.chown(dst, st.st_uid, st.st_gid)
+    except OSError as exc:
+        if not _chown_warned.is_set():
+            _chown_warned.set()
+            log.warning(f"    Couldn't give remuxed files their original owner ({exc.strerror}); "
+                        f"they'll belong to the user running this script. Their permissions "
+                        f"still match the originals. Changing a file's owner needs root, and "
+                        f"network shares often map root to 'nobody'.")
+
+
+def swap_in(path, tmp_path, backup):
+    """Replace path with the finished, verified remux at tmp_path: copy the
+    original's permissions and owner over, keep the original as .bak if
+    asked, then atomically swap the new file in."""
+    copy_ownership(path, tmp_path)
+    if backup:
+        make_backup(path)
+    os.replace(tmp_path, path)
+
+
 def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
               on_progress=None):
     """Clean single-pass remux via mkvmerge (not an in-place mkvpropedit
@@ -427,10 +463,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         tmp_path.unlink(missing_ok=True)
         return False
 
-    if backup:
-        make_backup(path)
-
-    os.replace(tmp_path, path)
+    swap_in(path, tmp_path, backup)
     return True
 
 
@@ -512,10 +545,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
         tmp_path.unlink(missing_ok=True)
         return False
 
-    if backup:
-        make_backup(path)
-
-    os.replace(tmp_path, path)
+    swap_in(path, tmp_path, backup)
     return True
 
 

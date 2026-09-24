@@ -208,6 +208,52 @@ def test_verify_remux_avi_reorder(fake_ffprobe):
 
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows only has a read-only flag, not Unix permissions")
+def test_swap_in_keeps_the_original_permissions(tmp_path):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    video.chmod(0o764)
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+    tmp.chmod(0o600)
+
+    ssd.swap_in(video, tmp, backup=False)
+
+    assert video.read_bytes() == b"remuxed"
+    assert video.stat().st_mode & 0o777 == 0o764
+
+
+def test_swap_in_gives_the_new_file_the_original_owner(tmp_path, monkeypatch):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+    calls = []
+    monkeypatch.setattr(ssd.os, "chown", lambda *args: calls.append(args), raising=False)
+
+    ssd.swap_in(video, tmp, backup=False)
+
+    st = video.stat()
+    assert calls == [(tmp, st.st_uid, st.st_gid)]
+
+
+def test_swap_in_warns_once_when_the_owner_cant_be_changed(tmp_path, monkeypatch, caplog):
+    def not_permitted(*args):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(ssd.os, "chown", not_permitted, raising=False)
+
+    for name in ("a.mkv", "b.mkv"):
+        video = tmp_path / name
+        video.write_bytes(b"original")
+        tmp = tmp_path / (name + ".tmp_remux.mkv")
+        tmp.write_bytes(b"remuxed")
+        ssd.swap_in(video, tmp, backup=False)
+        assert video.read_bytes() == b"remuxed"
+
+    assert caplog.text.count("Couldn't give remuxed files their original owner") == 1
+    assert "Operation not permitted" in caplog.text
+
+
 def remux_with_mkvmerge(path):
     return ssd.apply_mkv(path, ORIGINAL_AUDIO, 2, dry_run=False, backup=True)
 
