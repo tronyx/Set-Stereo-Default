@@ -1,5 +1,5 @@
-# Optional: enables the live progress bar in set_stereo_default.py.
-# Without it, the script falls back to a plain "[i/N]" counter.
+# Optional: enables the live progress bars in set_stereo_default.py.
+# Without it you still get each file's "[i/N]" line, just no bars.
 tqdm>=4.60
 
 # Non-Python dependencies (install separately, not via pip):
