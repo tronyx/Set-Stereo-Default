@@ -139,6 +139,7 @@ Found 5 file(s).
   Awesome Show (2026) - S06E04 - Episode 44.mkv: setting stream#1 (eng, aac) as default audio
 
 Processing:  27%|██████████████████████████████████████████████████████▊                                                                                                                                                    | 1.35/5 [00:04<00:12,  3.56s/file]
+```
 
 ### Dry run
 
