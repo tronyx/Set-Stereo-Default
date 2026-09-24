@@ -12,8 +12,8 @@ Requires on PATH:
     -> only needed for .mkv/.webm files.
 
 Optional:
-  - tqdm (pip install tqdm) -> live progress bars. Without it, a plain
-    "[i/N]" counter is used instead.
+  - tqdm (pip install tqdm) -> live progress bars. Without it you still get
+    each file's "[i/N]" line, just no bars.
 
 How it decides the target track:
   Each file's audio streams are inspected by channel count. The one stream
@@ -22,14 +22,15 @@ How it decides the target track:
   exists, the file is skipped (use --prefer-lang to break ties).
 
 How it applies the change:
-  - .mkv/.webm -> a clean remux via mkvmerge (-c copy, lossless), not an
-    in-place edit via mkvpropedit: editing in place can push the file's
-    track metadata to the end of the file, which is exactly the shape of
-    file that breaks Windows Explorer's thumbnail generation even though
-    the file plays fine everywhere else.
-  - .mp4/.m4v/.mov (and anything else ffmpeg can mux) -> ffmpeg remuxes
-    with -c copy plus -movflags +faststart, so the moov atom stays at the
-    front of the file for the same reason.
+  - .mkv/.webm -> a clean remux via mkvmerge (lossless, no re-encoding),
+    not an in-place edit via mkvpropedit: editing in place can push the
+    file's track metadata to the end of the file, which is exactly the
+    shape of file that breaks Windows Explorer's thumbnail generation even
+    though the file plays fine everywhere else.
+  - .mp4/.m4v/.mov -> an ffmpeg remux (-c copy) with -movflags +faststart,
+    so the moov atom stays at the front of the file for the same reason.
+    Any other extension added via --ext is remuxed by ffmpeg the same way,
+    minus faststart.
   - .avi -> AVI has no real "default track" flag. --avi-reorder instead
     makes the target stream the first audio stream (the closest
     equivalent most players honor); without that flag, AVI files are
@@ -53,10 +54,11 @@ Safe by default:
     touching anything.
   - Every remux goes to a temp file first and only replaces the original
     after a sanity check passes.
-  - --backup keeps the pre-change original as "<name>.bak".
+  - --backup keeps the pre-change original as "<name>.bak" (a hard link
+    where supported, so it takes no extra space).
   - --force re-applies even to files that already look correct, e.g. to
-    backfill this temp-file-first fix onto files an older version of this
-    script already touched in place.
+    give the thumbnail-friendly layout above to files an older version of
+    this script edited in place.
   - Ctrl+C stops cleanly: in-flight remuxes are killed and their partial
     temp files removed; already-finished files are unaffected.
 """
@@ -242,8 +244,8 @@ def probe_audio_streams(path):
     """Return (list of audio stream dicts, container duration in seconds or
     None) in file order, or (None, None) if ffprobe fails.
 
-    -show_format rides along on this same call so apply_remux's progress bar
-    has a duration to work with without spawning a second ffprobe per file."""
+    -show_format rides along on this same call so apply_remux() gets the
+    duration it needs to report progress, without a second ffprobe per file."""
     res = run([
         "ffprobe", "-v", "error", "-print_format", "json",
         "-show_format", "-show_streams", "-select_streams", "a", str(path),
@@ -460,10 +462,9 @@ def process_file(path, args, position=0, header="", on_progress=None):
     """Probe one file, decide whether its default-audio flag needs fixing,
     apply the fix, and return "changed"/"unchanged"/"skipped"/"error".
 
-    AVI has no default-flag disposition, so idempotency there is judged by
-    stream order instead: is the target already the first audio stream?
-    --force re-applies even when the file already looks correct, e.g. to
-    backfill a fix an older version of this script already applied.
+    AVI has no default flag, so for AVI files "already correct" means the
+    target is already the first audio stream. --force re-applies even when
+    the file already looks correct.
 
     header, if given, is the file's "[i/N] path" line, logged together
     with -- not separately from -- whatever outcome follows: under
@@ -535,9 +536,8 @@ def _process_file(path, args, position=0, header="", on_progress=None):
 
 def iter_files(paths, exts, recursive):
     """Yield files from paths (files passed through directly, directories
-    walked) whose extension is in exts. The extension is checked before
-    is_file() so non-video entries (.nfo, .jpg, .srt, ...) never cost a
-    filesystem call, which adds up on large libraries and network shares."""
+    walked) whose extension is in exts. The extension is checked first so
+    non-video files (.nfo, .jpg, .srt, ...) skip the is_file() disk check."""
     for p in paths:
         p = Path(p)
         if p.is_file():
@@ -567,14 +567,15 @@ def main():
     Either way, each file's "[i/N] path" header and outcome are logged
     together as one call (see process_file()'s docstring for why).
 
-    The overall bar's count is a live, fractional sum of every in-flight
-    file's own progress (via on_progress, see run_with_progress()) rather
-    than only jumping by whole files as each completes: with --jobs close
-    to the file count, files tend to start and finish together, so a
-    whole-file-count bar would otherwise sit at 0% until the very end.
-    Its bar_format pins the count to 2 decimals to avoid binary-float
-    noise (e.g. "2.4300000000000006"), and updates from different worker
-    threads are serialized with a lock.
+    Under --jobs N>1, the overall bar's count is a live, fractional sum of
+    every in-flight file's own progress (via on_progress, see
+    run_with_progress()) rather than only jumping by whole files as each
+    completes: with --jobs close to the file count, files tend to start
+    and finish together, so a whole-file-count bar would sit at 0% until
+    the very end. Its bar_format pins the count to 2 decimals to avoid
+    binary-float noise (e.g. "2.4300000000000006"), and updates from
+    different worker threads are serialized with a lock. Under --jobs 1
+    the overall bar simply counts whole files.
 
     tqdm row layout (top to bottom): under --jobs N>1, a spacer then the
     overall bar; under --jobs 1, the per-file bar then that same spacer
@@ -596,17 +597,18 @@ def main():
     ap.add_argument("--no-recursive", action="store_true", help="Don't recurse into subdirectories")
     ap.add_argument("--dry-run", action="store_true", help="Show what would change, don't touch files")
     ap.add_argument("--backup", action="store_true",
-                     help="Keep the pre-change original as <name>.bak for any remux")
+                     help="Keep the pre-change original as <name>.bak for any remux "
+                          "(a hard link where supported, so no extra disk space)")
     ap.add_argument("--prefer-lang", default=None,
                      help="If multiple 2-channel tracks exist, prefer this language code (e.g. eng)")
     ap.add_argument("--avi-reorder", action="store_true",
                      help="For .avi files, remux to put the target audio stream first "
                           "(AVI has no real 'default' flag)")
     ap.add_argument("--force", action="store_true",
-                     help="Re-apply even to files that already look correct. Use this to "
-                          "backfill -movflags faststart onto mp4/mov files that an older "
-                          "version of this script already touched (their disposition flags "
-                          "were already right, so a normal run would skip them).")
+                     help="Re-apply even to files that already look correct, e.g. to give "
+                          "files an older version of this script edited in place the "
+                          "thumbnail-friendly layout (a normal run would skip them, since "
+                          "their default flags are already right).")
     ap.add_argument("--log-file", default=None, metavar="PATH",
                      help="Write detailed log output to this file instead of the console. "
                           "The console still shows a progress bar and the final summary.")
