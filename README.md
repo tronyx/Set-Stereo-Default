@@ -1,6 +1,8 @@
 # set_stereo_default
 
 [![Tests](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](#requirements)
+[![License: MIT](https://img.shields.io/github/license/tronyx/Set-Stereo-Default)](LICENSE.md)
 
 > **Beta.** This has been tested pretty heavily on my own library, but it's still early — use it with caution. Try it on a handful of files (or with `--dry-run`) before pointing it at your whole collection, and keep backups (`--backup`) until you've seen it behave the way you expect.
 
