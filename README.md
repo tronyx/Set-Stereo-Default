@@ -1,6 +1,7 @@
 # set_stereo_default
 
-[![Tests](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml)
+[![tests: master](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=master&label=tests%3A%20master)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Amaster)
+[![tests: develop](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=develop&label=tests%3A%20develop)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Adevelop)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](#requirements)
 [![License: MIT](https://img.shields.io/github/license/tronyx/Set-Stereo-Default)](LICENSE.md)
 
