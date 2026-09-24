@@ -88,6 +88,7 @@ DEFAULT_EXTS = {".mkv", ".webm", ".mp4", ".m4v", ".mov", ".avi"}
 MKV_EXTS = {".mkv", ".webm"}
 AVI_EXTS = {".avi"}
 MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
+TMP_MARKER = ".tmp_remux"
 
 log = logging.getLogger("set_stereo_default")
 
@@ -330,7 +331,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     the temp file is simply deleted. Returns True on success, False on
     failure (already logged).
     """
-    tmp_path = path.with_name(path.name + ".tmp_remux" + path.suffix)
+    tmp_path = path.with_name(path.name + TMP_MARKER + path.suffix)
 
     args = ["mkvmerge", "--gui-mode", "-o", str(tmp_path)]
     for s in streams:
@@ -389,7 +390,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     (already logged).
     """
     suffix = path.suffix
-    tmp_path = path.with_name(path.name + ".tmp_remux" + suffix)
+    tmp_path = path.with_name(path.name + TMP_MARKER + suffix)
 
     audio_indices = [s["index"] for s in streams]
 
@@ -541,17 +542,27 @@ def _process_file(path, args, position=0, header="", on_progress=None):
 def iter_files(paths, exts, recursive):
     """Yield files from paths (files passed through directly, directories
     walked) whose extension is in exts. The extension is checked first so
-    non-video files (.nfo, .jpg, .srt, ...) skip the is_file() disk check."""
+    non-video files (.nfo, .jpg, .srt, ...) skip the is_file() disk check.
+
+    Temp files left behind by a run that was killed outright (kill -9, a
+    reboot) look like videos -- "name.mkv.tmp_remux.mkv" still ends in
+    .mkv -- so they're skipped with a warning instead of being processed."""
     for p in paths:
         p = Path(p)
         if p.is_file():
-            if p.suffix.lower() in exts:
-                yield p
+            candidates = [p]
         elif p.is_dir():
-            it = p.rglob("*") if recursive else p.glob("*")
-            for f in it:
-                if f.suffix.lower() in exts and f.is_file():
-                    yield f
+            candidates = p.rglob("*") if recursive else p.glob("*")
+        else:
+            continue
+        for f in candidates:
+            if f.suffix.lower() not in exts or not f.is_file():
+                continue
+            if f.stem.endswith(TMP_MARKER):
+                log.warning(f"Skipping leftover temp file from an interrupted run "
+                            f"(safe to delete): {f}")
+                continue
+            yield f
 
 
 def main():
