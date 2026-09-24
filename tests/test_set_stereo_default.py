@@ -315,6 +315,16 @@ def test_failed_or_rejected_remux_keeps_the_original(remux, outcome, caplog):
         assert outcome in caplog.text
 
 
+def test_cancelled_remux_names_the_file(remux, caplog):
+    apply, video, set_outcome = remux
+    caplog.set_level("INFO")
+    set_outcome("fail")
+    ssd._cancelled.set()
+    assert apply() is False
+    assert f"{video.name}: cancelled (Ctrl+C)" in caplog.text
+    assert "remux failed" not in caplog.text
+
+
 def test_interrupted_remux_keeps_the_original(remux):
     apply, video, set_outcome = remux
     set_outcome("interrupt")
@@ -404,6 +414,15 @@ def test_run_with_progress_kills_its_subprocess_on_an_exception(monkeypatch):
     assert not ssd._active_procs
 
 
+def test_run_with_progress_kills_a_subprocess_started_after_ctrl_c():
+    ssd._cancelled.set()
+    t0 = time.monotonic()
+    returncode, _ = ssd.run_with_progress(SLOW_CMD, "x", False, parse_pct_line)
+    assert returncode != 0
+    assert time.monotonic() - t0 < 5
+    assert not ssd._active_procs
+
+
 def test_terminate_active_procs_unblocks_a_worker_thread():
     result = {}
 
@@ -481,6 +500,56 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
 
     assert {round(0.25 * i, 2) for i in range(1, 13)} <= set(shown)
     assert max(shown) == 3.0
+
+
+def make_videos(folder, count):
+    for i in range(count):
+        (folder / f"e{i:02}.mkv").write_text("x")
+
+
+def test_ctrl_c_with_jobs_skips_files_that_havent_started(tmp_path, monkeypatch):
+    """Leaving the thread pool waits for its workers, which kept taking
+    queued files after Ctrl+C until the whole queue had been remuxed."""
+    make_videos(tmp_path, 8)
+    started = []
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        started.append(path.name)
+        ssd._cancelled.set()
+        time.sleep(0.1)
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--jobs", "2", "--no-progress"])
+
+    ssd.main()
+
+    assert 1 <= len(started) <= 2
+
+
+def test_partial_summary_counts_unfinished_files_as_cancelled(tmp_path, monkeypatch, capsys):
+    make_videos(tmp_path, 5)
+    calls = []
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        calls.append(path.name)
+        if len(calls) == 3:
+            raise KeyboardInterrupt
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    out = capsys.readouterr().out
+    assert exit_info.value.code == 130
+    assert "Summary (partial -- interrupted)" in out
+    assert "changed: 2" in out
+    assert "cancelled: 3" in out
 
 
 @pytest.mark.filterwarnings("error")

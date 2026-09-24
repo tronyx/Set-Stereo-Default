@@ -187,12 +187,18 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     The subprocess is tracked in _active_procs for the duration of the
     call and killed on any exception -- including a Ctrl+C landing in
     this thread directly, which only happens when running sequentially --
-    so it's never left running as an orphan.
+    so it's never left running as an orphan. It's also killed straight
+    away if Ctrl+C was already pressed: a file still being probed when the
+    Ctrl+C handler ran could otherwise start its remux just afterwards.
+    Registering the subprocess before checking closes that gap, since the
+    handler sets _cancelled before it looks at _active_procs.
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, bufsize=1)
     with _active_procs_lock:
         _active_procs.add(proc)
+    if _cancelled.is_set():
+        proc.kill()
     bar = None
     if show_progress and HAVE_TQDM:
         bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=position)
@@ -450,7 +456,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         raise
     if returncode != 0 or not tmp_path.exists():
         if _cancelled.is_set():
-            log.info("    cancelled (Ctrl+C)")
+            log.info(f"    {path.name}: cancelled (Ctrl+C)")
         else:
             log.error(f"    mkvmerge remux failed: {output.strip()}")
         if tmp_path.exists():
@@ -532,7 +538,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
         raise
     if returncode != 0 or not tmp_path.exists():
         if _cancelled.is_set():
-            log.info("    cancelled (Ctrl+C)")
+            log.info(f"    {path.name}: cancelled (Ctrl+C)")
         else:
             log.error(f"    ffmpeg remux failed: {output.strip()}")
         if tmp_path.exists():
@@ -689,7 +695,12 @@ def main():
     _sigint_handler (see above run()) has already killed every in-flight
     subprocess and each apply_mkv()/apply_remux() call has cleaned up its
     own partial temp file, so this just closes any open bars, prints a
-    partial summary, and exits 130.
+    partial summary, and exits 130. Under --jobs N>1, leaving the
+    ThreadPoolExecutor block waits for its worker threads, and they keep
+    taking queued files until the queue is empty -- so run_one() returns
+    straight away for any file that hasn't started once Ctrl+C is pressed.
+    The partial summary counts every file that didn't finish (in flight or
+    never started) as cancelled, so the totals add up to the files found.
     """
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -749,10 +760,12 @@ def main():
     use_bar = HAVE_TQDM and not args.no_progress
     show_fallback_counter = args.log_file and not use_bar
 
-    def print_summary(label="Summary"):
+    def print_summary(label="Summary", cancelled=0):
         lines = ["", f"----- {label} -----"]
         for k in ("changed", "unchanged", "skipped", "error"):
             lines.append(f"{k}: {stats[k]}")
+        if cancelled:
+            lines.append(f"cancelled: {cancelled}")
         for line in lines:
             log.info(line)
         if args.log_file:
@@ -777,6 +790,8 @@ def main():
                 overall.refresh()
 
         def run_one(i, f):
+            if _cancelled.is_set():
+                return "cancelled"
             last_reported = 0.0
 
             def on_progress(pct):
@@ -824,7 +839,8 @@ def main():
         print()
         log.error("Interrupted by user (Ctrl+C). In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
-        print_summary("Summary (partial -- interrupted)")
+        print_summary("Summary (partial -- interrupted)",
+                      cancelled=len(files) - sum(stats.values()))
         sys.exit(130)
 
     print_summary()
