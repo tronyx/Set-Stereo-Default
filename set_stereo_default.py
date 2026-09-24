@@ -71,6 +71,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -122,7 +123,9 @@ _cancelled = threading.Event()
 
 def _terminate_active_procs():
     """Best-effort stop of every running mkvmerge/ffmpeg subprocess:
-    terminate() first, then kill() anything still alive after 5s."""
+    terminate() first, then kill() anything still alive after 5s. The 5s is
+    one shared deadline for all of them, not 5s each, so Ctrl+C never waits
+    longer than that however many --jobs are running."""
     with _active_procs_lock:
         procs = list(_active_procs)
     for proc in procs:
@@ -130,9 +133,10 @@ def _terminate_active_procs():
             proc.terminate()
         except Exception:
             pass
+    deadline = time.monotonic() + 5
     for proc in procs:
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
         except Exception:
             try:
                 proc.kill()
