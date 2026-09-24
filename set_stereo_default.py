@@ -532,7 +532,9 @@ def _process_file(path, args, position=0, header="", on_progress=None):
 
 def iter_files(paths, exts, recursive):
     """Yield files from paths (files passed through directly, directories
-    walked) whose extension is in exts."""
+    walked) whose extension is in exts. The extension is checked before
+    is_file() so non-video entries (.nfo, .jpg, .srt, ...) never cost a
+    filesystem call, which adds up on large libraries and network shares."""
     for p in paths:
         p = Path(p)
         if p.is_file():
@@ -541,7 +543,7 @@ def iter_files(paths, exts, recursive):
         elif p.is_dir():
             it = p.rglob("*") if recursive else p.glob("*")
             for f in it:
-                if f.is_file() and f.suffix.lower() in exts:
+                if f.suffix.lower() in exts and f.is_file():
                     yield f
 
 
