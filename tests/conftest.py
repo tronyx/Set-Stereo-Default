@@ -25,8 +25,9 @@ def _reset():
 
 @pytest.fixture(autouse=True)
 def clean_module_state():
-    original_sigint = signal.getsignal(signal.SIGINT)
+    original_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     _reset()
     yield
     _reset()
-    signal.signal(signal.SIGINT, original_sigint)
+    for s, handler in original_handlers.items():
+        signal.signal(s, handler)

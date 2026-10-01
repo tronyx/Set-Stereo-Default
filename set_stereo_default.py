@@ -64,8 +64,9 @@ Safe by default:
   - --force re-applies even to files that already look correct, e.g. to
     give the thumbnail-friendly layout above to files an older version of
     this script edited in place.
-  - Ctrl+C stops cleanly: in-flight remuxes are killed and their partial
-    temp files removed; already-finished files are unaffected.
+  - Ctrl+C (or SIGTERM, e.g. from docker stop or kill) stops cleanly:
+    in-flight remuxes are killed and their partial temp files removed;
+    already-finished files are unaffected.
 """
 
 import argparse
@@ -158,16 +159,27 @@ def _terminate_active_procs():
                 pass
 
 
-def _sigint_handler(signum, frame):
-    """Ctrl+C handler, always run in the main thread. Kills every
-    in-flight subprocess before raising the normal KeyboardInterrupt --
-    necessary because Python only ever delivers KeyboardInterrupt to the
-    main thread, so under --jobs > 1 a worker thread blocked reading its
-    own subprocess's output would otherwise never notice a Ctrl+C and
-    would keep that subprocess running as an orphan."""
+class Stopped(KeyboardInterrupt):
+    """Raised by _stop_handler(). A KeyboardInterrupt, so every Ctrl+C
+    cleanup path handles SIGTERM too; signum says which signal it was."""
+
+    def __init__(self, signum):
+        super().__init__()
+        self.signum = signum
+
+
+def _stop_handler(signum, frame):
+    """Ctrl+C (SIGINT) and SIGTERM handler, always run in the main thread.
+    Kills every in-flight subprocess before raising Stopped -- necessary
+    because Python only ever raises it in the main thread, so under
+    --jobs > 1 a worker thread blocked reading its own subprocess's output
+    would otherwise never notice and would keep that subprocess running as
+    an orphan. Unlike Ctrl+C in a terminal, SIGTERM (docker stop, kill,
+    systemd) reaches only this process, not its children, so without this
+    they'd keep running after the script exits."""
     _cancelled.set()
     _terminate_active_procs()
-    signal.default_int_handler(signum, frame)
+    raise Stopped(signum)
 
 
 def run(cmd, **kw):
@@ -494,11 +506,11 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
-    # A killed process can also exit 1 (on Windows), so 1 only counts if Ctrl+C wasn't pressed.
+    # A killed process can also exit 1 (on Windows), so 1 only counts if the run wasn't stopped.
     finished = returncode == 0 or (returncode == 1 and not _cancelled.is_set())
     if not finished or not tmp_path.exists():
         if _cancelled.is_set():
-            log.info(f"    {path.name}: cancelled (Ctrl+C)")
+            log.info(f"    {path.name}: cancelled")
         else:
             log.error(f"    {path.name}: mkvmerge remux failed: {output.strip()}")
         if tmp_path.exists():
@@ -585,7 +597,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
         raise
     if returncode != 0 or not tmp_path.exists():
         if _cancelled.is_set():
-            log.info(f"    {path.name}: cancelled (Ctrl+C)")
+            log.info(f"    {path.name}: cancelled")
         else:
             log.error(f"    {path.name}: ffmpeg remux failed: {output.strip()}")
         if tmp_path.exists():
@@ -738,14 +750,15 @@ def main():
     plain print(), since tqdm doesn't know about output it didn't produce
     and would miscalculate cursor offsets around it.
 
-    Ctrl+C is caught around the whole processing section: by then
-    _sigint_handler (see above run()) has already killed every in-flight
+    Ctrl+C and SIGTERM are caught around the whole processing section: by
+    then _stop_handler (see above run()) has already killed every in-flight
     subprocess and each apply_mkv()/apply_remux() call has cleaned up its
     own partial temp file, so this just closes any open bars, prints a
-    partial summary, and exits 130. Under --jobs N>1, leaving the
+    partial summary, and exits 128 + the signal number (130 for Ctrl+C,
+    143 for SIGTERM). Under --jobs N>1, leaving the
     ThreadPoolExecutor block waits for its worker threads, and they keep
     taking queued files until the queue is empty -- so run_one() returns
-    straight away for any file that hasn't started once Ctrl+C is pressed.
+    straight away for any file that hasn't started once the run is stopped.
     The partial summary counts every file that didn't finish (in flight or
     never started) as cancelled, so the totals add up to the files found.
     """
@@ -789,7 +802,8 @@ def main():
         ap.error("--jobs must be >= 1")
 
     setup_logging(args.log_file)
-    signal.signal(signal.SIGINT, _sigint_handler)
+    signal.signal(signal.SIGINT, _stop_handler)
+    signal.signal(signal.SIGTERM, _stop_handler)
 
     exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")} if args.ext else DEFAULT_EXTS
     files = sorted(set(iter_files(args.paths, exts, not args.no_recursive)))
@@ -880,18 +894,21 @@ def main():
             print()
         if show_fallback_counter:
             print()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
+        signum = getattr(exc, "signum", signal.SIGINT)
         for bar in active_bars:
             try:
                 bar.close()
             except Exception:
                 pass
         print()
-        log.error("Interrupted by user (Ctrl+C). In-flight remuxes were stopped and their "
+        reason = ("Interrupted by user (Ctrl+C)" if signum == signal.SIGINT
+                  else f"Stopped by {signal.Signals(signum).name}")
+        log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         print_summary("Summary (partial -- interrupted)",
                       cancelled=len(files) - sum(stats.values()))
-        sys.exit(130)
+        sys.exit(128 + signum)
 
     print_summary()
 

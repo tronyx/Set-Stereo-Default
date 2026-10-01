@@ -5,6 +5,7 @@ and subprocess behavior is exercised with small Python child processes."""
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -401,7 +402,7 @@ def test_cancelled_remux_names_the_file(remux, caplog):
     set_outcome("fail")
     ssd._cancelled.set()
     assert apply() is False
-    assert f"{video.name}: cancelled (Ctrl+C)" in caplog.text
+    assert f"{video.name}: cancelled" in caplog.text
     assert "remux failed" not in caplog.text
 
 
@@ -445,7 +446,7 @@ def test_exit_code_1_after_ctrl_c_counts_as_cancelled(remux, caplog):
     ssd._cancelled.set()
     assert apply() is False
     assert video.read_bytes() == b"original"
-    assert f"{video.name}: cancelled (Ctrl+C)" in caplog.text
+    assert f"{video.name}: cancelled" in caplog.text
     assert not leftover_temp_files(video)
 
 
@@ -672,6 +673,48 @@ def test_partial_summary_counts_unfinished_files_as_cancelled(tmp_path, monkeypa
     assert "Summary (partial -- interrupted)" in out
     assert "changed: 2" in out
     assert "cancelled: 3" in out
+
+
+def test_stop_handler_cancels_and_stops_subprocesses(monkeypatch):
+    stopped = []
+    monkeypatch.setattr(ssd, "_terminate_active_procs", lambda: stopped.append(True))
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        ssd._stop_handler(signal.SIGTERM, None)
+
+    assert exc_info.value.signum == signal.SIGTERM
+    assert ssd._cancelled.is_set()
+    assert stopped == [True]
+
+
+@pytest.mark.parametrize("signum, code, message", [
+    (signal.SIGINT, 130, "Interrupted by user (Ctrl+C)"),
+    (signal.SIGTERM, 143, "Stopped by SIGTERM"),
+], ids=["SIGINT", "SIGTERM"])
+def test_signal_mid_run_prints_a_partial_summary(tmp_path, monkeypatch, capsys,
+                                                 signum, code, message):
+    make_videos(tmp_path, 5)
+    calls = []
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        calls.append(path.name)
+        if len(calls) == 3:
+            signal.raise_signal(signum)
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    out = capsys.readouterr().out
+    assert exit_info.value.code == code
+    assert message in out
+    assert "changed: 2" in out
+    assert "cancelled: 3" in out
+    assert len(calls) == 3
 
 
 @pytest.mark.filterwarnings("error")

@@ -13,7 +13,7 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 
 ## Features
 
-- **Safe by default.** Files already in the correct state are skipped. `--dry-run` shows exactly what would change without touching anything. Every remux goes to a temp file first and is only swapped in after a check confirms no streams were lost and the right audio track is now the default; if that check fails, the original is left untouched and the file is counted as an error. Ctrl+C stops cleanly, too — in-flight remuxes are killed and their partial temp files removed, files that haven't started are skipped, and already-finished files are unaffected. The partial summary counts everything that didn't finish as `cancelled`. (Exception: hardlinks & cross-seeding — see [Limitations](#limitations).)
+- **Safe by default.** Files already in the correct state are skipped. `--dry-run` shows exactly what would change without touching anything. Every remux goes to a temp file first and is only swapped in after a check confirms no streams were lost and the right audio track is now the default; if that check fails, the original is left untouched and the file is counted as an error. Ctrl+C stops cleanly, too, and so does SIGTERM (what `docker stop`, `kill` and systemd send) — in-flight remuxes are killed and their partial temp files removed, files that haven't started are skipped, and already-finished files are unaffected. The partial summary counts everything that didn't finish as `cancelled`. (Exception: hardlinks & cross-seeding — see [Limitations](#limitations).)
 - **Format-aware.** Uses `mkvmerge` for `.mkv`/`.webm` and `ffmpeg` for everything else, each with format-specific fixes (see [How it works](#how-it-works)) so tools like Windows Explorer don't lose video thumbnails on the files it touches.
 - **Live progress.** A live per-file `%` bar plus an overall batch bar (via `tqdm`, if installed) so you can see how a large batch is going. The per-file bar only shows up on sequential (`--jobs 1`) runs — see [Options](#options).
 - **Flexible logging.** Send detailed output to a log file with `--log-file` while the console stays clean — only warnings, errors, the progress bar and the summary still show there.
@@ -190,7 +190,7 @@ A file is skipped (and counted under `skipped:` in the summary) when:
 - Several 2-channel tracks qualify and `--prefer-lang` doesn't resolve the ambiguity.
 - It's an `.avi` file and `--avi-reorder` wasn't passed (AVI has no real "default" flag to set).
 
-If a run is killed outright (`kill -9`, a reboot, a container stopping) rather than stopped with Ctrl+C, a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning instead of treating them as videos. They're safe to delete, since the original is only replaced after a remux fully succeeds.
+If a run is killed outright (`kill -9`, a reboot, a container that doesn't stop within its grace period) rather than stopped with Ctrl+C or SIGTERM, a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning instead of treating them as videos. They're safe to delete, since the original is only replaced after a remux fully succeeds.
 
 How the change actually gets applied depends on the container:
 
@@ -214,11 +214,11 @@ I'd rather say that plainly than let it pass as fully hand-written. There's a lo
 
 ## Exit status
 
-The script exits `1` if no matching files are found, a required tool is missing, or one or more files ended up in the `error:` bucket of the summary; `130` if you interrupt it with Ctrl+C; and `0` otherwise. If you're scripting this (cron, CI, etc.), the exit code alone tells you whether anything went wrong, but check the printed summary for the `changed`/`unchanged`/`skipped`/`error` breakdown.
+The script exits `1` if no matching files are found, a required tool is missing, or one or more files ended up in the `error:` bucket of the summary; `130` if you interrupt it with Ctrl+C; `143` if it's stopped with SIGTERM; and `0` otherwise. If you're scripting this (cron, CI, etc.), the exit code alone tells you whether anything went wrong, but check the printed summary for the `changed`/`unchanged`/`skipped`/`error` breakdown.
 
 ## Running the tests
 
-The tests cover the script's own logic: choosing the track, finding files, backups, checking a remux before it replaces the original, progress reporting, and Ctrl+C cleanup. Anything that would call ffmpeg, ffprobe or mkvmerge is replaced with a stand-in, so none of those need to be installed:
+The tests cover the script's own logic: choosing the track, finding files, backups, checking a remux before it replaces the original, progress reporting, and Ctrl+C/SIGTERM cleanup. Anything that would call ffmpeg, ffprobe or mkvmerge is replaced with a stand-in, so none of those need to be installed:
 
 ```bash
 pip install -r requirements-dev.txt
