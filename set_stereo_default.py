@@ -519,7 +519,9 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     args = ["mkvmerge", "--gui-mode", "-o", str(tmp_path)]
     for s in streams:
         flag = "yes" if s["index"] == target_index else "no"
-        args += ["--default-track-flag", f"{s['index']}:{flag}"]
+        # mkvmerge 65+ calls this --default-track-flag, but still accepts the old
+        # name and says it always will; older versions only know --default-track.
+        args += ["--default-track", f"{s['index']}:{flag}"]
     args += [str(path)]
 
     if dry_run:
