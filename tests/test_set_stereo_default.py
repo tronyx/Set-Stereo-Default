@@ -470,6 +470,70 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
     assert video.read_bytes() == b"original"
 
 
+def file_args(**overrides):
+    """process_file()'s args, as a --dry-run with no progress bar."""
+    values = dict(prefer_lang=None, avi_reorder=False, force=False, dry_run=True,
+                  backup=False, no_progress=True, jobs=1)
+    values.update(overrides)
+    return types.SimpleNamespace(**values)
+
+
+@pytest.fixture
+def probed(monkeypatch):
+    """Replace probe_audio_streams() so every file reports ORIGINAL_AUDIO;
+    the returned list records which files were probed."""
+    calls = []
+
+    def fake_probe(path):
+        calls.append(path.name)
+        return [dict(s) for s in ORIGINAL_AUDIO], 100.0
+    monkeypatch.setattr(ssd, "probe_audio_streams", fake_probe)
+    return calls
+
+
+def test_avi_without_reorder_is_skipped_before_anything_is_announced(tmp_path, probed, caplog):
+    caplog.set_level("INFO")
+    result = ssd.process_file(tmp_path / "v.avi", file_args(), header="[1/1] v.avi")
+
+    assert result == "skipped"
+    assert probed == []
+    assert "setting stream#" not in caplog.text
+    assert len(caplog.records) == 1
+    assert caplog.records[0].getMessage().startswith("\n[1/1] v.avi\n  v.avi: SKIP (AVI")
+    assert "--avi-reorder" in caplog.text
+
+
+def test_avi_reorder_moves_the_stereo_track_first(tmp_path, probed, caplog):
+    caplog.set_level("INFO")
+    result = ssd.process_file(tmp_path / "v.avi", file_args(avi_reorder=True))
+
+    assert result == "changed"
+    assert "moving stream#2 (eng, aac) to the first audio track" in caplog.text
+    assert "as default audio" not in caplog.text
+    cmd = caplog.text.split("[dry-run] ", 1)[1]
+    assert cmd.index("-map 0:2") < cmd.index("-map 0:1")
+
+
+def test_avi_reorder_leaves_a_file_whose_stereo_track_is_already_first(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO")
+    streams = [audio(1, 2, "aac", default=True), audio(2, 6, "eac3")]
+    monkeypatch.setattr(ssd, "probe_audio_streams", lambda path: (streams, 100.0))
+
+    result = ssd.process_file(tmp_path / "v.avi", file_args(avi_reorder=True))
+
+    assert result == "unchanged"
+    assert "already correct (stream#1 is first audio stream)" in caplog.text
+
+
+@pytest.mark.parametrize("name", ["v.mkv", "v.mp4"])
+def test_other_containers_set_the_default_flag(tmp_path, probed, caplog, name):
+    caplog.set_level("INFO")
+    result = ssd.process_file(tmp_path / name, file_args(avi_reorder=True))
+
+    assert result == "changed"
+    assert "setting stream#2 (eng, aac) as default audio" in caplog.text
+
+
 def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatch):
     def fake_run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
         for us in (25_000_000, 50_000_000, 100_000_000):

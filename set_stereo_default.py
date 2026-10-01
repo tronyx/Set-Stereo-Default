@@ -641,6 +641,13 @@ def _process_file(path, args, position=0, header="", on_progress=None):
     """Does the actual work for process_file(); split out so process_file can
     wrap it in one try/except without duplicating the wrapper's logic."""
     prefix = f"\n{header}\n" if header else ""
+    ext = path.suffix.lower()
+    is_avi_reorder = ext in AVI_EXTS and args.avi_reorder
+
+    if ext in AVI_EXTS and not args.avi_reorder:
+        log.info(f"{prefix}  {path.name}: SKIP (AVI has no reliable default-track flag; re-run "
+                 f"with --avi-reorder to reorder streams instead, or convert to mkv)")
+        return "skipped"
 
     streams, duration = probe_audio_streams(path)
     if streams is None:
@@ -653,9 +660,6 @@ def _process_file(path, args, position=0, header="", on_progress=None):
     if target is None:
         log.info(f"{prefix}  {path.name}: SKIP ({note})")
         return "skipped"
-
-    ext = path.suffix.lower()
-    is_avi_reorder = ext in AVI_EXTS and args.avi_reorder
 
     if is_avi_reorder:
         changed = streams[0]["index"] != target["index"]
@@ -670,21 +674,19 @@ def _process_file(path, args, position=0, header="", on_progress=None):
         log.info(f"{prefix}  {path.name}: already correct (stream#{target['index']} {what}), skipping")
         return "unchanged"
 
-    log.info(f"{prefix}  {path.name}: setting stream#{target['index']} "
-             f"({target['language'] or 'und'}, {target['codec']}) as default audio")
+    action = "moving" if is_avi_reorder else "setting"
+    outcome = "to the first audio track" if is_avi_reorder else "as default audio"
+    log.info(f"{prefix}  {path.name}: {action} stream#{target['index']} "
+             f"({target['language'] or 'und'}, {target['codec']}) {outcome}")
 
     show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1
 
     if ext in MKV_EXTS:
         ok = apply_mkv(path, streams, target["index"], args.dry_run, args.backup,
                         show_progress, position, on_progress)
-    elif ext in AVI_EXTS and not args.avi_reorder:
-        log.info(f"    SKIP: AVI has no reliable default-track flag; re-run with "
-                 f"--avi-reorder to reorder streams instead (or convert to mkv).")
-        return "skipped"
     else:
         ok = apply_remux(path, streams, target["index"], args.dry_run,
-                          args.backup, args.avi_reorder and ext in AVI_EXTS,
+                          args.backup, is_avi_reorder,
                           duration, show_progress, position, on_progress)
 
     return "changed" if ok else "error"
