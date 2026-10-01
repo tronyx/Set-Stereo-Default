@@ -633,6 +633,40 @@ def test_run_with_progress_kills_its_subprocess_on_an_exception(monkeypatch):
     assert not ssd._active_procs
 
 
+def test_run_with_progress_kills_its_subprocess_if_the_bar_cant_be_created(monkeypatch):
+    started = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        started.append(real_popen(*args, **kwargs))
+        return started[-1]
+    monkeypatch.setattr(ssd.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(ssd, "HAVE_TQDM", True)
+
+    def broken_tqdm(*args, **kwargs):
+        raise RuntimeError("no terminal")
+    monkeypatch.setattr(ssd, "tqdm", broken_tqdm)
+
+    with pytest.raises(RuntimeError):
+        ssd.run_with_progress(SLOW_CMD, "x", True, parse_pct_line)
+    assert started[0].poll() is not None
+    assert not ssd._active_procs
+
+
+def test_stop_handler_doesnt_hang_if_it_interrupts_the_lock_holder():
+    """The handler runs in the main thread, which may already hold
+    _active_procs_lock when the signal arrives. Simulated here in a worker
+    thread, so a regression shows up as a failed assert instead of a hang."""
+    def holder():
+        with ssd._active_procs_lock:
+            ssd._terminate_active_procs()
+
+    t = threading.Thread(target=holder, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+
 def test_run_with_progress_kills_a_subprocess_started_after_ctrl_c():
     ssd._cancelled.set()
     t0 = time.monotonic()

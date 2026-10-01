@@ -133,7 +133,9 @@ def setup_logging(log_file):
 
 
 _active_procs = set()
-_active_procs_lock = threading.Lock()
+# Reentrant: the Ctrl+C/SIGTERM handler takes this lock in the main thread,
+# which may be the thread it interrupted while that thread held the lock.
+_active_procs_lock = threading.RLock()
 _cancelled = threading.Event()
 _chown_warned = threading.Event()
 
@@ -214,20 +216,22 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     away if Ctrl+C was already pressed: a file still being probed when the
     Ctrl+C handler ran could otherwise start its remux just afterwards.
     Registering the subprocess before checking closes that gap, since the
-    handler sets _cancelled before it looks at _active_procs.
+    handler sets _cancelled before it looks at _active_procs. The try block
+    starts as soon as the subprocess exists, so a stop or error while
+    registering it or creating the bar still kills it.
     """
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, bufsize=1)
-    with _active_procs_lock:
-        _active_procs.add(proc)
-    if _cancelled.is_set():
-        proc.kill()
     bar = None
-    if show_progress and HAVE_TQDM:
-        bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=position)
     last_pct = 0
     lines = deque(maxlen=50)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, bufsize=1)
     try:
+        with _active_procs_lock:
+            _active_procs.add(proc)
+        if _cancelled.is_set():
+            proc.kill()
+        if show_progress and HAVE_TQDM:
+            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=position)
         for line in proc.stdout:
             pct = parse_pct(line)
             if pct is None:
