@@ -601,15 +601,22 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
         log.info("    [dry-run] " + shlex.join(cmd))
         return True
 
+    progress_re = re.compile(r"[a-z0-9_]+=")
+
     def parse_pct(line):
+        """-progress writes a block of key=value lines per update. Only
+        out_time_us moves the bar; every other key (and out_time_us when
+        the duration is unknown) returns 0, which marks it as progress so
+        it stays out of the error output without moving the bar."""
         line = line.strip()
+        if not progress_re.match(line):
+            return None
         if duration and line.startswith("out_time_us="):
             try:
-                out_time_us = int(line.split("=", 1)[1])
+                return int(int(line.split("=", 1)[1]) / 1_000_000 / duration * 100)
             except ValueError:
-                return None
-            return int(out_time_us / 1_000_000 / duration * 100)
-        return None
+                pass
+        return 0
 
     try:
         returncode, output = run_with_progress(cmd, path.name, show_progress, parse_pct, position, on_progress)

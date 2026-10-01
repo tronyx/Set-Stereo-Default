@@ -580,6 +580,33 @@ def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatc
     assert seen == [25, 50, 100]
 
 
+FFMPEG_PROGRESS_BLOCK = ("frame=0\nfps=0.00\nstream_0_0_q=-1.0\nbitrate=N/A\ntotal_size=48\n"
+                         "out_time_us=50000000\nout_time_ms=50000000\nout_time=00:00:50.000000\n"
+                         "dup_frames=0\ndrop_frames=0\nspeed= 412x\nprogress=continue\n")
+
+
+@pytest.mark.parametrize("duration", [100.0, None], ids=["known duration", "unknown duration"])
+def test_ffmpeg_failure_message_leaves_out_progress_lines(tmp_path, monkeypatch, caplog, duration):
+    """Runs apply_remux()'s real progress parsing over ffmpeg-style output:
+    two progress blocks, then the error ffmpeg prints before exiting."""
+    output = FFMPEG_PROGRESS_BLOCK * 2 + "[mp4 @ 0x5581] Could not find tag for codec\n"
+    real_run_with_progress = ssd.run_with_progress
+
+    def fake_ffmpeg(cmd, *args, **kwargs):
+        code = f"import sys\nsys.stdout.write({output!r})\nsys.exit(1)"
+        return real_run_with_progress(python_cmd(code), *args, **kwargs)
+    monkeypatch.setattr(ssd, "run_with_progress", fake_ffmpeg)
+
+    seen = []
+    assert ssd.apply_remux(tmp_path / "v.mp4", ORIGINAL_AUDIO, 2, dry_run=False, backup=False,
+                           reorder_for_avi=False, duration=duration, show_progress=False,
+                           on_progress=seen.append) is False
+
+    error = caplog.records[-1].getMessage()
+    assert error.endswith("ffmpeg remux failed: [mp4 @ 0x5581] Could not find tag for codec")
+    assert seen == ([50] if duration else [])
+
+
 
 def test_run_with_progress_reports_increases_and_finishes_at_100():
     seen = []
