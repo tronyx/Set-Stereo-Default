@@ -462,6 +462,24 @@ def test_exit_code_1_is_warnings_for_mkvmerge_but_failure_for_ffmpeg(remux, capl
     assert not leftover_temp_files(video)
 
 
+@pytest.mark.parametrize("output", [
+    "#GUI#begin_scanning\n#GUI#warning Warning: odd timestamps\n#GUI#warning gap in track 1\n",
+    "Warning: odd timestamps\nWarning: gap in track 1\n",
+], ids=["gui mode", "plain"])
+def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypatch, caplog, output):
+    def fake_mkvmerge(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        return 1, output
+    monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(video, ORIGINAL_AUDIO, 2, dry_run=False, backup=False) is True
+    assert caplog.records[-1].getMessage() == \
+        "    v.mkv: mkvmerge finished with warnings: odd timestamps; gap in track 1"
+
+
 def test_warning_exit_code_is_still_rejected_if_the_check_fails(remux, caplog):
     apply, video, set_outcome = remux
     set_outcome("warn")

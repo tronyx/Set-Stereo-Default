@@ -546,7 +546,11 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         return False
 
     if returncode == 1:
-        warnings = [line.strip() for line in output.splitlines() if "warning" in line.lower()]
+        # The log line already says "warnings", so drop the "#GUI#warning" and
+        # "Warning:" prefixes mkvmerge puts on each one.
+        warning_prefix_re = re.compile(r"^(?:#GUI#warning\s*)?(?:warning:\s*)?", re.IGNORECASE)
+        warnings = [warning_prefix_re.sub("", line.strip()) for line in output.splitlines()
+                    if "warning" in line.lower()]
         log.warning(f"    {path.name}: mkvmerge finished with warnings: "
                     + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
