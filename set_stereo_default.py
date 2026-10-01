@@ -251,6 +251,7 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
         proc.wait()
         raise
     finally:
+        proc.stdout.close()
         with _active_procs_lock:
             _active_procs.discard(proc)
         if bar:
