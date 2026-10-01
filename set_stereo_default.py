@@ -471,6 +471,27 @@ def swap_in(path, tmp_path, backup):
     os.replace(tmp_path, path)
 
 
+def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup):
+    """Run verify_remux() on a finished remux and swap it in if it passes.
+    Returns True if the original was replaced, False if the check rejected
+    the remux (already logged). The temp file is removed if anything stops
+    this partway -- a rejected check, Ctrl+C or SIGTERM during the check's
+    ffprobe calls, or an unexpected error -- so it's never left behind.
+    Once swap_in() has replaced the original there's no temp file left, so
+    removing it then is a no-op."""
+    try:
+        problem = verify_remux(path, tmp_path, streams, target_index, reordered)
+        if problem:
+            log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
+            tmp_path.unlink(missing_ok=True)
+            return False
+        swap_in(path, tmp_path, backup)
+        return True
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
               on_progress=None):
     """Clean single-pass remux via mkvmerge (not an in-place mkvpropedit
@@ -525,14 +546,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         log.warning(f"    {path.name}: mkvmerge finished with warnings: "
                     + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
-    problem = verify_remux(path, tmp_path, streams, target_index, reordered=False)
-    if problem:
-        log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
-        tmp_path.unlink(missing_ok=True)
-        return False
-
-    swap_in(path, tmp_path, backup)
-    return True
+    return check_and_swap_in(path, tmp_path, streams, target_index, False, backup)
 
 
 def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
@@ -607,14 +621,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
             tmp_path.unlink(missing_ok=True)
         return False
 
-    problem = verify_remux(path, tmp_path, streams, target_index, reordered)
-    if problem:
-        log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
-        tmp_path.unlink(missing_ok=True)
-        return False
-
-    swap_in(path, tmp_path, backup)
-    return True
+    return check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup)
 
 
 def process_file(path, args, position=0, header="", on_progress=None):

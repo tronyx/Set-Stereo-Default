@@ -432,6 +432,21 @@ def test_interrupted_remux_keeps_the_original(remux):
     assert not leftover_temp_files(video)
 
 
+@pytest.mark.parametrize("error", [ssd.Stopped(signal.SIGTERM), OSError("disk gone")],
+                         ids=["stopped", "unexpected error"])
+def test_stop_during_the_post_remux_check_removes_the_temp_file(remux, monkeypatch, error):
+    apply, video, _ = remux
+
+    def interrupted_check(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(ssd, "verify_remux", interrupted_check)
+
+    with pytest.raises(type(error)):
+        apply()
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+
+
 def test_exit_code_1_is_warnings_for_mkvmerge_but_failure_for_ffmpeg(remux, caplog):
     apply, video, set_outcome = remux
     set_outcome("warn")
