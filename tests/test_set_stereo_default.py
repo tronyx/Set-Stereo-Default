@@ -82,11 +82,22 @@ def test_prefer_lang_that_matches_nothing_still_skips():
     audio(2, 2, name="Director's Commentary"),
     audio(2, 2, name="English Descriptive Audio"),
     audio(2, 2, name="Audio Description"),
+    audio(2, 2, name="English (Audio-Description)"),
+    audio(2, 2, name="Descriptive Video Service"),
+    audio(2, 2, name="Described Video"),
+    audio(2, 2, name="English [DVS]"),
 ], ids=["comment flag", "visual impaired flag", "commentary name", "descriptive name",
-        "description name"])
+        "description name", "hyphenated description name", "dvs full name", "described name",
+        "dvs abbreviation"])
 def test_choose_target_never_picks_commentary_or_audio_description(commentary):
     target, note = ssd.choose_target([audio(1, 6, default=True), commentary], None)
     assert target is None and "commentary/audio description" in note
+
+
+@pytest.mark.parametrize("name", ["Stereo (see description)", "No description", "Advsound Mix"])
+def test_choose_target_picks_a_stereo_track_whose_name_only_looks_like_audio_description(name):
+    target, _ = ssd.choose_target([audio(1, 6, default=True), audio(2, 2, name=name)], None)
+    assert target["index"] == 2
 
 
 def test_choose_target_picks_the_stereo_track_next_to_a_commentary():

@@ -96,7 +96,10 @@ MKV_EXTS = {".mkv", ".webm"}
 AVI_EXTS = {".avi"}
 MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
 TMP_MARKER = ".tmp_remux"
-COMMENTARY_NAME_RE = re.compile(r"commentary|description|descriptive", re.IGNORECASE)
+# Names real commentary/AD tracks use ("Audio Description", "Descriptive Video Service",
+# "Described Video", "DVS"); a bare "description" is too loose to mean audio description.
+COMMENTARY_NAME_RE = re.compile(r"commentary|audio[ -]?description|descriptive|described|\bdvs\b",
+                                re.IGNORECASE)
 # MKV keeps a track's name in "title"; ffprobe reports MP4 names as "name" or "handler_name".
 NAME_TAGS = ("title", "name", "handler_name")
 
