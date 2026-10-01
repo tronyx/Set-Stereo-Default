@@ -18,8 +18,12 @@ Optional:
 How it decides the target track:
   Each file's audio streams are inspected by channel count. The one stream
   with exactly 2 channels becomes "default"; every other audio stream has
-  its default flag cleared. If zero or more than one 2-channel track
-  exists, the file is skipped (use --prefer-lang to break ties).
+  its default flag cleared. Commentary and audio-description tracks are
+  never picked, and the stereo track must be in the same language as the
+  track players currently start on (or --prefer-lang, if given), so a
+  stereo dub never replaces a surround original. If no track or more than
+  one track qualifies, the file is skipped (use --prefer-lang to break
+  ties).
 
 How it applies the change:
   - .mkv/.webm -> a clean remux via mkvmerge (lossless, no re-encoding),
@@ -91,6 +95,7 @@ MKV_EXTS = {".mkv", ".webm"}
 AVI_EXTS = {".avi"}
 MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
 TMP_MARKER = ".tmp_remux"
+COMMENTARY_TITLE_RE = re.compile(r"commentary|description|descriptive", re.IGNORECASE)
 
 log = logging.getLogger("set_stereo_default")
 
@@ -272,10 +277,13 @@ def probe_audio_streams(path):
     streams = []
     for s in data.get("streams", []):
         tags = s.get("tags", {}) or {}
+        disposition = s.get("disposition", {}) or {}
         streams.append({
             "index": s["index"],
             "channels": s.get("channels"),
-            "default": bool(s.get("disposition", {}).get("default", 0)),
+            "default": bool(disposition.get("default", 0)),
+            "comment": bool(disposition.get("comment", 0)),
+            "visual_impaired": bool(disposition.get("visual_impaired", 0)),
             "language": tags.get("language", ""),
             "title": tags.get("title", ""),
             "codec": s.get("codec_name", ""),
@@ -289,25 +297,48 @@ def probe_audio_streams(path):
     return streams, duration
 
 
+def is_commentary(stream):
+    """True for commentary and audio-description tracks: often stereo, but
+    never what should play by default. Uses the disposition flags where the
+    file sets them, and the track title otherwise."""
+    return bool(stream.get("comment") or stream.get("visual_impaired")
+                or COMMENTARY_TITLE_RE.search(stream.get("title") or ""))
+
+
 def choose_target(streams, prefer_lang):
     """Return (stream, note): the 2-channel audio stream to mark default.
-    stream is None if none qualify -- either no 2-channel track exists, or
-    multiple do and --prefer-lang didn't narrow it to exactly one; note
-    explains the skip in both cases."""
-    candidates = [s for s in streams if s["channels"] == 2]
+    stream is None if none qualifies, and note explains why.
+
+    Commentary and audio-description tracks are never candidates. The rest
+    must be in the wanted language: --prefer-lang if given, otherwise the
+    language of the track players currently start on (the default one, or
+    the first if none is flagged), so a stereo dub never replaces a
+    surround original. Tracks tagged "und" or not tagged at all match any
+    language, but an exact match wins a tie against them."""
+    def describe(ss):
+        return ", ".join(f"stream#{s['index']} ({s['language'] or 'und'}/{s['codec']})" for s in ss)
+
+    stereo = [s for s in streams if s["channels"] == 2]
+    candidates = [s for s in stereo if not is_commentary(s)]
     if not candidates:
+        if stereo:
+            return None, f"only 2-channel tracks are commentary/audio description [{describe(stereo)}]"
         return None, "no 2-channel audio track found"
+
+    current = next((s for s in streams if s["default"]), streams[0])
+    wanted = (prefer_lang or current["language"]).lower()
+    if wanted not in ("", "und"):
+        in_lang = [s for s in candidates if s["language"].lower() in ("", "und", wanted)]
+        if not in_lang:
+            return None, (f"no 2-channel track in '{wanted}' [found {describe(candidates)}] "
+                          f"-- use --prefer-lang to pick another language")
+        exact = [s for s in in_lang if s["language"].lower() == wanted]
+        candidates = exact if len(exact) == 1 else in_lang
+
     if len(candidates) == 1:
         return candidates[0], None
-    if prefer_lang:
-        lang_matches = [s for s in candidates if s["language"].lower() == prefer_lang.lower()]
-        if len(lang_matches) == 1:
-            return lang_matches[0], None
-    desc = ", ".join(
-        f"stream#{s['index']} ({s['language'] or 'und'}/{s['codec']})" for s in candidates
-    )
     return None, (
-        f"multiple 2-channel tracks found [{desc}] -- use --prefer-lang to disambiguate"
+        f"multiple 2-channel tracks found [{describe(candidates)}] -- use --prefer-lang to disambiguate"
     )
 
 
@@ -713,7 +744,9 @@ def main():
                      help="Keep the pre-change original as <name>.bak for any remux "
                           "(a hard link where supported, so no extra disk space)")
     ap.add_argument("--prefer-lang", default=None,
-                     help="If multiple 2-channel tracks exist, prefer this language code (e.g. eng)")
+                     help="Language the 2-channel track must be in (e.g. eng); also breaks ties "
+                          "between several 2-channel tracks. Default: the language of the "
+                          "file's current default audio track.")
     ap.add_argument("--avi-reorder", action="store_true",
                      help="For .avi files, remux to put the target audio stream first "
                           "(AVI has no real 'default' flag)")

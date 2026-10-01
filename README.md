@@ -50,7 +50,7 @@ python3 set_stereo_default.py /path/to/videos --dry-run
 # Process specific files instead of a folder
 python3 set_stereo_default.py file1.mkv file2.mp4
 
-# Prefer English when a file has more than one 2-channel track
+# Pick the English stereo track, whatever language the file currently defaults to
 python3 set_stereo_default.py /path/to/videos --prefer-lang eng
 
 # Log details to a file, keep the console output to just the progress bar
@@ -68,7 +68,7 @@ python3 set_stereo_default.py /path/to/videos --jobs 4
 | `--no-recursive` | Don't recurse into subdirectories |
 | `--dry-run` | Show what would change without touching any files |
 | `--backup` | Keep the pre-change original as `<name>.bak` (a hard link where supported, so no extra disk space) |
-| `--prefer-lang LANG` | If multiple 2-channel tracks exist, prefer this language code (e.g. `eng`) |
+| `--prefer-lang LANG` | Language the 2-channel track must be in (e.g. `eng`); also breaks ties between several 2-channel tracks. Default: the language of the file's current default audio track |
 | `--avi-reorder` | For `.avi` files (which have no real "default" flag), reorder streams instead so the target track comes first |
 | `--force` | Re-apply even to files that already look correct |
 | `--log-file PATH` | Write detailed output to a file instead of the console |
@@ -177,12 +177,17 @@ error: 0
 
 ## How it works
 
-For each file, the script inspects every audio stream's channel count. The one stream with exactly 2 channels becomes "default"; every other audio stream gets its default flag cleared. If a file has zero or multiple 2-channel tracks, it's skipped and logged (use `--prefer-lang` to break ties).
+For each file, the script inspects every audio stream's channel count. The one stream with exactly 2 channels becomes "default"; every other audio stream gets its default flag cleared. Two kinds of stereo track are passed over:
+
+- **Commentary and audio description.** These are often stereo but shouldn't play by default. A track counts as one if the file flags it that way, or if its title contains "commentary", "description" or "descriptive".
+- **Other languages.** The stereo track has to be in the same language as the track players currently start on — the default one, or the first if none is flagged — so an English 5.1 film with a Spanish 2.0 dub keeps playing in English. Pass `--prefer-lang` to choose the language yourself. Tracks with no language tag (or `und`) match any language, but a track that's actually tagged with the right language wins over them.
 
 A file is skipped (and counted under `skipped:` in the summary) when:
 
 - It has no audio streams at all.
-- It has zero or multiple 2-channel tracks and `--prefer-lang` doesn't resolve the ambiguity.
+- It has no 2-channel track, or only commentary/audio-description ones.
+- None of its 2-channel tracks is in the wanted language.
+- Several 2-channel tracks qualify and `--prefer-lang` doesn't resolve the ambiguity.
 - It's an `.avi` file and `--avi-reorder` wasn't passed (AVI has no real "default" flag to set).
 
 If a run is killed outright (`kill -9`, a reboot, a container stopping) rather than stopped with Ctrl+C, a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning instead of treating them as videos. They're safe to delete, since the original is only replaced after a remux fully succeeds.

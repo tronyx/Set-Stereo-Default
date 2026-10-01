@@ -17,10 +17,12 @@ import pytest
 import set_stereo_default as ssd
 
 
-def audio(index, channels, codec="aac", language="eng", default=False):
+def audio(index, channels, codec="aac", language="eng", default=False, title="",
+          comment=False, visual_impaired=False):
     """An audio stream the way probe_audio_streams() describes it."""
     return {"index": index, "channels": channels, "codec": codec,
-            "language": language, "title": "", "default": default}
+            "language": language, "title": title, "default": default,
+            "comment": comment, "visual_impaired": visual_impaired}
 
 
 def stream(index, codec_type, default=0, codec="aac", channels=None, language=None):
@@ -56,7 +58,7 @@ def test_choose_target_skips_files_without_a_stereo_track():
 
 
 def test_choose_target_skips_files_with_several_stereo_tracks():
-    streams = [audio(1, 2, language="eng"), audio(2, 2, language="spa")]
+    streams = [audio(1, 2, language="eng"), audio(2, 2, language="eng")]
     target, note = ssd.choose_target(streams, None)
     assert target is None and "--prefer-lang" in note
 
@@ -71,6 +73,81 @@ def test_prefer_lang_that_matches_nothing_still_skips():
     streams = [audio(1, 2, language="spa"), audio(2, 2, language="fre")]
     target, _ = ssd.choose_target(streams, "eng")
     assert target is None
+
+
+@pytest.mark.parametrize("commentary", [
+    audio(2, 2, comment=True),
+    audio(2, 2, visual_impaired=True),
+    audio(2, 2, title="Director's Commentary"),
+    audio(2, 2, title="English Descriptive Audio"),
+    audio(2, 2, title="Audio Description"),
+], ids=["comment flag", "visual impaired flag", "commentary title", "descriptive title",
+        "description title"])
+def test_choose_target_never_picks_commentary_or_audio_description(commentary):
+    target, note = ssd.choose_target([audio(1, 6, default=True), commentary], None)
+    assert target is None and "commentary/audio description" in note
+
+
+def test_choose_target_picks_the_stereo_track_next_to_a_commentary():
+    streams = [audio(1, 6, default=True), audio(2, 2, title="Commentary"), audio(3, 2)]
+    target, _ = ssd.choose_target(streams, None)
+    assert target["index"] == 3
+
+
+def test_choose_target_skips_a_stereo_dub_in_another_language():
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="spa")]
+    target, note = ssd.choose_target(streams, None)
+    assert target is None and "'eng'" in note and "spa" in note
+
+
+def test_choose_target_uses_the_first_track_language_when_none_is_default():
+    streams = [audio(1, 6, language="jpn"), audio(2, 2, language="eng"), audio(3, 2, language="jpn")]
+    target, _ = ssd.choose_target(streams, None)
+    assert target["index"] == 3
+
+
+def test_choose_target_follows_the_default_track_language_between_stereo_tracks():
+    streams = [audio(1, 6, language="spa", default=True), audio(2, 2, language="eng"),
+               audio(3, 2, language="spa")]
+    target, _ = ssd.choose_target(streams, None)
+    assert target["index"] == 3
+
+
+def test_prefer_lang_overrides_the_default_track_language():
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="spa")]
+    target, _ = ssd.choose_target(streams, "spa")
+    assert target["index"] == 2
+
+
+@pytest.mark.parametrize("lang", ["", "und"])
+def test_untagged_stereo_track_matches_any_language(lang):
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language=lang)]
+    target, _ = ssd.choose_target(streams, None)
+    assert target["index"] == 2
+
+
+def test_exact_language_match_wins_over_an_untagged_track():
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="und"),
+               audio(3, 2, language="eng")]
+    target, _ = ssd.choose_target(streams, None)
+    assert target["index"] == 3
+
+
+def test_probe_audio_streams_reads_commentary_flags(monkeypatch):
+    probe = {"streams": [
+        {"index": 1, "channels": 2, "codec_name": "aac", "tags": {"language": "eng"},
+         "disposition": {"default": 0, "comment": 1, "visual_impaired": 0}},
+        {"index": 2, "channels": 2, "codec_name": "aac",
+         "disposition": {"default": 1, "comment": 0, "visual_impaired": 1}},
+    ], "format": {"duration": "60.0"}}
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=0, stdout=json.dumps(probe), stderr=""))
+
+    streams, duration = ssd.probe_audio_streams(Path("v.mkv"))
+
+    assert [(s["comment"], s["visual_impaired"], s["default"]) for s in streams] == \
+        [(True, False, False), (False, True, True)]
+    assert duration == 60.0
 
 
 @pytest.mark.parametrize("defaults, expected", [
