@@ -345,24 +345,27 @@ def remux_with_ffmpeg(path):
 def remux(request, tmp_path, monkeypatch):
     """Returns (apply, video, set_outcome). Instead of running a real remux,
     the stand-in writes "remuxed" to the temp file; set_outcome("fail"),
-    set_outcome("interrupt") or set_outcome(<reason>) changes what happens."""
+    set_outcome("warn"), set_outcome("interrupt") or set_outcome(<reason>)
+    changes what happens."""
     apply, filename = request.param
     video = tmp_path / filename
     video.write_bytes(b"original")
     outcome = {"run": "ok", "verify": None}
+    results = {"ok": (0, ""), "fail": (2, "remux error"),
+               "warn": (1, "#GUI#warning Warning: odd timestamps\n")}
 
     def fake_run_with_progress(cmd, *args, **kwargs):
         tmp = next(Path(c) for c in cmd if ssd.TMP_MARKER in c)
         tmp.write_bytes(b"remuxed")
         if outcome["run"] == "interrupt":
             raise KeyboardInterrupt
-        return (1, "remux error") if outcome["run"] == "fail" else (0, "")
+        return results[outcome["run"]]
 
     monkeypatch.setattr(ssd, "run_with_progress", fake_run_with_progress)
     monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: outcome["verify"])
 
     def set_outcome(value):
-        if value in ("fail", "interrupt"):
+        if value in ("fail", "warn", "interrupt"):
             outcome["run"] = value
         else:
             outcome["verify"] = value
@@ -408,6 +411,41 @@ def test_interrupted_remux_keeps_the_original(remux):
     with pytest.raises(KeyboardInterrupt):
         apply()
     assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+
+
+def test_exit_code_1_is_warnings_for_mkvmerge_but_failure_for_ffmpeg(remux, caplog):
+    apply, video, set_outcome = remux
+    set_outcome("warn")
+    if video.suffix == ".mkv":
+        assert apply() is True
+        assert video.read_bytes() == b"remuxed"
+        assert "finished with warnings" in caplog.text
+        assert "odd timestamps" in caplog.text
+    else:
+        assert apply() is False
+        assert video.read_bytes() == b"original"
+        assert "ffmpeg remux failed" in caplog.text
+    assert not leftover_temp_files(video)
+
+
+def test_warning_exit_code_is_still_rejected_if_the_check_fails(remux, caplog):
+    apply, video, set_outcome = remux
+    set_outcome("warn")
+    set_outcome("stream count changed from 4 to 3")
+    assert apply() is False
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+
+
+def test_exit_code_1_after_ctrl_c_counts_as_cancelled(remux, caplog):
+    apply, video, set_outcome = remux
+    caplog.set_level("INFO")
+    set_outcome("warn")
+    ssd._cancelled.set()
+    assert apply() is False
+    assert video.read_bytes() == b"original"
+    assert f"{video.name}: cancelled (Ctrl+C)" in caplog.text
     assert not leftover_temp_files(video)
 
 
@@ -465,6 +503,13 @@ def test_run_with_progress_keeps_only_the_last_50_lines():
     assert returncode == 3
     assert len(lines) == 50
     assert lines[-1] == "Error: boom"
+
+
+def test_run_with_progress_leaves_progress_lines_out_of_the_output():
+    code = ("print('Warning: early')\n"
+            "for p in range(1, 101): print(f'pct={p}')")
+    _, output = ssd.run_with_progress(python_cmd(code), "x", False, parse_pct_line)
+    assert output.splitlines() == ["Warning: early"]
 
 
 SLOW_CMD = python_cmd("import time\n"

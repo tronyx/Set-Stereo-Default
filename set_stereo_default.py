@@ -178,9 +178,10 @@ def run(cmd, **kw):
 def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
     """Run cmd, streaming stdout+stderr line by line so a live bar can be
     driven while the subprocess is still running. Returns (returncode,
-    output), where output is only the last 50 lines -- that's where a
-    failure's error message ends up, and ffmpeg's -progress output would
-    otherwise pile up thousands of lines on a long file.
+    output), where output is only the last 50 lines that aren't progress
+    updates -- that's where warnings and a failure's error message end up,
+    and ffmpeg's -progress output would otherwise pile up thousands of
+    lines on a long file.
 
     parse_pct(line) returns an int 0-100 for progress lines, else None.
     show_progress/position control an optional tqdm bar; label (truncated)
@@ -211,9 +212,10 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     lines = deque(maxlen=50)
     try:
         for line in proc.stdout:
-            lines.append(line)
             pct = parse_pct(line)
-            if pct is not None:
+            if pct is None:
+                lines.append(line)
+            else:
                 pct = max(0, min(100, pct))
                 if pct > last_pct:
                     if bar:
@@ -461,6 +463,10 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     happens, so if the remux fails, is interrupted or is rejected, the temp
     file is simply deleted. Returns True on success, False on failure
     (already logged).
+
+    mkvmerge exits 1 when it printed warnings but finished the file, so
+    that still counts as finished: the warnings are logged and
+    verify_remux() decides whether the result is used.
     """
     tmp_path = path.with_name(path.name + TMP_MARKER + path.suffix)
 
@@ -485,7 +491,9 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
-    if returncode != 0 or not tmp_path.exists():
+    # A killed process can also exit 1 (on Windows), so 1 only counts if Ctrl+C wasn't pressed.
+    finished = returncode == 0 or (returncode == 1 and not _cancelled.is_set())
+    if not finished or not tmp_path.exists():
         if _cancelled.is_set():
             log.info(f"    {path.name}: cancelled (Ctrl+C)")
         else:
@@ -493,6 +501,11 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
         return False
+
+    if returncode == 1:
+        warnings = [line.strip() for line in output.splitlines() if "warning" in line.lower()]
+        log.warning(f"    {path.name}: mkvmerge finished with warnings: "
+                    + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
     problem = verify_remux(path, tmp_path, streams, target_index, reordered=False)
     if problem:
