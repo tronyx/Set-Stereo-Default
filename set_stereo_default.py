@@ -7,7 +7,7 @@ sure the 2-channel (stereo) audio track is the one flagged "default", clearing
 the default flag from every other audio track.
 
 Requires on PATH:
-  - ffmpeg / ffprobe   (https://ffmpeg.org)
+  - ffmpeg / ffprobe   4.4 or newer (https://ffmpeg.org)
   - mkvmerge           (part of MKVToolNix, https://mkvtoolnix.download)
     -> only needed for .mkv/.webm files.
 

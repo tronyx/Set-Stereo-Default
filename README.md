@@ -22,8 +22,8 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 ## Requirements
 
 - Python 3.8+
-- [ffmpeg / ffprobe](https://ffmpeg.org)
-- [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) — only needed if you have `.mkv`/`.webm` files
+- [ffmpeg / ffprobe](https://ffmpeg.org) 4.4 or newer. Older versions don't read the commentary and audio-description flags in MKV files, so they can make a commentary track the default. Tested on 4.4 (Ubuntu 22.04), 5.1 (Debian 12), 6.1 (Ubuntu 24.04), 7.1 (Debian 13) and the newest release
+- [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) — only needed if you have `.mkv`/`.webm` files. Any version should work; tested on 45 through 102
 - `tqdm` — optional, enables the progress bar (see [requirements.txt](requirements.txt))
 - Free disk space: every remux writes a full temp copy of the file next to the original before swapping it in, so you need free space roughly equal to your largest file. `--backup` normally costs no extra space, since the `.bak` is a hard link to the original; on filesystems without hard-link support it falls back to a full copy, which doubles that
 
@@ -218,16 +218,17 @@ The script exits `1` if no matching files are found, a required tool is missing,
 
 ## Running the tests
 
-The tests cover the script's own logic: choosing the track, finding files, backups, checking a remux before it replaces the original, progress reporting, and Ctrl+C/SIGTERM cleanup. Anything that would call ffmpeg, ffprobe or mkvmerge is replaced with a stand-in, so none of those need to be installed:
+There are two sets of tests:
+
+- **Logic tests** ([tests/test_set_stereo_default.py](tests/test_set_stereo_default.py)) cover the script's own logic: choosing the track, finding files, backups, checking a remux before it replaces the original, progress reporting, and Ctrl+C/SIGTERM cleanup. Anything that would call ffmpeg, ffprobe or mkvmerge is replaced with a stand-in, so none of those need to be installed.
+- **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to generate small MKV, MP4 and AVI files covering each case the script handles, run the script on them, and check the results with ffprobe and mkvmerge. These need the tools on your `PATH` and are skipped if they aren't.
 
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-GitHub also runs them automatically on every push and pull request, on the oldest and newest supported Python versions (see [.github/workflows/tests.yml](.github/workflows/tests.yml)).
-
-Because the real tools are never run, the tests can't tell you whether ffmpeg or mkvmerge will accept a changed command. If you change how the script calls them, also try it on a few real files, starting with `--dry-run`.
+GitHub runs both automatically on every push and pull request (see [.github/workflows/tests.yml](.github/workflows/tests.yml)): the logic tests on the oldest and newest supported Python versions, and the real-file tests against each ffmpeg/mkvmerge version listed under [Requirements](#requirements).
 
 ## License
 
