@@ -179,7 +179,7 @@ error: 0
 
 For each file, the script inspects every audio stream's channel count. The one stream with exactly 2 channels becomes "default"; every other audio stream gets its default flag cleared. Two kinds of stereo track are passed over:
 
-- **Commentary and audio description.** These are often stereo but shouldn't play by default. A track counts as one if the file flags it that way, or if its title contains "commentary", "description" or "descriptive".
+- **Commentary and audio description.** These are often stereo but shouldn't play by default. A track counts as one if the file flags it that way, or if its name (title) contains "commentary", "description" or "descriptive".
 - **Other languages.** The stereo track has to be in the same language as the track players currently start on — the default one, or the first if none is flagged — so an English 5.1 film with a Spanish 2.0 dub keeps playing in English. Pass `--prefer-lang` to choose the language yourself. Tracks with no language tag (or `und`) match any language, but a track that's actually tagged with the right language wins over them.
 
 A file is skipped (and counted under `skipped:` in the summary) when:

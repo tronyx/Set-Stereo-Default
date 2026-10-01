@@ -96,7 +96,9 @@ MKV_EXTS = {".mkv", ".webm"}
 AVI_EXTS = {".avi"}
 MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
 TMP_MARKER = ".tmp_remux"
-COMMENTARY_TITLE_RE = re.compile(r"commentary|description|descriptive", re.IGNORECASE)
+COMMENTARY_NAME_RE = re.compile(r"commentary|description|descriptive", re.IGNORECASE)
+# MKV keeps a track's name in "title"; ffprobe reports MP4 names as "name" or "handler_name".
+NAME_TAGS = ("title", "name", "handler_name")
 
 log = logging.getLogger("set_stereo_default")
 
@@ -302,7 +304,7 @@ def probe_audio_streams(path):
             "comment": bool(disposition.get("comment", 0)),
             "visual_impaired": bool(disposition.get("visual_impaired", 0)),
             "language": tags.get("language", ""),
-            "title": tags.get("title", ""),
+            "names": [tags[k] for k in NAME_TAGS if tags.get(k)],
             "codec": s.get("codec_name", ""),
         })
 
@@ -317,9 +319,9 @@ def probe_audio_streams(path):
 def is_commentary(stream):
     """True for commentary and audio-description tracks: often stereo, but
     never what should play by default. Uses the disposition flags where the
-    file sets them, and the track title otherwise."""
+    file sets them, and the track's name otherwise."""
     return bool(stream.get("comment") or stream.get("visual_impaired")
-                or COMMENTARY_TITLE_RE.search(stream.get("title") or ""))
+                or any(COMMENTARY_NAME_RE.search(n) for n in stream.get("names", ())))
 
 
 def choose_target(streams, prefer_lang):
