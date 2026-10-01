@@ -112,18 +112,21 @@ class TqdmLoggingHandler(logging.Handler):
 
 
 def setup_logging(log_file):
-    """Attach one handler to the module logger: a FileHandler when --log-file
-    is given, otherwise a console handler that writes via tqdm.write() so it
-    won't clobber an active progress bar."""
+    """Attach handlers to the module logger. Without --log-file, everything
+    goes to the console; with it, everything goes to the file and only
+    warnings and errors also reach the console, so a run that fails (e.g.
+    a missing tool) never exits without saying why. Console output goes
+    through tqdm.write() so it won't clobber an active progress bar."""
     log.setLevel(logging.INFO)
     log.propagate = False
+    console = TqdmLoggingHandler() if HAVE_TQDM else logging.StreamHandler(sys.stdout)
+    console.setFormatter(logging.Formatter("%(message)s"))
     if log_file:
         handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    else:
-        handler = TqdmLoggingHandler() if HAVE_TQDM else logging.StreamHandler(sys.stdout)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-    log.addHandler(handler)
+        log.addHandler(handler)
+        console.setLevel(logging.WARNING)
+    log.addHandler(console)
 
 
 _active_procs = set()
@@ -497,7 +500,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         if _cancelled.is_set():
             log.info(f"    {path.name}: cancelled (Ctrl+C)")
         else:
-            log.error(f"    mkvmerge remux failed: {output.strip()}")
+            log.error(f"    {path.name}: mkvmerge remux failed: {output.strip()}")
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
         return False
@@ -509,7 +512,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
 
     problem = verify_remux(path, tmp_path, streams, target_index, reordered=False)
     if problem:
-        log.error(f"    post-remux check failed ({problem}), keeping original untouched")
+        log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
         tmp_path.unlink(missing_ok=True)
         return False
 
@@ -584,14 +587,14 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
         if _cancelled.is_set():
             log.info(f"    {path.name}: cancelled (Ctrl+C)")
         else:
-            log.error(f"    ffmpeg remux failed: {output.strip()}")
+            log.error(f"    {path.name}: ffmpeg remux failed: {output.strip()}")
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
         return False
 
     problem = verify_remux(path, tmp_path, streams, target_index, reordered)
     if problem:
-        log.error(f"    post-remux check failed ({problem}), keeping original untouched")
+        log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
         tmp_path.unlink(missing_ok=True)
         return False
 
@@ -770,7 +773,8 @@ def main():
                           "their default flags are already right).")
     ap.add_argument("--log-file", default=None, metavar="PATH",
                      help="Write detailed log output to this file instead of the console. "
-                          "The console still shows a progress bar and the final summary.")
+                          "The console still shows warnings, errors, a progress bar and the "
+                          "final summary.")
     ap.add_argument("--no-progress", action="store_true",
                      help="Disable the progress bar (e.g. for non-interactive/CI logs)")
     ap.add_argument("--jobs", type=int, default=1, metavar="N",

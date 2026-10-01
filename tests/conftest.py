@@ -17,6 +17,8 @@ def _reset():
     ssd._active_procs.clear()
     ssd._cancelled.clear()
     ssd._chown_warned.clear()
+    for handler in ssd.log.handlers:
+        handler.close()
     ssd.log.handlers.clear()
     ssd.log.propagate = True
 

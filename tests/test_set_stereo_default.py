@@ -703,3 +703,40 @@ def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     ssd.main()
 
     assert finals and set(finals) == {2}
+
+
+
+def test_log_file_gets_everything_but_the_console_only_warnings_and_errors(tmp_path, capsys):
+    log_file = tmp_path / "run.log"
+    ssd.setup_logging(str(log_file))
+
+    ssd.log.info("detail")
+    ssd.log.warning("careful")
+    ssd.log.error("broken")
+
+    out = capsys.readouterr().out
+    assert "detail" not in out
+    assert "careful" in out and "broken" in out
+    logged = log_file.read_text()
+    assert "detail" in logged and "careful" in logged and "broken" in logged
+
+
+@pytest.mark.parametrize("make_files, expected", [
+    (lambda folder: None, "No matching files found."),
+    (lambda folder: (folder / "a.mp4").write_text("x"), "Missing required tool(s): ffmpeg, ffprobe"),
+], ids=["no files", "missing tools"])
+def test_fatal_errors_reach_the_console_with_a_log_file(tmp_path, monkeypatch, capsys,
+                                                         make_files, expected):
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    make_files(videos)
+    monkeypatch.setattr(ssd.shutil, "which", lambda tool: None)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(videos),
+                                      "--log-file", str(tmp_path / "run.log")])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    assert exit_info.value.code == 1
+    assert expected in capsys.readouterr().out
+    assert expected in (tmp_path / "run.log").read_text()

@@ -16,7 +16,7 @@ A small command-line tool that bulk-fixes a common annoyance in ripped or downlo
 - **Safe by default.** Files already in the correct state are skipped. `--dry-run` shows exactly what would change without touching anything. Every remux goes to a temp file first and is only swapped in after a check confirms no streams were lost and the right audio track is now the default; if that check fails, the original is left untouched and the file is counted as an error. Ctrl+C stops cleanly, too — in-flight remuxes are killed and their partial temp files removed, files that haven't started are skipped, and already-finished files are unaffected. The partial summary counts everything that didn't finish as `cancelled`. (Exception: hardlinks & cross-seeding — see [Limitations](#limitations).)
 - **Format-aware.** Uses `mkvmerge` for `.mkv`/`.webm` and `ffmpeg` for everything else, each with format-specific fixes (see [How it works](#how-it-works)) so tools like Windows Explorer don't lose video thumbnails on the files it touches.
 - **Live progress.** A live per-file `%` bar plus an overall batch bar (via `tqdm`, if installed) so you can see how a large batch is going. The per-file bar only shows up on sequential (`--jobs 1`) runs — see [Options](#options).
-- **Flexible logging.** Send detailed output to a log file with `--log-file` while the console stays clean.
+- **Flexible logging.** Send detailed output to a log file with `--log-file` while the console stays clean — only warnings, errors, the progress bar and the summary still show there.
 - **Concurrent processing.** `--jobs N` remuxes several files at once (default: `1`, one at a time) — useful since this work is mostly waiting on disk I/O, not CPU.
 
 ## Requirements
@@ -53,7 +53,7 @@ python3 set_stereo_default.py file1.mkv file2.mp4
 # Pick the English stereo track, whatever language the file currently defaults to
 python3 set_stereo_default.py /path/to/videos --prefer-lang eng
 
-# Log details to a file, keep the console output to just the progress bar
+# Log details to a file, keep the console output to the progress bar, warnings and errors
 python3 set_stereo_default.py /path/to/videos --log-file run.log
 
 # Remux up to 4 files at once instead of one at a time
@@ -71,7 +71,7 @@ python3 set_stereo_default.py /path/to/videos --jobs 4
 | `--prefer-lang LANG` | Language the 2-channel track must be in (e.g. `eng`); also breaks ties between several 2-channel tracks. Default: the language of the file's current default audio track |
 | `--avi-reorder` | For `.avi` files (which have no real "default" flag), reorder streams instead so the target track comes first |
 | `--force` | Re-apply even to files that already look correct |
-| `--log-file PATH` | Write detailed output to a file instead of the console |
+| `--log-file PATH` | Write detailed output to a file instead of the console (warnings and errors still show on the console too) |
 | `--no-progress` | Disable the progress bar |
 | `--jobs N` | Remux up to `N` files concurrently (default: `1`, sequential) |
 
