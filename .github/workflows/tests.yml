@@ -21,3 +21,51 @@ jobs:
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest
+
+  # Runs the script on real files generated with ffmpeg (tests/test_real_files.py),
+  # once per ffmpeg version that common distros ship, plus the newest release.
+  real-files:
+    name: Real files, ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ffmpeg 4.4 (Ubuntu 22.04)
+            image: ubuntu:22.04
+          - name: ffmpeg 5.1 (Debian 12)
+            image: debian:12
+          - name: ffmpeg 6.1 (Ubuntu 24.04)
+            image: ubuntu:24.04
+          - name: ffmpeg 7.1 (Debian 13)
+            image: debian:13
+          # Newest release, from https://github.com/BtbN/FFmpeg-Builds. Bump the
+          # version when a new one comes out; older ones get dropped from there.
+          - name: ffmpeg 9.0 (static build)
+            image: debian:13
+            static-ffmpeg: "9.0"
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      # Fail, rather than skip, if a tool is missing.
+      REQUIRE_MEDIA_TOOLS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends mkvtoolnix python3 python3-pytest python3-tqdm \
+            ${{ matrix.static-ffmpeg && 'ca-certificates curl xz-utils' || 'ffmpeg' }}
+      - name: Install static ffmpeg
+        if: matrix.static-ffmpeg
+        run: |
+          build="ffmpeg-n${{ matrix.static-ffmpeg }}-latest-linux64-gpl-${{ matrix.static-ffmpeg }}"
+          curl -sSLf "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$build.tar.xz" \
+            | tar -xJ -C /opt
+          echo "/opt/$build/bin" >> "$GITHUB_PATH"
+      - name: Tool versions
+        run: |
+          ffmpeg -version | head -n 1
+          mkvmerge --version
+          python3 --version
+      - run: python3 -m pytest tests/test_real_files.py -v
