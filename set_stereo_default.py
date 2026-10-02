@@ -617,6 +617,20 @@ def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, 
         raise
 
 
+def mkvmerge_audio_ids(path):
+    """Return mkvmerge's track IDs for path's audio tracks, in file order, or
+    None if mkvmerge can't read it. mkvmerge -J exits 0 even for a file it
+    doesn't recognize, but then lists no tracks, so that gives []."""
+    res = run(["mkvmerge", "-J", str(path)])
+    if res.returncode != 0:
+        return None
+    try:
+        tracks = json.loads(res.stdout).get("tracks", [])
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return [t["id"] for t in tracks if t.get("type") == "audio"]
+
+
 def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
               on_progress=None, keep_dates=False):
     """Remux an MKV/WebM file with mkvmerge so only target_index is flagged
@@ -629,8 +643,12 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     touched until check_and_swap_in() has checked it.
 
     mkvmerge details:
-    - Its track IDs match ffprobe's stream indexes for MKV, so the indexes
-      are passed straight through.
+    - It numbers tracks its own way, which usually matches ffprobe's stream
+      indexes but not always: ffmpeg skips track types it doesn't know, so
+      every later index shifts. So mkvmerge's own IDs are looked up
+      (mkvmerge_audio_ids()) and matched to ffprobe's audio streams by
+      position, since both list audio tracks in file order. If the two
+      don't see the same number of audio tracks, the file is left alone.
     - The flag is set with --default-track. mkvmerge 65 renamed it
       --default-track-flag but promises to keep accepting the old name,
       and older versions only know the old one.
@@ -644,10 +662,17 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     """
     tmp_path = path.with_name(path.name + TMP_MARKER + path.suffix)
 
+    ids = mkvmerge_audio_ids(path)
+    if ids is None or len(ids) != len(streams):
+        found = "couldn't read the file" if ids is None else f"sees {len(ids)} audio track(s)"
+        log.error(f"    {path.name}: mkvmerge {found}, but ffprobe sees {len(streams)}; "
+                  f"leaving the file alone")
+        return False
+
     args = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "-o", str(tmp_path)]
-    for s in streams:
+    for s, track_id in zip(streams, ids):
         flag = "yes" if s["index"] == target_index else "no"
-        args += ["--default-track", f"{s['index']}:{flag}"]
+        args += ["--default-track", f"{track_id}:{flag}"]
     args += [str(path)]
 
     if dry_run:

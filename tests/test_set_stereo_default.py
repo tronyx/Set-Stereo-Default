@@ -17,6 +17,18 @@ import pytest
 
 import set_stereo_default as ssd
 
+real_mkvmerge_audio_ids = ssd.mkvmerge_audio_ids
+
+
+@pytest.fixture(autouse=True)
+def mkvmerge_ids(monkeypatch):
+    """mkvmerge never runs in these tests, so mkvmerge_audio_ids() reports
+    audio track IDs 1 and 2, the indexes the ffprobe stand-ins use. Set
+    mkvmerge_ids.value to report something else."""
+    stand_in = types.SimpleNamespace(value=[1, 2])
+    monkeypatch.setattr(ssd, "mkvmerge_audio_ids", lambda path: stand_in.value)
+    return stand_in
+
 
 def audio(index, channels, codec="aac", language="eng", default=False, name="",
           comment=False, visual_impaired=False):
@@ -1020,6 +1032,55 @@ def test_mkvmerge_is_told_to_write_utf8(tmp_path, caplog):
     ssd.apply_mkv(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2, dry_run=True, backup=False)
     args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
     assert args[args.index("--output-charset") + 1] == "UTF-8"
+
+
+def dry_run_flags(caplog):
+    """The --default-track values from a logged mkvmerge dry-run command."""
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    return [args[i + 1] for i, a in enumerate(args) if a == "--default-track"]
+
+
+def test_mkvmerge_gets_its_own_track_ids_when_they_differ_from_ffprobes(tmp_path, caplog,
+                                                                       mkvmerge_ids):
+    """ffprobe calls the audio tracks streams 1 and 2, but mkvmerge (which
+    also counts a track ffmpeg skipped) calls them 2 and 3."""
+    caplog.set_level("INFO")
+    mkvmerge_ids.value = [2, 3]
+
+    assert ssd.apply_mkv(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2, dry_run=True, backup=False)
+
+    assert dry_run_flags(caplog) == ["2:no", "3:yes"]
+
+
+@pytest.mark.parametrize("ids, message", [
+    ([1], "mkvmerge sees 1 audio track(s), but ffprobe sees 2"),
+    ([], "mkvmerge sees 0 audio track(s), but ffprobe sees 2"),
+    (None, "mkvmerge couldn't read the file, but ffprobe sees 2"),
+], ids=["fewer", "none", "unreadable"])
+def test_mkvmerge_and_ffprobe_disagreeing_leaves_the_file_alone(tmp_path, caplog, mkvmerge_ids,
+                                                               ids, message):
+    mkvmerge_ids.value = ids
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(video, ORIGINAL_AUDIO, 2, dry_run=False, backup=False) is False
+
+    assert message in caplog.text
+    assert video.read_bytes() == b"original"
+
+
+@pytest.mark.parametrize("returncode, stdout, expected", [
+    (0, json.dumps({"tracks": [{"id": 0, "type": "video"}, {"id": 1, "type": "audio"},
+                               {"id": 2, "type": "subtitles"}, {"id": 3, "type": "audio"}]}),
+     [1, 3]),
+    (0, json.dumps({"container": {"recognized": False}, "errors": []}), []),
+    (2, "", None),
+    (0, "not json", None),
+], ids=["audio tracks only", "unrecognized file", "mkvmerge failed", "bad output"])
+def test_mkvmerge_audio_ids(monkeypatch, returncode, stdout, expected):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=returncode, stdout=stdout, stderr=""))
+    assert real_mkvmerge_audio_ids(Path("v.mkv")) == expected
 
 
 SLOW_CMD = python_cmd("import time\n"
