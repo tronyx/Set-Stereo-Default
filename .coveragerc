@@ -1,0 +1,6 @@
+[run]
+branch = True
+include = set_stereo_default.py
+
+[report]
+show_missing = True

@@ -18,7 +18,10 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "set_stereo_default.py"
+"""The script under test, run as a separate program like a user would."""
+
 LAYOUTS = {2: "stereo", 6: "5.1"}
+"""ffmpeg's channel layout name for each channel count make_video() supports."""
 
 
 def need(*tools):
@@ -43,15 +46,17 @@ class Track:
     visual_impaired: bool = False
 
 
-def make_video(path, tracks):
-    """Write a 1-second video at path with one audio stream per Track.
-    Video and audio use encoders built into every ffmpeg (mpeg4, ac3), and
-    the audio is silence, so each file is a few KB. A track's title is set
-    both as "title" (what MKV uses for a track name) and "handler_name"
-    (what MP4 uses)."""
-    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1"]
+def make_video(path, tracks, seconds=1):
+    """Write a video of the given length at path with one audio stream per
+    Track. Video and audio use encoders built into every ffmpeg (mpeg4,
+    ac3), and the audio is silence, so each file is a few KB per second. A
+    track's title is set both as "title" (what MKV uses for a track name)
+    and "handler_name" (what MP4 uses). MP4 files get their index at the
+    front, so a truncated copy can still be read."""
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+           f"testsrc=size=64x48:rate=5:duration={seconds}"]
     for t in tracks:
-        cmd += ["-t", "1", "-f", "lavfi", "-i",
+        cmd += ["-t", str(seconds), "-f", "lavfi", "-i",
                 f"anullsrc=channel_layout={LAYOUTS[t.channels]}:sample_rate=48000"]
     cmd += ["-map", "0:v"]
     for i in range(len(tracks)):
@@ -66,6 +71,8 @@ def make_video(path, tracks):
         if t.title:
             cmd += [f"-metadata:s:a:{i}", f"title={t.title}",
                     f"-metadata:s:a:{i}", f"handler_name={t.title}"]
+    if path.suffix == ".mp4":
+        cmd += ["-movflags", "+faststart"]
     subprocess.run(cmd + [str(path)], check=True, capture_output=True, text=True)
     return path
 
@@ -107,6 +114,7 @@ def top_level_boxes(path):
 
 
 def digest(path):
+    """SHA-256 of path's contents, to tell whether a file changed at all."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -118,11 +126,13 @@ def run_script(*args):
 
 
 def summary(output):
-    """The summary's counts, e.g. {"changed": 1, "unchanged": 0, ...}."""
+    """The summary's counts, e.g. {"changed": 1, "unchanged": 0, ...}, or
+    {"would change": 1, ...} after a dry run."""
     counts = {}
     for line in output.splitlines():
         key, _, value = line.partition(": ")
-        if key in ("changed", "unchanged", "skipped", "error", "cancelled") and value.isdigit():
+        if key in ("changed", "would change", "unchanged", "skipped", "error", "cancelled") \
+                and value.isdigit():
             counts[key] = int(value)
     return counts
 
@@ -162,6 +172,11 @@ CASES = {
     "mkv --prefer-lang picks between stereo tracks": Case(
         ".mkv", [Track(6, "eng", default=True), Track(2, "eng"), Track(2, "spa")], "changed", 2,
         ["--prefer-lang", "spa"]),
+    "mkv --prefer-lang with a two-letter code": Case(
+        ".mkv", [Track(6, "eng", default=True), Track(2, "ger")], "changed", 1,
+        ["--prefer-lang", "de"]),
+    "mp4 one language tagged two ways": Case(
+        ".mp4", [Track(6, "ger", default=True), Track(2, "deu")], "changed", 1),
     "mkv no stereo track": Case(".mkv", [Track(6, default=True)], "skipped"),
     "avi without --avi-reorder": Case(".avi", [Track(6), Track(2)], "skipped"),
     "avi --avi-reorder": Case(".avi", [Track(6), Track(2)], "changed", 1, ["--avi-reorder"]),
@@ -213,8 +228,28 @@ def test_dry_run_changes_nothing(tmp_path):
 
     assert code == 0, output
     assert "[dry-run] mkvmerge" in output
+    assert "----- Summary (dry run, nothing was changed) -----" in output
+    assert summary(output) == {"would change": 1, "unchanged": 0, "skipped": 0, "error": 0}
     assert digest(video) == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ["video.mkv"]
+
+
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+@pytest.mark.parametrize("keep", [True, False], ids=["--keep-dates", "default"])
+def test_keep_dates_keeps_the_original_modification_time(tmp_path, ext, keep):
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
+    video = make_video(tmp_path / f"video{ext}", [Track(6, default=True), Track(2)])
+    old_mtime_ns = 1_577_890_000_000_000_000
+    os.utime(video, ns=(old_mtime_ns, old_mtime_ns))
+
+    code, output = run_script(video, *(["--keep-dates"] if keep else []))
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    if keep:
+        assert video.stat().st_mtime_ns == old_mtime_ns
+    else:
+        assert video.stat().st_mtime_ns > old_mtime_ns
 
 
 def test_backup_keeps_the_original(tmp_path):
@@ -230,10 +265,40 @@ def test_backup_keeps_the_original(tmp_path):
     assert audio_defaults(video) == [(6, False), (2, True)]
 
 
+@pytest.mark.parametrize("option, kept", [
+    ([], ["video.mp4.bak", "video.mp4.bak.1"]),
+    (["--existing-backups", "replace"], ["video.mp4.bak"]),
+], ids=["numbered without a terminal", "--existing-backups replace"])
+def test_a_second_backup_never_loses_the_first_unless_asked(tmp_path, option, kept):
+    """A second --backup --force run on the same file finds the first run's
+    .bak. With no terminal to ask (as here, and in cron or Docker) the new
+    backup is numbered; with --existing-backups replace it overwrites."""
+    need("ffmpeg", "ffprobe")
+    video = make_video(tmp_path / "video.mp4", [Track(6, default=True), Track(2)])
+    original = digest(video)
+    assert run_script(video, "--backup")[0] == 0
+    first_result = digest(video)
+
+    code, output = run_script(video, "--backup", "--force", *option)
+
+    assert code == 0, output
+    assert sorted(p.name for p in tmp_path.glob("video.mp4.bak*")) == kept
+    if len(kept) == 2:
+        assert digest(tmp_path / "video.mp4.bak") == original
+        assert digest(tmp_path / "video.mp4.bak.1") == first_result
+        assert "kept the original as video.mp4.bak.1" in output
+    else:
+        assert digest(tmp_path / "video.mp4.bak") == first_result
+
+
 def test_unreadable_file_is_an_error_and_left_alone(tmp_path):
+    """The file starts with the MKV signature, so ffprobe reads it as MKV
+    and rejects the junk that follows. Random bytes aren't used: ffprobe
+    now and then takes them for some other format (e.g. lyrics), and then
+    the file is merely skipped for having no audio."""
     need("ffmpeg", "ffprobe", "mkvmerge")
     video = tmp_path / "broken.mkv"
-    video.write_bytes(os.urandom(4096))
+    video.write_bytes(bytes.fromhex("1a45dfa3") + b"\xff" * 4092)
     before = digest(video)
 
     code, output = run_script(video)
@@ -241,6 +306,26 @@ def test_unreadable_file_is_an_error_and_left_alone(tmp_path):
     assert code == 1, output
     assert summary(output)["error"] == 1, output
     assert digest(video) == before
+
+
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
+    """An incomplete download still claims its full length in its header,
+    but a remux only contains what's really there, so it comes out much
+    shorter. The script must reject it rather than hide the problem."""
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
+    full = make_video(tmp_path / f"full{ext}", [Track(6, default=True), Track(2)], seconds=20)
+    video = tmp_path / f"video{ext}"
+    video.write_bytes(full.read_bytes()[:full.stat().st_size // 2])
+    before = digest(video)
+
+    code, output = run_script(video)
+
+    assert code == 1, output
+    assert summary(output)["error"] == 1, output
+    assert "duration dropped from" in output, output
+    assert digest(video) == before
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
 
 
 def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path):
@@ -260,3 +345,32 @@ def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path
     assert code == 0, output
     assert summary(output) == {"changed": 0, "unchanged": 3, "skipped": 1, "error": 0}, output
     assert {p: digest(p) for p in tmp_path.rglob("*.m*")} == digests
+
+
+@pytest.mark.parametrize("skip", [False, True], ids=["default", "--skip-symlinks"])
+def test_a_symlinked_file_is_fixed_through_its_link(tmp_path, skip):
+    """By default the file a link points to is fixed and the link survives.
+    With --skip-symlinks, neither is touched."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    real = make_video(tmp_path / "real.mkv", [Track(6, default=True), Track(2)])
+    library = tmp_path / "library"
+    library.mkdir()
+    link = library / "movie.mkv"
+    try:
+        link.symlink_to(real)
+    except OSError as exc:
+        pytest.skip(f"can't create symlinks here: {exc}")
+    before = digest(real)
+
+    code, output = run_script(library, *(["--skip-symlinks"] if skip else []))
+
+    assert link.is_symlink(), "the link was replaced"
+    assert link.resolve() == real.resolve()
+    assert not list(tmp_path.rglob("*.tmp_remux*")), "temp file left behind"
+    if skip:
+        assert code == 1 and "No matching files found" in output, output
+        assert digest(real) == before
+    else:
+        assert code == 0, output
+        assert summary(output)["changed"] == 1, output
+        assert audio_defaults(real) == [(6, False), (2, True)]

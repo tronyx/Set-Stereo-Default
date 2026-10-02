@@ -3,10 +3,11 @@
 **By submitting this pull request, I confirm that:**
 *(Tick each box that applies, e.g. `[x]`.)*
 
-- [ ] I've read the [contributing guide](./CONTRIBUTING.md) and this whole template.
+- [ ] I've read the [contributing guide](https://github.com/tronyx/Set-Stereo-Default/blob/develop/.github/CONTRIBUTING.md) and this whole template.
 - [ ] This pull request makes one change.
 - [ ] I've documented my change in docstrings (no `#` comments), and updated the README if needed.
 - [ ] I've tested my change and added or updated tests for it.
+- [ ] My change works on Python 3.10 and doesn't add a required package.
 - [ ] I'm willing to help maintain this change if problems come up later.
 - [ ] I'm giving this submission freely and claim no ownership of it.
 

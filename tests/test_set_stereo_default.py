@@ -17,6 +17,18 @@ import pytest
 
 import set_stereo_default as ssd
 
+real_mkvmerge_audio_ids = ssd.mkvmerge_audio_ids
+
+
+@pytest.fixture(autouse=True)
+def mkvmerge_ids(monkeypatch):
+    """mkvmerge never runs in these tests, so mkvmerge_audio_ids() reports
+    audio track IDs 1 and 2, the indexes the ffprobe stand-ins use. Set
+    mkvmerge_ids.value to report something else."""
+    stand_in = types.SimpleNamespace(value=[1, 2])
+    monkeypatch.setattr(ssd, "mkvmerge_audio_ids", lambda path: stand_in.value)
+    return stand_in
+
 
 def audio(index, channels, codec="aac", language="eng", default=False, name="",
           comment=False, visual_impaired=False):
@@ -145,6 +157,104 @@ def test_exact_language_match_wins_over_an_untagged_track():
     assert target["index"] == 3
 
 
+@pytest.mark.parametrize("lang", ["", "und"])
+def test_untagged_default_track_lets_a_stereo_track_in_any_language_through(lang):
+    streams = [audio(1, 6, language=lang, default=True), audio(2, 2, language="spa")]
+    target, note = ssd.choose_target(streams, None)
+    assert target["index"] == 2 and note is None
+
+
+def test_untagged_default_track_still_needs_a_single_stereo_track():
+    streams = [audio(1, 6, language="", default=True), audio(2, 2, language="eng"),
+               audio(3, 2, language="spa")]
+    target, note = ssd.choose_target(streams, None)
+    assert target is None and note.startswith("multiple 2-channel tracks found")
+
+
+@pytest.mark.parametrize("code, expected", [
+    ("de", "deu"), ("ger", "deu"), ("deu", "deu"), ("GER", "deu"), ("de-DE", "deu"),
+    ("pt-BR", "por"), ("zh_Hant", "zho"), ("chi", "zho"), ("en", "eng"), ("eng", "eng"),
+    ("und", "und"), ("", ""), (None, ""), ("haw", "haw"), ("english", "english"),
+])
+def test_normalize_language(code, expected):
+    assert ssd.normalize_language(code) == expected
+
+
+def test_language_aliases_cover_every_two_letter_code_and_bibliographic_code():
+    """ISO 639-1 has 183 two-letter codes, and 20 languages have an ISO
+    639-2/B code that differs from the /T one."""
+    two_letter = [k for k in ssd.LANGUAGE_ALIASES if len(k) == 2]
+    bibliographic = [k for k in ssd.LANGUAGE_ALIASES if len(k) == 3]
+    assert len(two_letter) == 183
+    assert len(bibliographic) == 20
+    assert all(len(v) == 3 for v in ssd.LANGUAGE_ALIASES.values())
+    assert not set(bibliographic) & set(ssd.LANGUAGE_ALIASES.values())
+
+
+@pytest.mark.parametrize("prefer_lang", ["de", "ger", "deu", "DE", "de-AT"])
+def test_prefer_lang_matches_however_the_language_is_written(prefer_lang):
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="ger"),
+               audio(3, 2, language="eng")]
+    target, _ = ssd.choose_target(streams, prefer_lang)
+    assert target["index"] == 2
+
+
+def test_tracks_tagged_differently_in_one_language_arent_treated_as_a_dub():
+    streams = [audio(1, 6, language="ger", default=True), audio(2, 2, language="deu")]
+    target, note = ssd.choose_target(streams, None)
+    assert target["index"] == 2 and note is None
+
+
+def test_skip_note_shows_the_language_as_given():
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="spa")]
+    _, note = ssd.choose_target(streams, "de")
+    assert "no 2-channel track in 'de'" in note
+
+
+@pytest.mark.parametrize("value", ["english", "xx", "", "e"])
+def test_prefer_lang_rejects_something_that_isnt_a_language_code(tmp_path, monkeypatch, capsys,
+                                                                 value):
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--prefer-lang", value])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    assert exit_info.value.code == 2
+    assert "isn't a language code; use a 2- or 3-letter code such as en or eng" in capsys.readouterr().err
+
+
+def test_jobs_must_be_at_least_1(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--jobs", "0"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    assert exit_info.value.code == 2
+    assert "--jobs must be >= 1" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing, need_mkvmerge, reported", [
+    ([], True, None),
+    (["mkvmerge"], False, None),
+    (["mkvmerge"], True, "mkvmerge (install MKVToolNix)"),
+    (["ffprobe"], False, "ffprobe"),
+    (["ffmpeg", "ffprobe", "mkvmerge"], True, "ffmpeg, ffprobe, mkvmerge (install MKVToolNix)"),
+], ids=["all there", "mkvmerge not needed", "mkvmerge needed", "ffprobe", "everything"])
+def test_check_tools(monkeypatch, caplog, missing, need_mkvmerge, reported):
+    monkeypatch.setattr(ssd.shutil, "which",
+                        lambda tool: None if tool in missing else f"/usr/bin/{tool}")
+
+    if reported is None:
+        ssd.check_tools(need_mkvmerge)
+        assert not caplog.records
+    else:
+        with pytest.raises(SystemExit) as exit_info:
+            ssd.check_tools(need_mkvmerge)
+        assert exit_info.value.code == 1
+        assert f"Missing required tool(s): {reported}" in caplog.text
+        assert "MKVToolNix (https://mkvtoolnix.download)" in caplog.text
+
+
 def test_probe_audio_streams_reads_commentary_flags(monkeypatch):
     probe = {"streams": [
         {"index": 1, "channels": 2, "codec_name": "aac", "tags": {"language": "eng"},
@@ -205,6 +315,8 @@ def library(tmp_path):
 
 
 def names(paths, root):
+    """paths relative to root, sorted and with forward slashes, so results
+    compare the same way on every system."""
     return sorted(p.relative_to(root).as_posix() for p in paths)
 
 
@@ -234,6 +346,120 @@ def test_iter_files_warns_about_leftover_temp_files(library, caplog):
     assert "safe to delete" in caplog.text
 
 
+def test_iter_files_warns_about_a_path_that_doesnt_exist(library, caplog):
+    typo = library.parent / "vidoes"
+
+    found = ssd.iter_files([typo, library], ssd.DEFAULT_EXTS, recursive=True)
+
+    assert names(found, library) == ["Season 01/c.mkv", "a.mkv", "b.MP4"]
+    assert f"Skipping {typo}: no such file or directory" in caplog.text
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a named pipe (not on Windows)")
+def test_iter_files_warns_about_a_path_that_isnt_a_file_or_folder(tmp_path, caplog):
+    pipe = tmp_path / "pipe.mkv"
+    os.mkfifo(pipe)
+
+    assert list(ssd.iter_files([pipe], ssd.DEFAULT_EXTS, recursive=True)) == []
+    assert f"Skipping {pipe}: not a file or directory" in caplog.text
+
+
+def test_a_mistyped_path_is_reported_on_the_console_and_the_rest_still_run(tmp_path, monkeypatch,
+                                                                         capsys):
+    """The warning must show even with --log-file, where only warnings and
+    errors reach the console."""
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    make_videos(videos, 2)
+    typo = tmp_path / "vidoes"
+    processed = []
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        processed.append(path.name)
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(typo), str(videos),
+                                      "--no-progress", "--log-file", str(tmp_path / "run.log")])
+
+    ssd.main()
+
+    assert f"Skipping {typo}: no such file or directory" in capsys.readouterr().out
+    assert sorted(processed) == ["e00.mkv", "e01.mkv"]
+
+@pytest.fixture
+def linked(tmp_path):
+    """A library folder full of symlinks, next to the real files they point
+    to. The path is fully resolved, since macOS keeps temp folders behind a
+    symlink (/var -> /private/var).
+
+        real/movie.mkv, real/notes.txt, real/show/ep1.mkv
+        lib/own.mkv                       an ordinary file
+        lib/movie.mkv, lib/again.mkv  ->  real/movie.mkv
+        lib/notes.mkv                 ->  real/notes.txt
+        lib/broken.mkv                ->  real/missing.mkv
+        lib/show                      ->  real/show
+        lib/loop                      ->  lib
+    """
+    root = tmp_path.resolve()
+    for name in ["real/movie.mkv", "real/notes.txt", "real/show/ep1.mkv", "lib/own.mkv"]:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("x")
+    links = {"lib/movie.mkv": "real/movie.mkv", "lib/again.mkv": "real/movie.mkv",
+             "lib/notes.mkv": "real/notes.txt", "lib/broken.mkv": "real/missing.mkv",
+             "lib/show": "real/show", "lib/loop": "lib"}
+    try:
+        for link, target in links.items():
+            (root / link).symlink_to(root / target, target_is_directory=(root / target).is_dir())
+    except OSError as exc:
+        pytest.skip(f"can't create symlinks here: {exc}")
+    return root
+
+
+def test_symlinked_files_are_found_as_the_file_they_point_to(linked, caplog):
+    caplog.set_level("INFO")
+    found = list(ssd.iter_files([linked / "lib"], ssd.DEFAULT_EXTS, recursive=True))
+
+    assert names(found, linked) == ["lib/own.mkv", "real/movie.mkv"]
+    assert "Not searching symlinked folder (use --follow-symlinks)" in caplog.text
+    assert str(Path("lib") / "show") in caplog.text
+    assert "symlink to a file without a video extension" in caplog.text
+
+
+def test_skip_symlinks_leaves_linked_files_out(linked, caplog):
+    caplog.set_level("INFO")
+    found = ssd.iter_files([linked / "lib"], ssd.DEFAULT_EXTS, recursive=True, skip_symlinks=True)
+
+    assert names(found, linked) == ["lib/own.mkv"]
+    assert "Skipping symlink (--skip-symlinks)" in caplog.text
+
+
+def test_follow_symlinks_searches_linked_folders_once_each(linked):
+    found = ssd.iter_files([linked / "lib"], ssd.DEFAULT_EXTS, recursive=True,
+                           follow_symlinks=True)
+
+    assert names(found, linked) == ["lib/own.mkv", "lib/show/ep1.mkv", "real/movie.mkv"]
+
+
+def test_a_symlinked_folder_named_on_the_command_line_is_searched(linked):
+    (linked / "shortcut").symlink_to(linked / "real" / "show", target_is_directory=True)
+
+    found = ssd.iter_files([linked / "shortcut"], ssd.DEFAULT_EXTS, recursive=True)
+
+    assert names(found, linked) == ["shortcut/ep1.mkv"]
+
+
+def test_a_file_given_more_than_once_is_found_once(linked, monkeypatch):
+    monkeypatch.chdir(linked)
+    paths = ["lib/own.mkv", linked / "lib" / "own.mkv", "lib/movie.mkv", "real/movie.mkv"]
+
+    found = ssd.iter_files(paths, ssd.DEFAULT_EXTS, recursive=True)
+
+    assert sorted(str(p.resolve()) for p in found) == [str(linked / "lib" / "own.mkv"),
+                                                        str(linked / "real" / "movie.mkv")]
+
+
 
 def test_make_backup_hard_links_and_replaces_a_stale_backup(tmp_path):
     video = tmp_path / "v.mkv"
@@ -241,10 +467,30 @@ def test_make_backup_hard_links_and_replaces_a_stale_backup(tmp_path):
     bak = tmp_path / "v.mkv.bak"
     bak.write_bytes(b"stale")
 
-    ssd.make_backup(video)
+    assert ssd.make_backup(video, replace=True) == bak
 
     assert bak.read_bytes() == b"original"
     assert os.stat(bak).st_ino == os.stat(video).st_ino
+
+
+def test_make_backup_numbers_the_new_backup_instead_of_replacing(tmp_path):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    for name, data in [("v.mkv.bak", b"first"), ("v.mkv.bak.1", b"second")]:
+        (tmp_path / name).write_bytes(data)
+
+    assert ssd.make_backup(video) == tmp_path / "v.mkv.bak.2"
+
+    assert (tmp_path / "v.mkv.bak").read_bytes() == b"first"
+    assert (tmp_path / "v.mkv.bak.1").read_bytes() == b"second"
+    assert (tmp_path / "v.mkv.bak.2").read_bytes() == b"original"
+
+
+def test_make_backup_uses_plain_bak_when_its_free(tmp_path):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.make_backup(video) == tmp_path / "v.mkv.bak"
 
 
 def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypatch):
@@ -261,18 +507,155 @@ def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypat
     assert os.stat(bak).st_ino != os.stat(video).st_ino
 
 
+@pytest.mark.parametrize("answers, expected", [
+    (["d"], "replace"),
+    (["N"], "number"),
+    (["q"], "quit"),
+    (["", "maybe", " n "], "number"),
+    ([EOFError], "quit"),
+], ids=["delete", "number", "quit", "asks again until it understands", "ctrl+d"])
+def test_ask_about_existing_backups(monkeypatch, answers, expected):
+    questions = []
+
+    def fake_input(prompt):
+        questions.append(prompt)
+        answer = answers[len(questions) - 1]
+        if answer is EOFError:
+            raise EOFError
+        return answer
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert ssd.ask_about_existing_backups(3) == expected
+    assert questions[0] == ("3 file(s) already have a backup: [d]elete and replace them, "
+                            "[n]umber new ones (.bak.1, .bak.2...), or [q]uit? ")
+    assert len(questions) == len(answers)
+
+
+@pytest.fixture
+def backed_up(tmp_path, monkeypatch):
+    """Two videos, one of which already has a .bak, with process_file()
+    replaced by a stand-in. Returns (folder, run), where run(*options,
+    tty=..., answer=...) runs main() and returns (exit code or None, the
+    backup setting each file was processed with, questions asked). An
+    exception as the answer is raised at the question instead."""
+    make_videos(tmp_path, 2)
+    (tmp_path / "e00.mkv.bak").write_text("old")
+
+    def run(*options, tty=True, answer="n"):
+        seen, questions = [], []
+
+        def fake_process_file(path, args, position=0, header="", on_progress=None):
+            seen.append(args.backup)
+            return "changed"
+
+        def fake_input(prompt):
+            questions.append(prompt)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+        monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+        monkeypatch.setattr(ssd, "process_file", fake_process_file)
+        monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(isatty=lambda: tty))
+        monkeypatch.setattr("builtins.input", fake_input)
+        monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
+                                          "--no-progress", *options])
+        code = None
+        try:
+            ssd.main()
+        except SystemExit as exc:
+            code = exc.code
+        return code, seen, questions
+    return tmp_path, run
+
+
+@pytest.mark.parametrize("answer, mode", [("d", "replace"), ("n", "number")])
+def test_existing_backups_are_asked_about_once(backed_up, answer, mode):
+    _, run = backed_up
+    code, seen, questions = run("--backup", answer=answer)
+
+    assert code is None
+    assert len(questions) == 1 and questions[0].startswith("1 file(s) already have a backup")
+    assert seen == [mode, mode]
+
+
+def test_quitting_at_the_backup_question_changes_nothing(backed_up, capsys):
+    _, run = backed_up
+    code, seen, _ = run("--backup", answer="q")
+
+    assert code == 0
+    assert seen == []
+    assert "Quit before changing any files." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("stop, code, message", [
+    (KeyboardInterrupt(), 130, "Interrupted by user (Ctrl+C). No files were changed."),
+    (ssd.Stopped(signal.SIGTERM), 143, "Stopped by SIGTERM. No files were changed."),
+], ids=["Ctrl+C", "SIGTERM"])
+def test_stopping_at_the_backup_question_changes_nothing(backed_up, capsys, stop, code, message):
+    _, run = backed_up
+    exit_code, seen, questions = run("--backup", answer=stop)
+
+    assert exit_code == code
+    assert len(questions) == 1
+    assert seen == []
+    assert message in capsys.readouterr().out
+
+
+def test_existing_backups_are_numbered_when_no_one_can_answer(backed_up, capsys):
+    _, run = backed_up
+    code, seen, questions = run("--backup", tty=False)
+
+    assert code is None
+    assert questions == []
+    assert seen == ["number", "number"]
+    assert "Use --existing-backups to choose" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", ["replace", "number"])
+def test_existing_backups_option_skips_the_question(backed_up, mode):
+    _, run = backed_up
+    code, seen, questions = run("--backup", "--existing-backups", mode)
+
+    assert questions == []
+    assert seen == [mode, mode]
+
+
+@pytest.mark.parametrize("options", [["--backup", "--dry-run"], []], ids=["dry run", "no --backup"])
+def test_no_backup_question_when_no_backup_will_be_made(backed_up, options):
+    _, run = backed_up
+    code, seen, questions = run(*options)
+
+    assert questions == []
+    assert len(seen) == 2
+
+
+def test_no_backup_question_without_existing_backups(backed_up):
+    folder, run = backed_up
+    (folder / "e00.mkv.bak").unlink()
+    code, seen, questions = run("--backup")
+
+    assert questions == []
+    assert seen == ["number", "number"]
+
+
 
 @pytest.fixture
 def fake_ffprobe(monkeypatch):
     """Replace run() with a stand-in ffprobe. Set layouts[path] to the
-    streams it should report for that file, or None to make it fail."""
+    streams it should report for that file, to (streams, duration in
+    seconds) to report a duration too, or to None to make it fail."""
     layouts = {}
 
     def fake_run(cmd, **kw):
-        streams = layouts[cmd[-1]]
-        if streams is None:
+        layout = layouts[cmd[-1]]
+        if layout is None:
             return types.SimpleNamespace(returncode=1, stdout="", stderr="unreadable")
-        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"streams": streams}), stderr="")
+        streams, duration = layout if isinstance(layout, tuple) else (layout, None)
+        data = {"streams": streams}
+        if duration is not None:
+            data["format"] = {"duration": f"{duration:.6f}"}
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
     monkeypatch.setattr(ssd, "run", fake_run)
     return layouts
 
@@ -291,8 +674,11 @@ ORIGINAL_AUDIO = [audio(1, 6, "eac3", default=True), audio(2, 2, "aac")]
       stream(2, "audio", 0, "aac", 2), stream(3, "subtitle")], "default flag is on stream#1,"),
     ([stream(0, "video", 1, "h264"), stream(1, "audio", 1, "eac3", 6),
       stream(2, "audio", 1, "aac", 2), stream(3, "subtitle")], "stream#1, stream#2"),
+    ([stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6),
+      stream(2, "data", 0, "bin_data"), stream(3, "subtitle")], "expected 2 audio tracks, found 1"),
     (None, "couldn't read"),
-], ids=["good", "stream dropped", "flag not moved", "both default", "unreadable"])
+], ids=["good", "stream dropped", "flag not moved", "both default", "audio track lost",
+        "unreadable"])
 def test_verify_remux(fake_ffprobe, remuxed, expected):
     fake_ffprobe["orig"] = ORIGINAL_LAYOUT
     fake_ffprobe["tmp"] = remuxed
@@ -313,6 +699,38 @@ def test_verify_remux_avi_reorder(fake_ffprobe):
     assert "didn't end up first" in ssd.verify_remux("orig", "tmp", ORIGINAL_AUDIO, 2, reordered=True)
 
 
+REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6),
+                  stream(2, "audio", 1, "aac", 2), stream(3, "subtitle")]
+
+
+@pytest.mark.parametrize("before, after, rejected", [
+    (2400.0, 2400.02, False),
+    (2400.0, 2377.0, False),
+    (2400.0, 2375.0, True),
+    (2400.0, 1200.0, True),
+    (30.0, 29.1, False),
+    (30.0, 28.9, True),
+    (1.0, 0.5, False),
+    (2400.0, 2500.0, False),
+    (None, 1200.0, False),
+    (2400.0, None, False),
+], ids=["normal drift", "just under 1%", "just over 1%", "half missing",
+        "short clip within 1s", "short clip over 1s", "1s clip", "longer",
+        "original duration unknown", "remux duration unknown"])
+def test_verify_remux_rejects_a_remux_much_shorter_than_the_original(fake_ffprobe, before, after,
+                                                                     rejected):
+    fake_ffprobe["orig"] = (ORIGINAL_LAYOUT, before)
+    fake_ffprobe["tmp"] = (REMUXED_LAYOUT, after)
+
+    problem = ssd.verify_remux("orig", "tmp", ORIGINAL_AUDIO, 2, reordered=False)
+
+    if rejected:
+        assert problem == (f"duration dropped from {before:.1f}s to {after:.1f}s; "
+                           f"the original may be incomplete")
+    else:
+        assert problem is None
+
+
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows only has a read-only flag, not Unix permissions")
 def test_swap_in_keeps_the_original_permissions(tmp_path):
@@ -327,6 +745,53 @@ def test_swap_in_keeps_the_original_permissions(tmp_path):
 
     assert video.read_bytes() == b"remuxed"
     assert video.stat().st_mode & 0o777 == 0o764
+
+
+OLD_TIMES_NS = (1_577_880_000_000_000_000, 1_577_890_000_123_456_000)
+
+
+@pytest.mark.parametrize("keep_dates", [True, False])
+def test_swap_in_keeps_the_original_dates_only_when_asked(tmp_path, monkeypatch, keep_dates):
+    """Only the modification time is compared. The access time is copied
+    too, but the system updates it whenever anything (an indexer,
+    antivirus) reads the file, which can happen even before swap_in()
+    runs, so its exact value can't be relied on here."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    os.utime(video, ns=OLD_TIMES_NS)
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+    set_mtimes = []
+    real_utime = os.utime
+
+    def recording_utime(path, *args, ns=None, **kwargs):
+        set_mtimes.append(ns[1])
+        return real_utime(path, *args, ns=ns, **kwargs)
+    monkeypatch.setattr(ssd.os, "utime", recording_utime)
+
+    ssd.swap_in(video, tmp, backup=False, keep_dates=keep_dates)
+
+    assert video.read_bytes() == b"remuxed"
+    if keep_dates:
+        assert set_mtimes == [OLD_TIMES_NS[1]]
+        assert video.stat().st_mtime_ns == OLD_TIMES_NS[1]
+    else:
+        assert set_mtimes == []
+        assert video.stat().st_mtime_ns > OLD_TIMES_NS[1]
+
+
+def test_keep_dates_leaves_the_backup_with_the_original_dates(tmp_path):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    os.utime(video, ns=OLD_TIMES_NS)
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+
+    ssd.swap_in(video, tmp, backup="number", keep_dates=True)
+
+    bak = tmp_path / "v.mkv.bak"
+    assert bak.read_bytes() == b"original"
+    assert bak.stat().st_mtime_ns == video.stat().st_mtime_ns == OLD_TIMES_NS[1]
 
 
 def test_swap_in_gives_the_new_file_the_original_owner(tmp_path, monkeypatch):
@@ -361,10 +826,14 @@ def test_swap_in_warns_once_when_the_owner_cant_be_changed(tmp_path, monkeypatch
 
 
 def remux_with_mkvmerge(path):
+    """Fix path with apply_mkv(), as if it had ORIGINAL_AUDIO's tracks,
+    keeping a backup."""
     return ssd.apply_mkv(path, ORIGINAL_AUDIO, 2, dry_run=False, backup=True)
 
 
 def remux_with_ffmpeg(path):
+    """Fix path with apply_remux(), as if it had ORIGINAL_AUDIO's tracks,
+    keeping a backup."""
     return ssd.apply_remux(path, ORIGINAL_AUDIO, 2, dry_run=False, backup=True,
                            reorder_for_avi=False, duration=100.0)
 
@@ -372,10 +841,13 @@ def remux_with_ffmpeg(path):
 @pytest.fixture(params=[(remux_with_mkvmerge, "v.mkv"), (remux_with_ffmpeg, "v.mp4")],
                 ids=["mkvmerge", "ffmpeg"])
 def remux(request, tmp_path, monkeypatch):
-    """Returns (apply, video, set_outcome). Instead of running a real remux,
-    the stand-in writes "remuxed" to the temp file; set_outcome("fail"),
-    set_outcome("warn"), set_outcome("interrupt") or set_outcome(<reason>)
-    changes what happens."""
+    """Runs each test once with mkvmerge and once with ffmpeg. Returns
+    (apply, video, set_outcome): apply() fixes video, which starts out
+    containing "original". No real remux runs: the stand-in writes
+    "remuxed" to the temp file and succeeds, unless set_outcome() says
+    otherwise first. "fail" makes the tool exit with an error, "warn" exit
+    with code 1 and a warning, and "interrupt" raise KeyboardInterrupt.
+    Any other string makes the post-remux check fail with that reason."""
     apply, filename = request.param
     video = tmp_path / filename
     video.write_bytes(b"original")
@@ -402,6 +874,7 @@ def remux(request, tmp_path, monkeypatch):
 
 
 def leftover_temp_files(video):
+    """Any temp remux files left next to video."""
     return list(video.parent.glob("*" + ssd.TMP_MARKER + "*"))
 
 
@@ -491,6 +964,24 @@ def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypat
         "    v.mkv: mkvmerge finished with warnings: odd timestamps; gap in track 1"
 
 
+@pytest.mark.parametrize("apply, filename, tool", [
+    (remux_with_mkvmerge, "v.mkv", "mkvmerge"),
+    (remux_with_ffmpeg, "v.mp4", "ffmpeg"),
+], ids=["mkvmerge", "ffmpeg"])
+@pytest.mark.parametrize("returncode", [0, 2], ids=["exit 0", "exit 2"])
+def test_remux_that_writes_no_file_is_a_failure(tmp_path, monkeypatch, caplog, apply, filename,
+                                                tool, returncode):
+    monkeypatch.setattr(ssd, "run_with_progress", lambda cmd, *a, **k: (returncode, "disk full\n"))
+    video = tmp_path / filename
+    video.write_bytes(b"original")
+
+    assert apply(video) is False
+
+    assert f"{filename}: {tool} remux failed: disk full" in caplog.text
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+
+
 def test_warning_exit_code_is_still_rejected_if_the_check_fails(remux, caplog):
     apply, video, set_outcome = remux
     set_outcome("warn")
@@ -534,7 +1025,7 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
 def file_args(**overrides):
     """process_file()'s args, as a --dry-run with no progress bar."""
     values = dict(prefer_lang=None, avi_reorder=False, force=False, dry_run=True,
-                  backup=False, no_progress=True, jobs=1)
+                  backup=False, keep_dates=False, no_progress=True, jobs=1)
     values.update(overrides)
     return types.SimpleNamespace(**values)
 
@@ -593,6 +1084,14 @@ def test_other_containers_set_the_default_flag(tmp_path, probed, caplog, name):
 
     assert result == "changed"
     assert "setting stream#2 (eng, aac) as default audio" in caplog.text
+
+
+def test_file_without_audio_is_skipped(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(ssd, "probe_audio_streams", lambda path: ([], 100.0))
+
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
+    assert "v.mkv: no audio streams found, skipping" in caplog.text
 
 
 def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatch):
@@ -663,6 +1162,116 @@ def test_run_with_progress_leaves_progress_lines_out_of_the_output():
             "for p in range(1, 101): print(f'pct={p}')")
     _, output = ssd.run_with_progress(python_cmd(code), "x", False, parse_pct_line)
     assert output.splitlines() == ["Warning: early"]
+
+
+@pytest.mark.parametrize("exit_code, steps", [(0, [10, 30, 30, 30]), (1, [10, 30, 30])],
+                         ids=["success fills the bar", "failure leaves it"])
+def test_run_with_progress_shows_a_per_file_bar_and_closes_it(monkeypatch, exit_code, steps):
+    pytest.importorskip("tqdm")
+    bars = []
+
+    class RecordingTqdm(ssd.tqdm):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.steps, self.was_closed = [], False
+            bars.append(self)
+
+        def update(self, n=1):
+            self.steps.append(n)
+            return super().update(n)
+
+        def close(self):
+            self.was_closed = True
+            return super().close()
+
+    monkeypatch.setattr(ssd, "HAVE_TQDM", True)
+    monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
+    code = ("import sys\n"
+            "for p in (10, 40, 40, 30, 70): print(f'pct={p}')\n"
+            f"sys.exit({exit_code})")
+
+    returncode, _ = ssd.run_with_progress(python_cmd(code), "Episode 1.mkv", True, parse_pct_line)
+
+    assert returncode == exit_code
+    [bar] = bars
+    assert bar.desc == "  Episode 1.mkv"
+    assert bar.steps == steps
+    assert bar.was_closed
+
+
+UTF8_OUTPUT_CMD = python_cmd(
+    "import sys\n"
+    "sys.stdout.buffer.write('Título: Été — 日本語\\n'.encode('utf-8') + b'bad \\xff byte\\n')")
+
+
+def test_run_reads_output_as_utf8_and_replaces_invalid_bytes():
+    """ffprobe writes UTF-8 whatever the system's encoding, so a track name
+    must come through intact even where the default is cp1252 (Windows),
+    and one bad byte mustn't stop the run."""
+    res = ssd.run(UTF8_OUTPUT_CMD)
+    assert res.stdout.splitlines() == ["Título: Été — 日本語", "bad \ufffd byte"]
+
+
+def test_run_with_progress_reads_output_as_utf8_and_replaces_invalid_bytes():
+    returncode, output = ssd.run_with_progress(UTF8_OUTPUT_CMD, "x", False, parse_pct_line)
+    assert returncode == 0
+    assert output.splitlines() == ["Título: Été — 日本語", "bad \ufffd byte"]
+
+
+def test_mkvmerge_is_told_to_write_utf8(tmp_path, caplog):
+    caplog.set_level("INFO")
+    ssd.apply_mkv(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2, dry_run=True, backup=False)
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    assert args[args.index("--output-charset") + 1] == "UTF-8"
+
+
+def dry_run_flags(caplog):
+    """The --default-track values from a logged mkvmerge dry-run command."""
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    return [args[i + 1] for i, a in enumerate(args) if a == "--default-track"]
+
+
+def test_mkvmerge_gets_its_own_track_ids_when_they_differ_from_ffprobes(tmp_path, caplog,
+                                                                       mkvmerge_ids):
+    """ffprobe calls the audio tracks streams 1 and 2, but mkvmerge (which
+    also counts a track ffmpeg skipped) calls them 2 and 3."""
+    caplog.set_level("INFO")
+    mkvmerge_ids.value = [2, 3]
+
+    assert ssd.apply_mkv(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2, dry_run=True, backup=False)
+
+    assert dry_run_flags(caplog) == ["2:no", "3:yes"]
+
+
+@pytest.mark.parametrize("ids, message", [
+    ([1], "mkvmerge sees 1 audio track(s), but ffprobe sees 2"),
+    ([], "mkvmerge sees 0 audio track(s), but ffprobe sees 2"),
+    (None, "mkvmerge couldn't read the file, but ffprobe sees 2"),
+], ids=["fewer", "none", "unreadable"])
+def test_mkvmerge_and_ffprobe_disagreeing_leaves_the_file_alone(tmp_path, caplog, mkvmerge_ids,
+                                                               ids, message):
+    mkvmerge_ids.value = ids
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(video, ORIGINAL_AUDIO, 2, dry_run=False, backup=False) is False
+
+    assert message in caplog.text
+    assert video.read_bytes() == b"original"
+
+
+@pytest.mark.parametrize("returncode, stdout, expected", [
+    (0, json.dumps({"tracks": [{"id": 0, "type": "video"}, {"id": 1, "type": "audio"},
+                               {"id": 2, "type": "subtitles"}, {"id": 3, "type": "audio"}]}),
+     [1, 3]),
+    (0, json.dumps({"container": {"recognized": False}, "errors": []}), []),
+    (2, "", None),
+    (0, "not json", None),
+], ids=["audio tracks only", "unrecognized file", "mkvmerge failed", "bad output"])
+def test_mkvmerge_audio_ids(monkeypatch, returncode, stdout, expected):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=returncode, stdout=stdout, stderr=""))
+    assert real_mkvmerge_audio_ids(Path("v.mkv")) == expected
 
 
 SLOW_CMD = python_cmd("import time\n"
@@ -812,6 +1421,9 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
 
 
 def make_videos(folder, count):
+    """Create count placeholder videos in folder: e00.mkv, e01.mkv, ... Only
+    their names matter, since the tests that use them replace
+    process_file()."""
     for i in range(count):
         (folder / f"e{i:02}.mkv").write_text("x")
 
@@ -861,6 +1473,39 @@ def test_partial_summary_counts_unfinished_files_as_cancelled(tmp_path, monkeypa
     assert "cancelled: 3" in out
 
 
+@pytest.mark.parametrize("dry_run, interrupted, heading, first_line", [
+    (False, False, "----- Summary -----", "changed: 2"),
+    (True, False, "----- Summary (dry run, nothing was changed) -----", "would change: 2"),
+    (False, True, "----- Summary (partial -- interrupted) -----", "changed: 1"),
+    (True, True, "----- Summary (partial -- interrupted; dry run, nothing was changed) -----",
+     "would change: 1"),
+], ids=["normal", "dry run", "interrupted", "interrupted dry run"])
+def test_summary_says_what_kind_of_run_it_was(tmp_path, monkeypatch, capsys, dry_run, interrupted,
+                                              heading, first_line):
+    make_videos(tmp_path, 2)
+    calls = []
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        calls.append(path.name)
+        if interrupted and len(calls) == 2:
+            raise KeyboardInterrupt
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
+                                      *(["--dry-run"] if dry_run else [])])
+
+    try:
+        ssd.main()
+    except SystemExit:
+        pass
+
+    lines = capsys.readouterr().out.splitlines()
+    start = lines.index(heading)
+    assert lines[start + 1:start + 5] == [first_line, "unchanged: 0", "skipped: 0", "error: 0"]
+
+
 def test_stop_handler_cancels_and_stops_subprocesses(monkeypatch):
     stopped = []
     monkeypatch.setattr(ssd, "_terminate_active_procs", lambda: stopped.append(True))
@@ -902,6 +1547,31 @@ def test_signal_mid_run_prints_a_partial_summary(tmp_path, monkeypatch, capsys,
     assert "cancelled: 3" in out
     assert len(calls) == 3
 
+
+@pytest.mark.parametrize("signum, code, message", [
+    (signal.SIGINT, 130, "Interrupted by user (Ctrl+C) while looking for files"),
+    (signal.SIGTERM, 143, "Stopped by SIGTERM while looking for files"),
+], ids=["SIGINT", "SIGTERM"])
+def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, capsys,
+                                                      signum, code, message):
+    def interrupted_scan(*args, **kwargs):
+        yield tmp_path / "a.mkv"
+        signal.raise_signal(signum)
+
+    processed = []
+    monkeypatch.setattr(ssd, "iter_files", interrupted_scan)
+    monkeypatch.setattr(ssd, "process_file", lambda *a, **k: processed.append(a))
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    out = capsys.readouterr().out
+    assert exit_info.value.code == code
+    assert message in out
+    assert "No files were changed" in out
+    assert "Summary" not in out
+    assert processed == []
 
 @pytest.mark.filterwarnings("error")
 def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):

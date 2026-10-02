@@ -7,11 +7,13 @@ thin or quiet on TV speakers, soundbars and laptops. This script finds the
 2-channel (stereo) track in each file and makes it the default instead,
 clearing the flag from every other audio track. Nothing is re-encoded.
 
-Requirements (on your PATH):
+Requirements:
+  - Python 3.10 or newer
   - ffmpeg and ffprobe 4.4 or newer    https://ffmpeg.org
   - mkvmerge, part of MKVToolNix       https://mkvtoolnix.download
     (only needed for .mkv/.webm files)
   - tqdm, optional (pip install tqdm) for progress bars
+  ffmpeg, ffprobe and mkvmerge must be on your PATH.
 
 Which track it picks:
   The stereo track in the same language as the track that plays by default
@@ -34,24 +36,37 @@ How it changes each file:
 Safe by default:
   - Files that are already right are left alone.
   - --dry-run shows what would change without touching anything.
-  - Each new file is checked (no lost streams, the right track is default)
-    before it replaces the original. --backup also keeps the original as
-    <name>.bak.
+  - Each new file is checked (no lost streams, no shorter than the
+    original, the right track is default) before it replaces the
+    original. --backup also keeps the original as <name>.bak, never
+    deleting an existing backup unless you say so.
   - Ctrl+C or SIGTERM (docker stop, kill) stops cleanly and removes any
     half-written temp files.
+  - A symlinked file is fixed through its link: the file it points to is
+    changed and the link keeps working. --skip-symlinks skips them
+    instead, and --follow-symlinks also searches symlinked subfolders.
 
 Examples:
-  python3 set_stereo_default.py /path/to/videos
-  python3 set_stereo_default.py /path/to/videos --dry-run
-  python3 set_stereo_default.py file1.mkv file2.mp4
-  python3 set_stereo_default.py /path/to/videos --ext mkv,mp4 --no-recursive
-  python3 set_stereo_default.py /path/to/videos --prefer-lang eng
-  python3 set_stereo_default.py /path/to/videos --avi-reorder
-  python3 set_stereo_default.py /path/to/videos --backup
-  python3 set_stereo_default.py /path/to/videos --force
-  python3 set_stereo_default.py /path/to/videos --no-progress
-  python3 set_stereo_default.py /path/to/videos --log-file run.log
-  python3 set_stereo_default.py /path/to/videos --jobs 4
+  Preview every change without touching anything:
+    python3 set_stereo_default.py /path/to/videos --dry-run
+
+  Fix one folder, keeping each original as <name>.bak:
+    python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
+
+  Fix a whole library, 4 files at a time, with the details in a log file:
+    python3 set_stereo_default.py /path/to/videos --jobs 4 --log-file run.log
+
+  Use the English stereo track, whatever language plays by default now:
+    python3 set_stereo_default.py /path/to/videos --prefer-lang en
+
+  Just these files, or only .mkv files and not in subfolders:
+    python3 set_stereo_default.py file1.mkv file2.mp4
+    python3 set_stereo_default.py /path/to/videos --ext mkv --no-recursive
+
+Exit codes: 0 all done, 1 a file had an error, no files matched or a tool is
+missing, 2 invalid options, 130 stopped by Ctrl+C, 143 stopped by SIGTERM.
+
+Full guide: https://github.com/tronyx/Set-Stereo-Default
 """
 
 import argparse
@@ -101,6 +116,53 @@ to count."""
 NAME_TAGS = ("title", "name", "handler_name")
 """Tags that can hold a track's name: MKV uses "title", and ffprobe reports
 MP4 names as "name" or "handler_name"."""
+
+LANGUAGE_ALIASES = {
+    "aa": "aar", "ab": "abk", "ae": "ave", "af": "afr", "ak": "aka", "alb": "sqi", "am": "amh",
+    "an": "arg", "ar": "ara", "arm": "hye", "as": "asm", "av": "ava", "ay": "aym", "az": "aze",
+    "ba": "bak", "baq": "eus", "be": "bel", "bg": "bul", "bi": "bis", "bm": "bam", "bn": "ben",
+    "bo": "bod", "br": "bre", "bs": "bos", "bur": "mya", "ca": "cat", "ce": "che", "ch": "cha",
+    "chi": "zho", "co": "cos", "cr": "cre", "cs": "ces", "cu": "chu", "cv": "chv", "cy": "cym",
+    "cze": "ces", "da": "dan", "de": "deu", "dut": "nld", "dv": "div", "dz": "dzo", "ee": "ewe",
+    "el": "ell", "en": "eng", "eo": "epo", "es": "spa", "et": "est", "eu": "eus", "fa": "fas",
+    "ff": "ful", "fi": "fin", "fj": "fij", "fo": "fao", "fr": "fra", "fre": "fra", "fy": "fry",
+    "ga": "gle", "gd": "gla", "geo": "kat", "ger": "deu", "gl": "glg", "gn": "grn", "gre": "ell",
+    "gu": "guj", "gv": "glv", "ha": "hau", "he": "heb", "hi": "hin", "ho": "hmo", "hr": "hrv",
+    "ht": "hat", "hu": "hun", "hy": "hye", "hz": "her", "ia": "ina", "ice": "isl", "id": "ind",
+    "ie": "ile", "ig": "ibo", "ii": "iii", "ik": "ipk", "io": "ido", "is": "isl", "it": "ita",
+    "iu": "iku", "ja": "jpn", "jv": "jav", "ka": "kat", "kg": "kon", "ki": "kik", "kj": "kua",
+    "kk": "kaz", "kl": "kal", "km": "khm", "kn": "kan", "ko": "kor", "kr": "kau", "ks": "kas",
+    "ku": "kur", "kv": "kom", "kw": "cor", "ky": "kir", "la": "lat", "lb": "ltz", "lg": "lug",
+    "li": "lim", "ln": "lin", "lo": "lao", "lt": "lit", "lu": "lub", "lv": "lav", "mac": "mkd",
+    "mao": "mri", "may": "msa", "mg": "mlg", "mh": "mah", "mi": "mri", "mk": "mkd", "ml": "mal",
+    "mn": "mon", "mr": "mar", "ms": "msa", "mt": "mlt", "my": "mya", "na": "nau", "nb": "nob",
+    "nd": "nde", "ne": "nep", "ng": "ndo", "nl": "nld", "nn": "nno", "no": "nor", "nr": "nbl",
+    "nv": "nav", "ny": "nya", "oc": "oci", "oj": "oji", "om": "orm", "or": "ori", "os": "oss",
+    "pa": "pan", "per": "fas", "pi": "pli", "pl": "pol", "ps": "pus", "pt": "por", "qu": "que",
+    "rm": "roh", "rn": "run", "ro": "ron", "ru": "rus", "rum": "ron", "rw": "kin", "sa": "san",
+    "sc": "srd", "sd": "snd", "se": "sme", "sg": "sag", "si": "sin", "sk": "slk", "sl": "slv",
+    "slo": "slk", "sm": "smo", "sn": "sna", "so": "som", "sq": "sqi", "sr": "srp", "ss": "ssw",
+    "st": "sot", "su": "sun", "sv": "swe", "sw": "swa", "ta": "tam", "te": "tel", "tg": "tgk",
+    "th": "tha", "ti": "tir", "tib": "bod", "tk": "tuk", "tl": "tgl", "tn": "tsn", "to": "ton",
+    "tr": "tur", "ts": "tso", "tt": "tat", "tw": "twi", "ty": "tah", "ug": "uig", "uk": "ukr",
+    "ur": "urd", "uz": "uzb", "ve": "ven", "vi": "vie", "vo": "vol", "wa": "wln", "wel": "cym",
+    "wo": "wol", "xh": "xho", "yi": "yid", "yo": "yor", "za": "zha", "zh": "zho", "zu": "zul",
+}
+"""Language codes mapped to the ISO 639-2/T code for the same language: every
+two-letter ISO 639-1 code ("de" -> "deu"), and the 20 ISO 639-2/B codes that
+differ from their /T code ("ger" -> "deu"). MKV files store /B codes and MP4
+files often /T codes, so the same language can be tagged either way.
+Generated from the ISO 639-2 code list (datasets/language-codes on GitHub)."""
+
+MAX_DURATION_LOSS = 0.01
+"""How much shorter a remux may be than the original, as a fraction of the
+original's duration, before it's rejected. A normal remux changes the
+duration by milliseconds; a file whose header claims more than it contains
+(e.g. an incomplete download) comes out much shorter."""
+
+MIN_DURATION_LOSS = 1.0
+"""The least duration loss, in seconds, that rejects a remux, so short clips
+aren't rejected over a few milliseconds of normal drift."""
 
 log = logging.getLogger("set_stereo_default")
 
@@ -191,10 +253,25 @@ def _stop_handler(signum, frame):
     raise Stopped(signum)
 
 
+def _stop_reason(exc):
+    """Return (signal number, message) for a stop: a Stopped from
+    _stop_handler(), or a plain KeyboardInterrupt, which counts as Ctrl+C."""
+    signum = getattr(exc, "signum", signal.SIGINT)
+    if signum == signal.SIGINT:
+        return signum, "Interrupted by user (Ctrl+C)"
+    return signum, f"Stopped by {signal.Signals(signum).name}"
+
+
 def run(cmd, **kw):
     """Run a quick command (e.g. ffprobe) and capture its output. Remuxes use
-    run_with_progress() instead."""
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    run_with_progress() instead.
+
+    Output is read as UTF-8, which ffprobe, ffmpeg and mkvmerge (given
+    --output-charset UTF-8) all write, rather than in the system's own
+    encoding: on Windows that's usually cp1252, which garbles non-English
+    track names or fails on them outright. A byte that isn't valid UTF-8
+    is replaced rather than stopping the run."""
+    return subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", **kw)
 
 
 def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
@@ -206,7 +283,7 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     else. With show_progress, a tqdm bar titled label shows this file's
     progress at the given row position. on_progress(pct), if given, is
     called on every increase and with 100 on success; main() uses it to
-    move the overall bar.
+    move the overall bar. Output is read as UTF-8, as in run().
 
     The process is listed in _active_procs while it runs and is killed if
     anything goes wrong, so it's never left running on its own. If a stop
@@ -218,7 +295,7 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     last_pct = 0
     lines = deque(maxlen=50)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, bufsize=1)
+                             encoding="utf-8", errors="replace", bufsize=1)
     try:
         with _active_procs_lock:
             _active_procs.add(proc)
@@ -323,6 +400,16 @@ def is_commentary(stream):
                 or any(COMMENTARY_NAME_RE.search(n) for n in stream.get("names", ())))
 
 
+def normalize_language(code):
+    """Return code in one standard form, so different tags for the same
+    language compare equal: lowercased, with any region or script part
+    dropped ("pt-BR" -> "pt"), then mapped to its ISO 639-2/T code through
+    LANGUAGE_ALIASES ("de" and "ger" -> "deu"). Codes that aren't in the
+    table come back lowercased; an empty tag stays empty."""
+    base = re.split(r"[-_]", (code or "").strip().lower(), maxsplit=1)[0]
+    return LANGUAGE_ALIASES.get(base, base)
+
+
 def choose_target(streams, prefer_lang):
     """Return (stream, note): the stereo track to make default, or None and a
     note saying why the file should be skipped.
@@ -332,7 +419,9 @@ def choose_target(streams, prefer_lang):
     language of the track players start on now (the default one, or the
     first if none is flagged). That way a stereo dub never replaces the
     original language. A track with no language tag (or "und") matches any
-    language, but a track tagged with the wanted one wins over it."""
+    language, but a track tagged with the wanted one wins over it. Codes
+    are compared after normalize_language(), so "de", "ger" and "deu" all
+    mean German."""
     def describe(ss):
         """List tracks for a skip note, e.g. "stream#2 (eng/aac), stream#3 (spa/ac3)"."""
         return ", ".join(f"stream#{s['index']} ({s['language'] or 'und'}/{s['codec']})" for s in ss)
@@ -345,13 +434,15 @@ def choose_target(streams, prefer_lang):
         return None, "no 2-channel audio track found"
 
     current = next((s for s in streams if s["default"]), streams[0])
-    wanted = (prefer_lang or current["language"]).lower()
+    shown = prefer_lang or current["language"]
+    wanted = normalize_language(shown)
     if wanted not in ("", "und"):
-        in_lang = [s for s in candidates if s["language"].lower() in ("", "und", wanted)]
+        in_lang = [s for s in candidates
+                   if normalize_language(s["language"]) in ("", "und", wanted)]
         if not in_lang:
-            return None, (f"no 2-channel track in '{wanted}' [found {describe(candidates)}] "
+            return None, (f"no 2-channel track in '{shown}' [found {describe(candidates)}] "
                           f"-- use --prefer-lang to pick another language")
-        exact = [s for s in in_lang if s["language"].lower() == wanted]
+        exact = [s for s in in_lang if normalize_language(s["language"]) == wanted]
         candidates = exact if len(exact) == 1 else in_lang
 
     if len(candidates) == 1:
@@ -367,19 +458,27 @@ def needs_change(streams, target_index):
 
 
 def probe_layout(path):
-    """Return every stream in path (type, codec, channels, language and
-    default flag), or None if ffprobe can't read it. Used to check a remux."""
+    """Return (streams, duration) for path: every stream (type, codec,
+    channels, language and default flag) and the duration in seconds, or
+    None if unknown. Returns (None, None) if ffprobe can't read the file.
+    Used to check a remux."""
     res = run([
         "ffprobe", "-v", "error", "-print_format", "json", "-show_entries",
-        "stream=index,codec_type,codec_name,channels:stream_disposition=default:stream_tags=language",
+        "stream=index,codec_type,codec_name,channels:stream_disposition=default:stream_tags=language"
+        ":format=duration",
         str(path),
     ])
     if res.returncode != 0:
-        return None
+        return None, None
     try:
-        return json.loads(res.stdout).get("streams", [])
+        data = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return None
+        return None, None
+    try:
+        duration = float(data.get("format", {}).get("duration"))
+    except (TypeError, ValueError):
+        duration = None
+    return data.get("streams", []), duration
 
 
 def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
@@ -387,17 +486,29 @@ def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
     it looks right, otherwise a short reason why not.
 
     The new file must have as many streams as the original, so nothing was
-    lost. Then the target must be the only audio track flagged default. A
+    lost, and must not be shorter than the original by more than
+    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds). A much
+    shorter result means the original contains less than its header
+    claims, e.g. an incomplete download, so it's left alone for a person
+    to look at. A longer one is fine: the original's header just
+    understated it. The check is skipped if either duration is unknown.
+
+    Then the target must be the only audio track flagged default. A
     remux keeps audio tracks in order, so the target is found by its
     position among them. After an AVI reorder (reordered=True) there's no
     flag to check, so the first audio track must instead match the
     target's codec, channel count and language."""
-    before = probe_layout(orig_path)
-    after = probe_layout(tmp_path)
+    before, before_duration = probe_layout(orig_path)
+    after, after_duration = probe_layout(tmp_path)
     if before is None or after is None:
         return "ffprobe couldn't read the file"
     if len(after) != len(before):
         return f"stream count changed from {len(before)} to {len(after)}"
+    if before_duration and after_duration is not None:
+        allowed = max(before_duration * MAX_DURATION_LOSS, MIN_DURATION_LOSS)
+        if after_duration < before_duration - allowed:
+            return (f"duration dropped from {before_duration:.1f}s to {after_duration:.1f}s; "
+                    f"the original may be incomplete")
 
     audio = [s for s in after if s.get("codec_type") == "audio"]
     if len(audio) != len(streams):
@@ -420,17 +531,32 @@ def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
     return None
 
 
-def make_backup(path):
-    """Keep the original as <name>.bak. A hard link is instant and takes no
-    extra space: once the new file replaces the original, the old data is
-    still reachable through the .bak link. Where hard links aren't
-    supported, a full copy is made instead."""
+def backup_path(path, replace):
+    """Where to keep path's original: <name>.bak, unless that already exists
+    and replace is false, in which case the first free <name>.bak.1,
+    <name>.bak.2, ... so an earlier backup is never lost."""
     bak_path = path.with_name(path.name + ".bak")
+    if replace or not bak_path.exists():
+        return bak_path
+    n = 1
+    while path.with_name(f"{path.name}.bak.{n}").exists():
+        n += 1
+    return path.with_name(f"{path.name}.bak.{n}")
+
+
+def make_backup(path, replace=False):
+    """Keep the original at backup_path() and return that path. A hard link
+    is instant and needs no room while the remux runs; once the new file
+    replaces the original, the backup holds the original's data on its
+    own, so it takes the original's full size until it's deleted. Where
+    hard links aren't supported, a full copy is made instead."""
+    bak_path = backup_path(path, replace)
     bak_path.unlink(missing_ok=True)
     try:
         os.link(path, bak_path)
     except OSError:
         shutil.copy2(path, bak_path)
+    return bak_path
 
 
 def copy_ownership(src, dst):
@@ -456,17 +582,31 @@ def copy_ownership(src, dst):
                         f"network shares often map root to 'nobody'.")
 
 
-def swap_in(path, tmp_path, backup):
+def swap_in(path, tmp_path, backup, keep_dates=False):
     """Replace path with the checked remux at tmp_path. Copies the original's
-    permissions and owner, keeps the original as .bak if backup is set,
-    then swaps the new file in with a single atomic rename."""
+    permissions and owner (and with keep_dates, its access and modification
+    times), keeps the original as a backup if backup is set, then swaps the
+    new file in with a single atomic rename.
+
+    backup is falsy for no backup, "replace" to overwrite an existing
+    <name>.bak, or anything else to number the new one if <name>.bak
+    exists (see backup_path()).
+
+    keep_dates is off by default because tools that spot changed files by
+    size and modification time (rsync's default, some backup software)
+    could skip a remux that kept both, leaving a stale copy."""
     copy_ownership(path, tmp_path)
+    if keep_dates:
+        st = os.stat(path)
+        os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
     if backup:
-        make_backup(path)
+        bak_path = make_backup(path, replace=(backup == "replace"))
+        if bak_path.suffix != ".bak":
+            log.info(f"    {path.name}: kept the original as {bak_path.name}")
     os.replace(tmp_path, path)
 
 
-def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup):
+def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, keep_dates=False):
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged).
@@ -480,15 +620,29 @@ def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup):
             log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        swap_in(path, tmp_path, backup)
+        swap_in(path, tmp_path, backup, keep_dates)
         return True
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
 
 
+def mkvmerge_audio_ids(path):
+    """Return mkvmerge's track IDs for path's audio tracks, in file order, or
+    None if mkvmerge can't read it. mkvmerge -J exits 0 even for a file it
+    doesn't recognize, but then lists no tracks, so that gives []."""
+    res = run(["mkvmerge", "-J", str(path)])
+    if res.returncode != 0:
+        return None
+    try:
+        tracks = json.loads(res.stdout).get("tracks", [])
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    return [t["id"] for t in tracks if t.get("type") == "audio"]
+
+
 def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
-              on_progress=None):
+              on_progress=None, keep_dates=False):
     """Remux an MKV/WebM file with mkvmerge so only target_index is flagged
     default. Returns True on success, False on failure (already logged).
     With dry_run, just logs the command.
@@ -499,11 +653,18 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     touched until check_and_swap_in() has checked it.
 
     mkvmerge details:
-    - Its track IDs match ffprobe's stream indexes for MKV, so the indexes
-      are passed straight through.
+    - It numbers tracks its own way, which usually matches ffprobe's stream
+      indexes but not always: ffmpeg skips track types it doesn't know, so
+      every later index shifts. So mkvmerge's own IDs are looked up
+      (mkvmerge_audio_ids()) and matched to ffprobe's audio streams by
+      position, since both list audio tracks in file order. If the two
+      don't see the same number of audio tracks, the file is left alone.
     - The flag is set with --default-track. mkvmerge 65 renamed it
       --default-track-flag but promises to keep accepting the old name,
       and older versions only know the old one.
+    - --output-charset UTF-8 makes its messages UTF-8 everywhere, as
+      run_with_progress() expects; otherwise it uses the system's
+      encoding, which isn't UTF-8 on Windows or with LANG=C in Docker.
     - Exit code 1 means it finished with warnings. They're logged, without
       mkvmerge's "#GUI#warning" and "Warning:" prefixes, and the file is
       still checked and used. A killed mkvmerge can also exit with 1 on
@@ -511,10 +672,17 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     """
     tmp_path = path.with_name(path.name + TMP_MARKER + path.suffix)
 
-    args = ["mkvmerge", "--gui-mode", "-o", str(tmp_path)]
-    for s in streams:
+    ids = mkvmerge_audio_ids(path)
+    if ids is None or len(ids) != len(streams):
+        found = "couldn't read the file" if ids is None else f"sees {len(ids)} audio track(s)"
+        log.error(f"    {path.name}: mkvmerge {found}, but ffprobe sees {len(streams)}; "
+                  f"leaving the file alone")
+        return False
+
+    args = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "-o", str(tmp_path)]
+    for s, track_id in zip(streams, ids):
         flag = "yes" if s["index"] == target_index else "no"
-        args += ["--default-track", f"{s['index']}:{flag}"]
+        args += ["--default-track", f"{track_id}:{flag}"]
     args += [str(path)]
 
     if dry_run:
@@ -550,11 +718,12 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         log.warning(f"    {path.name}: mkvmerge finished with warnings: "
                     + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
-    return check_and_swap_in(path, tmp_path, streams, target_index, False, backup)
+    return check_and_swap_in(path, tmp_path, streams, target_index, False, backup, keep_dates)
 
 
 def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
-                 duration=None, show_progress=False, position=0, on_progress=None):
+                 duration=None, show_progress=False, position=0, on_progress=None,
+                 keep_dates=False):
     """Remux any non-MKV file with ffmpeg (-c copy, so nothing is re-encoded)
     so only target_index is flagged default. Returns True on success, False
     on failure (already logged). With dry_run, just logs the command.
@@ -634,7 +803,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
             tmp_path.unlink(missing_ok=True)
         return False
 
-    return check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup)
+    return check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, keep_dates)
 
 
 def process_file(path, args, position=0, header="", on_progress=None):
@@ -701,40 +870,117 @@ def _process_file(path, args, position=0, header="", on_progress=None):
 
     if ext in MKV_EXTS:
         ok = apply_mkv(path, streams, target["index"], args.dry_run, args.backup,
-                        show_progress, position, on_progress)
+                        show_progress, position, on_progress, args.keep_dates)
     else:
         ok = apply_remux(path, streams, target["index"], args.dry_run,
                           args.backup, is_avi_reorder,
-                          duration, show_progress, position, on_progress)
+                          duration, show_progress, position, on_progress, args.keep_dates)
 
     return "changed" if ok else "error"
 
 
-def iter_files(paths, exts, recursive):
+def _walk(folder, recursive, follow_symlinks):
+    """Yield the path of every entry in folder that isn't a folder, and with
+    recursive, in its subfolders too. os.walk() is used rather than
+    Path.rglob(), whose handling of symlinked folders differs between
+    Python versions.
+
+    Symlinked subfolders are only searched with follow_symlinks; otherwise
+    each one is logged, so it's clear why its files weren't found. Every
+    folder is searched at most once, so a symlink loop can't make the
+    search run forever."""
+    visited = set()
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=follow_symlinks):
+        real = os.path.realpath(dirpath)
+        if real in visited:
+            dirnames[:] = []
+            continue
+        visited.add(real)
+        if not recursive:
+            dirnames[:] = []
+        elif not follow_symlinks:
+            for name in dirnames:
+                if os.path.islink(os.path.join(dirpath, name)):
+                    log.info(f"Not searching symlinked folder (use --follow-symlinks): "
+                             f"{os.path.join(dirpath, name)}")
+        for name in filenames:
+            yield Path(dirpath) / name
+
+
+def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=False):
     """Yield every file in paths with an extension in exts. Files are used
     as given; folders are searched (into subfolders if recursive). The
     extension is checked before touching the disk, so non-video files
     (.nfo, .jpg, .srt, ...) cost nothing.
 
+    A symlinked file is yielded as the file it points to, so that file gets
+    fixed and the link keeps working; replacing the link itself would turn
+    it into a separate copy. With skip_symlinks, linked files are skipped
+    instead. Symlinked subfolders are only searched with follow_symlinks
+    (see _walk()); a folder named in paths is always searched. A file
+    reached by more than one path (through links, or given twice) is only
+    yielded once.
+
     A run killed outright (kill -9, a reboot) can leave a temp file such as
     "name.mkv.tmp_remux.mkv", which still ends in .mkv. Those are skipped
-    with a warning instead of being treated as videos."""
+    with a warning instead of being treated as videos.
+
+    A path that doesn't exist (a typo, an unmounted share) is skipped with a
+    warning, so a mistake in one of several paths doesn't go unnoticed."""
+    seen = set()
     for p in paths:
         p = Path(p)
         if p.is_file():
             candidates = [p]
         elif p.is_dir():
-            candidates = p.rglob("*") if recursive else p.glob("*")
+            candidates = _walk(p, recursive, follow_symlinks)
+        elif not p.exists():
+            log.warning(f"Skipping {p}: no such file or directory")
+            continue
         else:
+            log.warning(f"Skipping {p}: not a file or directory")
             continue
         for f in candidates:
-            if f.suffix.lower() not in exts or not f.is_file():
+            if f.suffix.lower() not in exts:
+                continue
+            if f.is_symlink():
+                if skip_symlinks:
+                    log.info(f"Skipping symlink (--skip-symlinks): {f}")
+                    continue
+                target = f.resolve()
+                if target.suffix.lower() not in exts:
+                    log.info(f"Skipping symlink to a file without a video extension: "
+                             f"{f} -> {target}")
+                    continue
+                f = target
+            if not f.is_file():
                 continue
             if f.stem.endswith(TMP_MARKER):
                 log.warning(f"Skipping leftover temp file from an interrupted run "
                             f"(safe to delete): {f}")
                 continue
+            real = f.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
             yield f
+
+
+def ask_about_existing_backups(count):
+    """Ask once what to do about files that already have a <name>.bak.
+    Returns "replace", "number" or "quit". Asks again on any other answer;
+    end of input (Ctrl+D) counts as quit."""
+    question = (f"{count} file(s) already have a backup: [d]elete and replace them, "
+                f"[n]umber new ones (.bak.1, .bak.2...), or [q]uit? ")
+    choices = {"d": "replace", "n": "number", "q": "quit"}
+    while True:
+        try:
+            answer = input(question).strip().lower()
+        except EOFError:
+            print()
+            return "quit"
+        if answer in choices:
+            return choices[answer]
 
 
 def main():
@@ -762,30 +1008,49 @@ def main():
     close the bars, print a partial summary that counts unfinished files as
     cancelled, and exit with 128 + the signal number (130 for Ctrl+C, 143
     for SIGTERM). With --jobs > 1, files still waiting in the queue return
-    straight away once a stop is requested.
+    straight away once a stop is requested. A stop while still looking for
+    files exits the same way, with no summary, since nothing has changed.
     """
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("paths", nargs="+", help="Video files and/or folders to process")
+    ap.add_argument("paths", nargs="+", help="Video files and folders to process")
     ap.add_argument("--ext", default=None,
                      help="Comma-separated extensions to process, replacing the default list "
                           "(default: mkv,webm,mp4,m4v,mov,avi)")
     ap.add_argument("--no-recursive", action="store_true", help="Don't look inside subfolders")
+    ap.add_argument("--skip-symlinks", action="store_true",
+                     help="Skip symlinked files (default: fix the file the link points to, "
+                          "leaving the link as it is)")
+    ap.add_argument("--follow-symlinks", action="store_true",
+                     help="Also look inside symlinked subfolders (default: skip them; folders "
+                          "you name on the command line are always searched)")
     ap.add_argument("--dry-run", action="store_true",
-                     help="Show what would change without touching any files")
+                     help="Show what would change, and the exact commands, without touching "
+                          "any files")
     ap.add_argument("--backup", action="store_true",
-                     help="Keep each original as <name>.bak (a hard link where possible, "
-                          "so it takes no extra space)")
+                     help="Keep each original as <name>.bak. Each backup takes as much space "
+                          "as the original until you delete it")
+    ap.add_argument("--existing-backups", choices=("replace", "number"), default=None,
+                     help="With --backup, what to do when <name>.bak already exists: replace "
+                          "it, or number the new one (.bak.1, .bak.2, ...). Without this, "
+                          "you're asked once before any file is changed; when there's no "
+                          "one to ask (cron, Docker), new backups are numbered")
     ap.add_argument("--prefer-lang", default=None, metavar="LANG",
-                     help="Language the stereo track must be in, e.g. eng; also picks between "
-                          "several stereo tracks (default: the language of the track that "
-                          "plays by default now)")
+                     help="Language the stereo track must be in, as a 2- or 3-letter code "
+                          "(en, eng, de, ger and deu all work); also picks between several "
+                          "stereo tracks (default: the language of the track that plays by "
+                          "default now)")
     ap.add_argument("--avi-reorder", action="store_true",
                      help="For .avi files, which have no default flag, move the stereo track "
                           "to the front instead")
+    ap.add_argument("--keep-dates", action="store_true",
+                     help="Give each changed file the original's modification and access "
+                          "times, so it doesn't look newly changed to media servers. Off by "
+                          "default: backup tools that compare size and date (e.g. rsync) "
+                          "could then miss the change")
     ap.add_argument("--force", action="store_true",
-                     help="Remux even files that are already correct, e.g. to fix thumbnails "
-                          "on files an older version of this script edited in place")
+                     help="Remux even files that are already correct, e.g. to restore Windows "
+                          "thumbnails after another tool edited a file in place")
     ap.add_argument("--log-file", default=None, metavar="PATH",
                      help="Write the details to this file instead of the console; warnings, "
                           "errors, the progress bar and the summary still show on the console")
@@ -795,18 +1060,28 @@ def main():
                      help="Remux up to N files at once (default: 1). The work is limited by "
                           "disk speed, not CPU, so choose N for what your storage can handle. "
                           "Above 1, only the overall progress bar is shown and log lines from "
-                          "different files may interleave.")
+                          "different files may interleave")
     args = ap.parse_args()
 
     if args.jobs < 1:
         ap.error("--jobs must be >= 1")
+    if args.prefer_lang is not None and not re.fullmatch("[a-z]{3}",
+                                                         normalize_language(args.prefer_lang)):
+        ap.error(f"--prefer-lang {args.prefer_lang!r} isn't a language code; use a 2- or "
+                 f"3-letter code such as en or eng")
 
     setup_logging(args.log_file)
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
     exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")} if args.ext else DEFAULT_EXTS
-    files = sorted(set(iter_files(args.paths, exts, not args.no_recursive)))
+    try:
+        files = sorted(set(iter_files(args.paths, exts, not args.no_recursive,
+                                      args.skip_symlinks, args.follow_symlinks)))
+    except KeyboardInterrupt as exc:
+        signum, reason = _stop_reason(exc)
+        log.error(f"{reason} while looking for files. No files were changed.")
+        sys.exit(128 + signum)
 
     if not files:
         log.error("No matching files found.")
@@ -820,15 +1095,43 @@ def main():
     if args.log_file:
         print(header)
 
+    if args.backup and not args.dry_run:
+        with_backup = sum(1 for f in files if f.with_name(f.name + ".bak").exists())
+        mode = args.existing_backups or "number"
+        if with_backup and not args.existing_backups:
+            if sys.stdin.isatty():
+                try:
+                    mode = ask_about_existing_backups(with_backup)
+                except KeyboardInterrupt as exc:
+                    signum, reason = _stop_reason(exc)
+                    print()
+                    log.error(f"{reason}. No files were changed.")
+                    sys.exit(128 + signum)
+            else:
+                log.info(f"{with_backup} file(s) already have a backup; new backups will be "
+                         f"numbered (.bak.1, .bak.2, ...). Use --existing-backups to choose.")
+        if mode == "quit":
+            log.info("Quit before changing any files.")
+            if args.log_file:
+                print("Quit before changing any files.")
+            sys.exit(0)
+        args.backup = mode
+
     stats = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
     use_bar = HAVE_TQDM and not args.no_progress
     show_fallback_counter = args.log_file and not use_bar
 
-    def print_summary(label="Summary", cancelled=0):
-        """Log the counts, and print them too when the log goes to a file."""
-        lines = ["", f"----- {label} -----"]
+    def print_summary(partial=False, cancelled=0):
+        """Log the counts, and print them too when the log goes to a file. In a
+        dry run nothing was changed, so the heading says so and "changed"
+        reads "would change"."""
+        notes = (["partial -- interrupted"] if partial else []) + (
+            ["dry run, nothing was changed"] if args.dry_run else [])
+        heading = "Summary" + (" (" + "; ".join(notes) + ")" if notes else "")
+        lines = ["", f"----- {heading} -----"]
         for k in ("changed", "unchanged", "skipped", "error"):
-            lines.append(f"{k}: {stats[k]}")
+            name = "would change" if k == "changed" and args.dry_run else k
+            lines.append(f"{name}: {stats[k]}")
         if cancelled:
             lines.append(f"cancelled: {cancelled}")
         for line in lines:
@@ -902,19 +1205,16 @@ def main():
         if show_fallback_counter:
             print()
     except KeyboardInterrupt as exc:
-        signum = getattr(exc, "signum", signal.SIGINT)
+        signum, reason = _stop_reason(exc)
         for bar in active_bars:
             try:
                 bar.close()
             except Exception:
                 pass
         print()
-        reason = ("Interrupted by user (Ctrl+C)" if signum == signal.SIGINT
-                  else f"Stopped by {signal.Signals(signum).name}")
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
-        print_summary("Summary (partial -- interrupted)",
-                      cancelled=len(files) - sum(stats.values()))
+        print_summary(partial=True, cancelled=len(files) - sum(stats.values()))
         sys.exit(128 + signum)
 
     print_summary()

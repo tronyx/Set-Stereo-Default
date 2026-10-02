@@ -14,6 +14,8 @@ import set_stereo_default as ssd
 
 
 def _reset():
+    """Clear everything the script keeps between calls: tracked remuxes, the
+    stop and owner-warning flags, and log handlers added by main()."""
     ssd._active_procs.clear()
     ssd._cancelled.clear()
     ssd._chown_warned.clear()
@@ -25,6 +27,8 @@ def _reset():
 
 @pytest.fixture(autouse=True)
 def clean_module_state():
+    """Reset the script's state before and after every test, and put back
+    the Ctrl+C and SIGTERM handlers that main() replaces."""
     original_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     _reset()
     yield
