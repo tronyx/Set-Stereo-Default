@@ -1070,11 +1070,15 @@ def _process_file(path, args, position=0, on_progress=None):
     return "changed" if apply(plan, args, progress) else "error"
 
 
-def _walk(folder, recursive, follow_symlinks):
-    """Yield the path of every entry in folder that isn't a folder, and with
-    recursive, in its subfolders too. os.walk() is used rather than
-    Path.rglob(), whose handling of symlinked folders differs between
-    Python versions.
+def _walk(folder, recursive, follow_symlinks, visited=None):
+    """Yield (path, entry, real path) for every entry in folder that isn't a
+    folder, and with recursive, in its subfolders too. entry is the
+    os.DirEntry, whose type checks (is_file(), is_symlink()) are answered
+    from the folder listing itself, so they cost nothing; the real path
+    (as os.path.realpath() would give it) is built from the folder's own
+    real path, worked out once per folder. On a network share, where each
+    check of a file is a round trip, that's most of the cost of searching
+    a large library.
 
     Symlinked subfolders are only searched with follow_symlinks; otherwise
     each one is logged, so it's clear why its files weren't found. Every
@@ -1082,35 +1086,40 @@ def _walk(folder, recursive, follow_symlinks):
     search run forever.
 
     A folder that can't be opened (no permission, a network share that
-    dropped) gets a warning; os.walk() would otherwise skip it silently,
-    and its files would just be missing from the run."""
-    def warn(err):
-        """Report a folder os.walk() couldn't open."""
+    dropped) gets a warning, so its files aren't just silently missing
+    from the run."""
+    if visited is None:
+        visited = set()
+    real_folder = os.path.realpath(folder)
+    if real_folder in visited:
+        return
+    visited.add(real_folder)
+    try:
+        with os.scandir(folder) as listing:
+            entries = list(listing)
+    except OSError as err:
         log.warning(f"Couldn't search {err.filename}: {err.strerror}")
+        return
 
-    visited = set()
-    for dirpath, dirnames, filenames in os.walk(folder, onerror=warn, followlinks=follow_symlinks):
-        real = os.path.realpath(dirpath)
-        if real in visited:
-            dirnames[:] = []
-            continue
-        visited.add(real)
-        if not recursive:
-            dirnames[:] = []
-        elif not follow_symlinks:
-            for name in dirnames:
-                if os.path.islink(os.path.join(dirpath, name)):
-                    log.info(f"Not searching symlinked folder (use --follow-symlinks): "
-                             f"{os.path.join(dirpath, name)}")
-        for name in filenames:
-            yield Path(dirpath) / name
+    subfolders = [e for e in entries if e.is_dir()] if recursive else []
+    if not follow_symlinks:
+        for entry in subfolders:
+            if entry.is_symlink():
+                log.info(f"Not searching symlinked folder (use --follow-symlinks): {entry.path}")
+        subfolders = [e for e in subfolders if not e.is_symlink()]
+    for entry in entries:
+        if not entry.is_dir():
+            yield Path(entry.path), entry, os.path.join(real_folder, entry.name)
+    for entry in subfolders:
+        yield from _walk(entry.path, recursive, follow_symlinks, visited)
 
 
 def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=False):
     """Yield every file in paths with an extension in exts. Files are used
     as given; folders are searched (into subfolders if recursive). The
-    extension is checked before touching the disk, so non-video files
-    (.nfo, .jpg, .srt, ...) cost nothing.
+    extension is checked before anything else, and files found in a folder
+    are checked using what the folder listing already says about them (see
+    _walk()), so searching costs little beyond listing each folder.
 
     A symlinked file is yielded as the file it points to, so that file gets
     fixed and the link keeps working; replacing the link itself would turn
@@ -1127,10 +1136,9 @@ def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=Fals
     A path that doesn't exist (a typo, an unmounted share) is skipped with a
     warning, so a mistake in one of several paths doesn't go unnoticed."""
     seen = set()
-    for p in paths:
-        p = Path(p)
+    for p in map(Path, paths):
         if p.is_file():
-            candidates = [p]
+            candidates = [(p, None, None)]
         elif p.is_dir():
             candidates = _walk(p, recursive, follow_symlinks)
         elif not p.exists():
@@ -1139,30 +1147,36 @@ def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=Fals
         else:
             log.warning(f"Skipping {p}: not a file or directory")
             continue
-        for f in candidates:
-            if f.suffix.lower() not in exts:
-                continue
-            if f.is_symlink():
-                if skip_symlinks:
-                    log.info(f"Skipping symlink (--skip-symlinks): {f}")
-                    continue
-                target = f.resolve()
-                if target.suffix.lower() not in exts:
-                    log.info(f"Skipping symlink to a file without a video extension: "
-                             f"{f} -> {target}")
-                    continue
-                f = target
-            if not f.is_file():
-                continue
-            if f.stem.endswith(TMP_MARKER):
-                log.warning(f"Skipping leftover temp file from an interrupted run "
-                            f"(safe to delete): {f}")
-                continue
-            real = f.resolve()
-            if real in seen:
-                continue
-            seen.add(real)
-            yield f
+        for candidate in candidates:
+            found = _video_file(*candidate, exts, skip_symlinks)
+            if found and found[1] not in seen:
+                seen.add(found[1])
+                yield found[0]
+
+
+def _video_file(path, entry, real, exts, skip_symlinks):
+    """Decide about one candidate for iter_files(): return (the file to
+    process, its real path), or None to leave it out, logging why where
+    that's worth saying. entry and real come from _walk(), or are None for
+    a file named on the command line. A symlink becomes the file it points
+    to (or is left out with skip_symlinks)."""
+    if path.suffix.lower() not in exts:
+        return None
+    if entry.is_symlink() if entry else path.is_symlink():
+        if skip_symlinks:
+            log.info(f"Skipping symlink (--skip-symlinks): {path}")
+            return None
+        target = path.resolve()
+        if target.suffix.lower() not in exts:
+            log.info(f"Skipping symlink to a file without a video extension: {path} -> {target}")
+            return None
+        path, entry, real = target, None, None
+    if not (entry.is_file() if entry else path.is_file()):
+        return None
+    if path.stem.endswith(TMP_MARKER):
+        log.warning(f"Skipping leftover temp file from an interrupted run (safe to delete): {path}")
+        return None
+    return path, real or os.path.realpath(path)
 
 
 def _can_ask():
