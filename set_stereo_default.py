@@ -452,28 +452,44 @@ def check_tools(need_mkvmerge):
     return not missing
 
 
-def _stream_info(s):
-    """One stream from ffprobe's JSON, as a dict: its index, type ("audio",
-    "video", ...), codec, channel count (None if not audio), language,
-    names, and default/commentary/audio-description flags."""
-    tags = s.get("tags", {}) or {}
-    disposition = s.get("disposition", {}) or {}
-    return {
-        "index": s["index"],
-        "type": s.get("codec_type", ""),
-        "codec": s.get("codec_name", ""),
-        "channels": s.get("channels"),
-        "default": bool(disposition.get("default", 0)),
-        "comment": bool(disposition.get("comment", 0)),
-        "visual_impaired": bool(disposition.get("visual_impaired", 0)),
-        "language": tags.get("language", ""),
-        "names": [tags[k] for k in NAME_TAGS if tags.get(k)],
-    }
+@dataclass(frozen=True)
+class Stream:
+    """One stream in a file, as probe_streams() reads it: its index (as
+    ffprobe numbers streams), type ("audio", "video", "subtitle", ...),
+    codec, channel count (None if not audio), language tag ("" if none),
+    names (from NAME_TAGS), and its default, commentary and
+    audio-description flags. Frozen, so streams can be shared freely."""
+    index: int
+    type: str = ""
+    codec: str = ""
+    channels: int | None = None
+    default: bool = False
+    comment: bool = False
+    visual_impaired: bool = False
+    language: str = ""
+    names: tuple = ()
+
+
+def _stream_info(raw):
+    """One stream from ffprobe's JSON (raw) as a Stream."""
+    tags = raw.get("tags", {}) or {}
+    disposition = raw.get("disposition", {}) or {}
+    return Stream(
+        index=raw["index"],
+        type=raw.get("codec_type", ""),
+        codec=raw.get("codec_name", ""),
+        channels=raw.get("channels"),
+        default=bool(disposition.get("default", 0)),
+        comment=bool(disposition.get("comment", 0)),
+        visual_impaired=bool(disposition.get("visual_impaired", 0)),
+        language=tags.get("language", ""),
+        names=tuple(tags[k] for k in NAME_TAGS if tags.get(k)),
+    )
 
 
 def probe_streams(path, report=True):
-    """Return (streams, duration in seconds) for path: every stream, as
-    _stream_info() describes it, and the duration (None if unknown). Returns
+    """Return (streams, duration in seconds) for path: every stream, as a
+    Stream, and the duration (None if unknown). Returns
     (None, None) if ffprobe can't read the file, after logging why unless
     report is False.
 
@@ -507,8 +523,8 @@ def is_commentary(stream):
     """True for a commentary or audio-description track. These are often
     stereo but should never play by default. They're recognized by the
     file's own flags, or failing that by the track's name."""
-    return bool(stream.get("comment") or stream.get("visual_impaired")
-                or any(COMMENTARY_NAME_RE.search(n) for n in stream.get("names", ())))
+    return (stream.comment or stream.visual_impaired
+            or any(COMMENTARY_NAME_RE.search(n) for n in stream.names))
 
 
 def normalize_language(code):
@@ -535,25 +551,25 @@ def choose_target(streams, prefer_lang):
     mean German."""
     def describe(ss):
         """List tracks for a skip note, e.g. "stream#2 (eng/aac), stream#3 (spa/ac3)"."""
-        return ", ".join(f"stream#{s['index']} ({s['language'] or 'und'}/{s['codec']})" for s in ss)
+        return ", ".join(f"stream#{s.index} ({s.language or 'und'}/{s.codec})" for s in ss)
 
-    stereo = [s for s in streams if s["channels"] == 2]
+    stereo = [s for s in streams if s.channels == 2]
     candidates = [s for s in stereo if not is_commentary(s)]
     if not candidates:
         if stereo:
             return None, f"only 2-channel tracks are commentary/audio description [{describe(stereo)}]"
         return None, "no 2-channel audio track found"
 
-    current = next((s for s in streams if s["default"]), streams[0])
-    shown = prefer_lang or current["language"]
+    current = next((s for s in streams if s.default), streams[0])
+    shown = prefer_lang or current.language
     wanted = normalize_language(shown)
     if wanted not in ("", "und"):
         in_lang = [s for s in candidates
-                   if normalize_language(s["language"]) in ("", "und", wanted)]
+                   if normalize_language(s.language) in ("", "und", wanted)]
         if not in_lang:
             return None, (f"no 2-channel track in '{shown}' [found {describe(candidates)}] "
                           f"-- use --prefer-lang to pick another language")
-        exact = [s for s in in_lang if normalize_language(s["language"]) == wanted]
+        exact = [s for s in in_lang if normalize_language(s.language) == wanted]
         candidates = exact if len(exact) == 1 else in_lang
 
     if len(candidates) == 1:
@@ -565,7 +581,7 @@ def choose_target(streams, prefer_lang):
 
 def needs_change(streams, target_index):
     """True unless the target is already the only audio track flagged default."""
-    return any((s["index"] == target_index) != s["default"] for s in streams)
+    return any((s.index == target_index) != s.default for s in streams)
 
 
 def verify_remux(plan, reordered):
@@ -600,21 +616,21 @@ def verify_remux(plan, reordered):
             return (f"duration dropped from {before_duration:.1f}s to {after_duration:.1f}s; "
                     f"the original may be incomplete")
 
-    audio = [s for s in after if s["type"] == "audio"]
+    audio = [s for s in after if s.type == "audio"]
     if len(audio) != len(streams):
         return f"expected {len(streams)} audio tracks, found {len(audio)}"
 
-    target = next(s for s in streams if s["index"] == plan.target_index)
+    target = next(s for s in streams if s.index == plan.target_index)
     if reordered:
         first = audio[0]
-        if (first["codec"] != target["codec"] or first["channels"] != target["channels"]
-                or (target["language"] and normalize_language(first["language"])
-                    != normalize_language(target["language"]))):
+        if (first.codec != target.codec or first.channels != target.channels
+                or (target.language and normalize_language(first.language)
+                    != normalize_language(target.language))):
             return "target audio track didn't end up first"
         return None
 
-    expected = audio[streams.index(target)]["index"]
-    defaults = [s["index"] for s in audio if s["default"]]
+    expected = audio[streams.index(target)].index
+    defaults = [s.index for s in audio if s.default]
     if defaults != [expected]:
         found = ", ".join(f"stream#{i}" for i in defaults) or "no track"
         return f"default flag is on {found}, expected only stream#{expected}"
@@ -988,7 +1004,7 @@ def apply_mkv(plan, args, progress=None):
 
     cmd = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "-o", str(plan.tmp_path)]
     for s, track_id in zip(plan.streams, ids, strict=True):
-        flag = "yes" if s["index"] == plan.target_index else "no"
+        flag = "yes" if s.index == plan.target_index else "no"
         cmd += ["--default-track", f"{track_id}:{flag}"]
     cmd.append(str(path))
     return _remux_and_swap(plan, cmd, _mkvmerge_pct, args, progress or Progress(),
@@ -1012,7 +1028,7 @@ def apply_remux(plan, args, progress=None):
     reordered = args.avi_reorder and ext in AVI_EXTS
 
     if reordered:
-        others = [s["index"] for s in plan.streams if s["index"] != target_index]
+        others = [s.index for s in plan.streams if s.index != target_index]
         map_args = ["-map", "0:v?", "-map", f"0:{target_index}"]
         for i in others:
             map_args += ["-map", f"0:{i}"]
@@ -1024,7 +1040,7 @@ def apply_remux(plan, args, progress=None):
         map_args = ["-map", "0"]
         disp_args = []
         for out_idx, s in enumerate(plan.streams):
-            flag = "+default" if s["index"] == target_index else "-default"
+            flag = "+default" if s.index == target_index else "-default"
             disp_args += [f"-disposition:a:{out_idx}", flag]
 
     faststart = ["-movflags", "+faststart"] if ext in MOV_FASTSTART_EXTS else []
@@ -1073,7 +1089,7 @@ def _process_file(path, args, position=0, on_progress=None):
     layout, duration = probe_streams(path)
     if layout is None:
         return "error"
-    streams = [s for s in layout if s["type"] == "audio"]
+    streams = [s for s in layout if s.type == "audio"]
     if not streams:
         log.info(f"  {path.name}: no audio streams found, skipping")
         return "skipped"
@@ -1084,20 +1100,20 @@ def _process_file(path, args, position=0, on_progress=None):
         return "skipped"
 
     if is_avi_reorder:
-        changed = streams[0]["index"] != target["index"]
+        changed = streams[0].index != target.index
     else:
-        changed = needs_change(streams, target["index"])
+        changed = needs_change(streams, target.index)
 
     if not changed and not args.force:
         what = "is first audio stream" if is_avi_reorder else "is default"
-        log.info(f"  {path.name}: already correct (stream#{target['index']} {what}), skipping")
+        log.info(f"  {path.name}: already correct (stream#{target.index} {what}), skipping")
         return "unchanged"
 
     action = "moving" if is_avi_reorder else "setting"
     outcome = "to the first audio track" if is_avi_reorder else "as default audio"
-    plan = Plan(path, streams, target["index"], duration,
-                intro=f"  {path.name}: {action} stream#{target['index']} "
-                      f"({target['language'] or 'und'}, {target['codec']}) {outcome}",
+    plan = Plan(path, streams, target.index, duration,
+                intro=f"  {path.name}: {action} stream#{target.index} "
+                      f"({target.language or 'und'}, {target.codec}) {outcome}",
                 layout=layout)
     progress = Progress(show=HAVE_TQDM and not args.no_progress and args.jobs == 1,
                         position=position, on_progress=on_progress)

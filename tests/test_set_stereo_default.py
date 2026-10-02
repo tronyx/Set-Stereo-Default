@@ -33,9 +33,9 @@ def mkvmerge_ids(monkeypatch):
 def audio(index, channels, codec="aac", language="eng", default=False, name="",
           comment=False, visual_impaired=False):
     """An audio stream the way probe_streams() describes it."""
-    return {"index": index, "type": "audio", "channels": channels, "codec": codec,
-            "language": language, "names": [name] if name else [], "default": default,
-            "comment": comment, "visual_impaired": visual_impaired}
+    return ssd.Stream(index=index, type="audio", channels=channels, codec=codec,
+                      language=language, names=(name,) if name else (), default=default,
+                      comment=comment, visual_impaired=visual_impaired)
 
 
 def stream(index, codec_type, default=0, codec="aac", channels=None, language=None):
@@ -62,7 +62,7 @@ def parse_pct_line(line):
 
 def test_choose_target_picks_the_only_stereo_track():
     target, note = ssd.choose_target([audio(1, 6), audio(2, 2)], None)
-    assert target["index"] == 2 and note is None
+    assert target.index == 2 and note is None
 
 
 def test_choose_target_skips_files_without_a_stereo_track():
@@ -79,7 +79,7 @@ def test_choose_target_skips_files_with_several_stereo_tracks():
 def test_prefer_lang_breaks_the_tie_case_insensitively():
     streams = [audio(1, 2, language="spa"), audio(2, 2, language="eng")]
     target, _ = ssd.choose_target(streams, "ENG")
-    assert target["index"] == 2
+    assert target.index == 2
 
 
 def test_prefer_lang_that_matches_nothing_still_skips():
@@ -109,13 +109,13 @@ def test_choose_target_never_picks_commentary_or_audio_description(commentary):
 @pytest.mark.parametrize("name", ["Stereo (see description)", "No description", "Advsound Mix"])
 def test_choose_target_picks_a_stereo_track_whose_name_only_looks_like_audio_description(name):
     target, _ = ssd.choose_target([audio(1, 6, default=True), audio(2, 2, name=name)], None)
-    assert target["index"] == 2
+    assert target.index == 2
 
 
 def test_choose_target_picks_the_stereo_track_next_to_a_commentary():
     streams = [audio(1, 6, default=True), audio(2, 2, name="Commentary"), audio(3, 2)]
     target, _ = ssd.choose_target(streams, None)
-    assert target["index"] == 3
+    assert target.index == 3
 
 
 def test_choose_target_skips_a_stereo_dub_in_another_language():
@@ -127,41 +127,41 @@ def test_choose_target_skips_a_stereo_dub_in_another_language():
 def test_choose_target_uses_the_first_track_language_when_none_is_default():
     streams = [audio(1, 6, language="jpn"), audio(2, 2, language="eng"), audio(3, 2, language="jpn")]
     target, _ = ssd.choose_target(streams, None)
-    assert target["index"] == 3
+    assert target.index == 3
 
 
 def test_choose_target_follows_the_default_track_language_between_stereo_tracks():
     streams = [audio(1, 6, language="spa", default=True), audio(2, 2, language="eng"),
                audio(3, 2, language="spa")]
     target, _ = ssd.choose_target(streams, None)
-    assert target["index"] == 3
+    assert target.index == 3
 
 
 def test_prefer_lang_overrides_the_default_track_language():
     streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="spa")]
     target, _ = ssd.choose_target(streams, "spa")
-    assert target["index"] == 2
+    assert target.index == 2
 
 
 @pytest.mark.parametrize("lang", ["", "und"])
 def test_untagged_stereo_track_matches_any_language(lang):
     streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language=lang)]
     target, _ = ssd.choose_target(streams, None)
-    assert target["index"] == 2
+    assert target.index == 2
 
 
 def test_exact_language_match_wins_over_an_untagged_track():
     streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="und"),
                audio(3, 2, language="eng")]
     target, _ = ssd.choose_target(streams, None)
-    assert target["index"] == 3
+    assert target.index == 3
 
 
 @pytest.mark.parametrize("lang", ["", "und"])
 def test_untagged_default_track_lets_a_stereo_track_in_any_language_through(lang):
     streams = [audio(1, 6, language=lang, default=True), audio(2, 2, language="spa")]
     target, note = ssd.choose_target(streams, None)
-    assert target["index"] == 2 and note is None
+    assert target.index == 2 and note is None
 
 
 def test_untagged_default_track_still_needs_a_single_stereo_track():
@@ -196,13 +196,13 @@ def test_prefer_lang_matches_however_the_language_is_written(prefer_lang):
     streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="ger"),
                audio(3, 2, language="eng")]
     target, _ = ssd.choose_target(streams, prefer_lang)
-    assert target["index"] == 2
+    assert target.index == 2
 
 
 def test_tracks_tagged_differently_in_one_language_arent_treated_as_a_dub():
     streams = [audio(1, 6, language="ger", default=True), audio(2, 2, language="deu")]
     target, note = ssd.choose_target(streams, None)
-    assert target["index"] == 2 and note is None
+    assert target.index == 2 and note is None
 
 
 def test_skip_note_shows_the_language_as_given():
@@ -280,8 +280,8 @@ def test_probe_streams_reads_every_stream_and_the_commentary_flags(monkeypatch):
 
     streams, duration = ssd.probe_streams(Path("v.mkv"))
 
-    assert [s["type"] for s in streams] == ["video", "audio", "audio"]
-    assert [(s["comment"], s["visual_impaired"], s["default"]) for s in streams[1:]] == \
+    assert [s.type for s in streams] == ["video", "audio", "audio"]
+    assert [(s.comment, s.visual_impaired, s.default) for s in streams[1:]] == \
         [(True, False, False), (False, True, True)]
     assert duration == 60.0
 
@@ -1304,7 +1304,7 @@ def probed(monkeypatch):
 
     def fake_probe(path):
         calls.append(path.name)
-        return [dict(s) for s in ORIGINAL_AUDIO], 100.0
+        return list(ORIGINAL_AUDIO), 100.0
     monkeypatch.setattr(ssd, "probe_streams", fake_probe)
     return calls
 
@@ -1825,7 +1825,7 @@ def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys
 
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "probe_streams",
-                        lambda path: ([dict(s) for s in ORIGINAL_AUDIO], 100.0))
+                        lambda path: (list(ORIGINAL_AUDIO), 100.0))
     monkeypatch.setattr(ssd, "mkvmerge_audio_ids", slow_ids)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
                                       "--jobs", "2", "--dry-run"])
