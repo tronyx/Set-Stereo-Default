@@ -154,10 +154,10 @@ Processing:  36%|██████████████▊                  
 ...
 
 ----- Summary -----
-changed: 30
-unchanged: 1
-skipped: 1
-error: 0
+Changed: 30
+Unchanged: 1
+Skipped: 1
+Error: 0
 ```
 
 The top bar follows the file being remuxed, and the bottom one follows the whole batch. The batch count moves during each file rather than jumping when it finishes, which is why it shows fractions like `11.45/32`.
@@ -200,11 +200,11 @@ Found 8 file(s) (dry run).
 
 ...
 
------ Summary (dry run, nothing was changed) -----
-would change: 8
-unchanged: 0
-skipped: 0
-error: 0
+----- Summary (Dry run, nothing was changed) -----
+Would change: 8
+Unchanged: 0
+Skipped: 0
+Error: 0
 ```
 
 Each `[dry-run]` line is the exact command the script would run, quoted so you can paste it into a shell.
@@ -222,7 +222,7 @@ The script looks for the audio track with exactly 2 channels and makes it the de
 
   Language tags are compared by meaning, not spelling. The same language can be tagged several ways (MKV files use `ger` for German, MP4 files often `deu`, and you might type `de`), so two- and three-letter codes are treated as equal, and region parts like the `-BR` in `pt-BR` are ignored.
 
-A file is **skipped** (and counted under `skipped` in the summary) when:
+A file is **skipped** (and counted under `Skipped` in the summary) when:
 
 - it has no audio at all
 - it has no stereo track, or only commentary/audio-description ones
@@ -232,10 +232,10 @@ A file is **skipped** (and counted under `skipped` in the summary) when:
 
 ### 🧩 Changing the file
 
-Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged, and not noticeably shorter than the original) before it replaces the original. If the check fails, the original is kept and the file is counted as an `error`.
+Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged, and not noticeably shorter than the original) before it replaces the original. If the check fails, the original is kept and the file is counted as an `Error`.
 
 > [!NOTE]
-> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `error` on every run until it's replaced.
+> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
 
 | Format | How it's changed |
 | --- | --- |
@@ -283,7 +283,7 @@ With `--keep-dates`, each changed file gets the original's modification and acce
 
 ### 🧹 Leftover temp files
 
-Ctrl+C and SIGTERM (what `docker stop`, `kill` and systemd send) stop the script cleanly: running remuxes are killed, their temp files are removed, and finished files are untouched. The partial summary counts every file that didn't finish as `cancelled`.
+Ctrl+C and SIGTERM (what `docker stop`, `kill` and systemd send) stop the script cleanly: running remuxes are killed, their temp files are removed, and finished files are untouched. The partial summary counts every file that didn't finish as `Cancelled`.
 
 If the script is killed outright instead (`kill -9`, a power cut, a container that doesn't stop in time), a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning. They're safe to delete, since the original is only ever replaced by a finished, checked file.
 
@@ -305,7 +305,7 @@ Even though nothing is re-encoded, the remuxed file's bytes are different, so it
 | Code | Meaning |
 | --- | --- |
 | `0` | Finished with no errors, or you chose **q** at the [backup question](#-backups) |
-| `1` | No matching files found, a required tool is missing, or at least one file ended up as an `error` |
+| `1` | No matching files found, a required tool is missing, or at least one file ended up as an `Error` |
 | `2` | Invalid command-line options |
 | `130` | Stopped with Ctrl+C |
 | `143` | Stopped with SIGTERM |

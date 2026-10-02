@@ -1589,17 +1589,17 @@ def test_partial_summary_counts_unfinished_files_as_cancelled(tmp_path, monkeypa
 
     out = capsys.readouterr().out
     assert exit_info.value.code == 130
-    assert "Summary (partial -- interrupted)" in out
-    assert "changed: 2" in out
-    assert "cancelled: 3" in out
+    assert "Summary (Partial -- interrupted)" in out
+    assert "Changed: 2" in out
+    assert "Cancelled: 3" in out
 
 
 @pytest.mark.parametrize("dry_run, interrupted, heading, first_line", [
-    (False, False, "----- Summary -----", "changed: 2"),
-    (True, False, "----- Summary (dry run, nothing was changed) -----", "would change: 2"),
-    (False, True, "----- Summary (partial -- interrupted) -----", "changed: 1"),
-    (True, True, "----- Summary (partial -- interrupted; dry run, nothing was changed) -----",
-     "would change: 1"),
+    (False, False, "----- Summary -----", "Changed: 2"),
+    (True, False, "----- Summary (Dry run, nothing was changed) -----", "Would change: 2"),
+    (False, True, "----- Summary (Partial -- interrupted) -----", "Changed: 1"),
+    (True, True, "----- Summary (Partial -- interrupted; dry run, nothing was changed) -----",
+     "Would change: 1"),
 ], ids=["normal", "dry run", "interrupted", "interrupted dry run"])
 def test_summary_says_what_kind_of_run_it_was(tmp_path, monkeypatch, capsys, dry_run, interrupted,
                                               heading, first_line):
@@ -1624,7 +1624,7 @@ def test_summary_says_what_kind_of_run_it_was(tmp_path, monkeypatch, capsys, dry
 
     lines = capsys.readouterr().out.splitlines()
     start = lines.index(heading)
-    assert lines[start + 1:start + 5] == [first_line, "unchanged: 0", "skipped: 0", "error: 0"]
+    assert lines[start + 1:start + 5] == [first_line, "Unchanged: 0", "Skipped: 0", "Error: 0"]
 
 
 def test_stop_handler_cancels_and_stops_subprocesses(monkeypatch):
@@ -1664,8 +1664,8 @@ def test_signal_mid_run_prints_a_partial_summary(tmp_path, monkeypatch, capsys,
     out = capsys.readouterr().out
     assert exit_info.value.code == code
     assert message in out
-    assert "changed: 2" in out
-    assert "cancelled: 3" in out
+    assert "Changed: 2" in out
+    assert "Cancelled: 3" in out
     assert len(calls) == 3
 
 

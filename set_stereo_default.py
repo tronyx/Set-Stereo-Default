@@ -1200,17 +1200,19 @@ def main():
 
     def print_summary(partial=False, cancelled=0):
         """Log the counts, and print them too when the log goes to a file. In a
-        dry run nothing was changed, so the heading says so and "changed"
-        reads "would change"."""
+        dry run nothing was changed, so the heading says so and "Changed"
+        reads "Would change". Each line, and the heading's note, starts with
+        a capital letter."""
         notes = (["partial -- interrupted"] if partial else []) + (
             ["dry run, nothing was changed"] if args.dry_run else [])
-        heading = "Summary" + (" (" + "; ".join(notes) + ")" if notes else "")
+        note = "; ".join(notes)
+        heading = "Summary" + (f" ({note[:1].upper()}{note[1:]})" if note else "")
         lines = ["", f"----- {heading} -----"]
         for k in ("changed", "unchanged", "skipped", "error"):
             name = "would change" if k == "changed" and args.dry_run else k
-            lines.append(f"{name}: {stats[k]}")
+            lines.append(f"{name.capitalize()}: {stats[k]}")
         if cancelled:
-            lines.append(f"cancelled: {cancelled}")
+            lines.append(f"Cancelled: {cancelled}")
         for line in lines:
             log.info(line)
         if args.log_file:
