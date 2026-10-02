@@ -423,46 +423,55 @@ def check_tools(need_mkvmerge):
     return not missing
 
 
-def probe_audio_streams(path):
-    """Return (audio streams, duration in seconds) for path, or (None, None)
-    if ffprobe can't read it. Each stream is a dict with its index, channel
-    count, codec, language, names, and default/commentary/audio-description
-    flags. The duration is None if unknown; ffmpeg's progress bar needs it,
-    so it comes from this same ffprobe call rather than a second one."""
+def _stream_info(s):
+    """One stream from ffprobe's JSON, as a dict: its index, type ("audio",
+    "video", ...), codec, channel count (None if not audio), language,
+    names, and default/commentary/audio-description flags."""
+    tags = s.get("tags", {}) or {}
+    disposition = s.get("disposition", {}) or {}
+    return {
+        "index": s["index"],
+        "type": s.get("codec_type", ""),
+        "codec": s.get("codec_name", ""),
+        "channels": s.get("channels"),
+        "default": bool(disposition.get("default", 0)),
+        "comment": bool(disposition.get("comment", 0)),
+        "visual_impaired": bool(disposition.get("visual_impaired", 0)),
+        "language": tags.get("language", ""),
+        "names": [tags[k] for k in NAME_TAGS if tags.get(k)],
+    }
+
+
+def probe_streams(path, report=True):
+    """Return (streams, duration in seconds) for path: every stream, as
+    _stream_info() describes it, and the duration (None if unknown). Returns
+    (None, None) if ffprobe can't read the file, after logging why unless
+    report is False.
+
+    One call gives everything a file needs: the audio streams to choose
+    from, the duration for ffmpeg's progress bar, and the full stream list
+    verify_remux() compares the remux against, so the original is only
+    probed once."""
     res = run([
         "ffprobe", "-v", "error", "-print_format", "json",
-        "-show_format", "-show_streams", "-select_streams", "a", str(path),
+        "-show_format", "-show_streams", str(path),
     ])
     if res.returncode != 0:
-        log.error(f"  ffprobe failed on {path.name}: {res.stderr.strip()}")
+        if report:
+            log.error(f"  ffprobe failed on {Path(path).name}: {res.stderr.strip()}")
         return None, None
     try:
         data = json.loads(res.stdout)
     except json.JSONDecodeError:
-        log.error(f"  Could not parse ffprobe output for {path.name}")
+        if report:
+            log.error(f"  Could not parse ffprobe output for {Path(path).name}")
         return None, None
-
-    streams = []
-    for s in data.get("streams", []):
-        tags = s.get("tags", {}) or {}
-        disposition = s.get("disposition", {}) or {}
-        streams.append({
-            "index": s["index"],
-            "channels": s.get("channels"),
-            "default": bool(disposition.get("default", 0)),
-            "comment": bool(disposition.get("comment", 0)),
-            "visual_impaired": bool(disposition.get("visual_impaired", 0)),
-            "language": tags.get("language", ""),
-            "names": [tags[k] for k in NAME_TAGS if tags.get(k)],
-            "codec": s.get("codec_name", ""),
-        })
 
     try:
         duration = float(data.get("format", {}).get("duration"))
     except (TypeError, ValueError):
         duration = None
-
-    return streams, duration
+    return [_stream_info(s) for s in data.get("streams", [])], duration
 
 
 def is_commentary(stream):
@@ -530,33 +539,11 @@ def needs_change(streams, target_index):
     return any((s["index"] == target_index) != s["default"] for s in streams)
 
 
-def probe_layout(path):
-    """Return (streams, duration) for path: every stream (type, codec,
-    channels, language and default flag) and the duration in seconds, or
-    None if unknown. Returns (None, None) if ffprobe can't read the file.
-    Used to check a remux."""
-    res = run([
-        "ffprobe", "-v", "error", "-print_format", "json", "-show_entries",
-        "stream=index,codec_type,codec_name,channels:stream_disposition=default:stream_tags=language"
-        ":format=duration",
-        str(path),
-    ])
-    if res.returncode != 0:
-        return None, None
-    try:
-        data = json.loads(res.stdout)
-    except json.JSONDecodeError:
-        return None, None
-    try:
-        duration = float(data.get("format", {}).get("duration"))
-    except (TypeError, ValueError):
-        duration = None
-    return data.get("streams", []), duration
-
-
-def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
-    """Check a finished remux before it replaces the original. Returns None if
-    it looks right, otherwise a short reason why not.
+def verify_remux(plan, reordered):
+    """Check the finished remux at plan.tmp_path before it replaces the
+    original. Returns None if it looks right, otherwise a short reason why
+    not. The original isn't probed again: plan.layout and plan.duration
+    already describe it.
 
     The new file must have as many streams as the original, so nothing was
     lost, and must not be shorter than the original by more than
@@ -571,10 +558,10 @@ def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
     position among them. After an AVI reorder (reordered=True) there's no
     flag to check, so the first audio track must instead match the
     target's codec, channel count and language."""
-    before, before_duration = probe_layout(orig_path)
-    after, after_duration = probe_layout(tmp_path)
-    if before is None or after is None:
+    after, after_duration = probe_streams(plan.tmp_path, report=False)
+    if after is None:
         return "ffprobe couldn't read the file"
+    before, before_duration, streams = plan.layout, plan.duration, plan.streams
     if len(after) != len(before):
         return f"stream count changed from {len(before)} to {len(after)}"
     if before_duration and after_duration is not None:
@@ -583,21 +570,20 @@ def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
             return (f"duration dropped from {before_duration:.1f}s to {after_duration:.1f}s; "
                     f"the original may be incomplete")
 
-    audio = [s for s in after if s.get("codec_type") == "audio"]
+    audio = [s for s in after if s["type"] == "audio"]
     if len(audio) != len(streams):
         return f"expected {len(streams)} audio tracks, found {len(audio)}"
 
-    target = next(s for s in streams if s["index"] == target_index)
+    target = next(s for s in streams if s["index"] == plan.target_index)
     if reordered:
         first = audio[0]
-        lang = (first.get("tags") or {}).get("language", "")
-        if (first.get("codec_name") != target["codec"] or first.get("channels") != target["channels"]
-                or (target["language"] and lang != target["language"])):
+        if (first["codec"] != target["codec"] or first["channels"] != target["channels"]
+                or (target["language"] and first["language"] != target["language"])):
             return "target audio track didn't end up first"
         return None
 
     expected = audio[streams.index(target)]["index"]
-    defaults = [s["index"] for s in audio if (s.get("disposition") or {}).get("default")]
+    defaults = [s["index"] for s in audio if s["default"]]
     if defaults != [expected]:
         found = ", ".join(f"stream#{i}" for i in defaults) or "no track"
         return f"default flag is on {found}, expected only stream#{expected}"
@@ -777,15 +763,17 @@ def swap_in(path, tmp_path, backup, keep_dates=False):
 @dataclass
 class Plan:
     """What's going to happen to one file, as decided by _process_file():
-    its audio streams (from probe_audio_streams()), the index of the one
-    to make default, its duration in seconds (None if unknown), and intro,
-    the "setting stream#N ..." line logged as the remux starts (see
-    _announce())."""
+    its audio streams, the index of the one to make default, its duration
+    in seconds (None if unknown), intro, the "setting stream#N ..." line
+    logged as the remux starts (see _announce()), and layout, every stream
+    in the file, which verify_remux() compares the remux against. The
+    streams, duration and layout all come from one probe_streams() call."""
     path: Path
     streams: list
     target_index: int
     duration: float | None = None
     intro: str | None = None
+    layout: list | None = None
 
     @property
     def tmp_path(self):
@@ -812,7 +800,7 @@ def check_and_swap_in(plan, reordered, args):
     a successful swap there's no temp file left to remove."""
     path, tmp_path = plan.path, plan.tmp_path
     try:
-        problem = verify_remux(path, tmp_path, plan.streams, plan.target_index, reordered)
+        problem = verify_remux(plan, reordered)
         if problem:
             log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
             tmp_path.unlink(missing_ok=True)
@@ -1047,9 +1035,10 @@ def _process_file(path, args, position=0, on_progress=None):
                  f"with --avi-reorder to reorder streams instead, or convert to mkv)")
         return "skipped"
 
-    streams, duration = probe_audio_streams(path)
-    if streams is None:
+    layout, duration = probe_streams(path)
+    if layout is None:
         return "error"
+    streams = [s for s in layout if s["type"] == "audio"]
     if not streams:
         log.info(f"  {path.name}: no audio streams found, skipping")
         return "skipped"
@@ -1073,7 +1062,8 @@ def _process_file(path, args, position=0, on_progress=None):
     outcome = "to the first audio track" if is_avi_reorder else "as default audio"
     plan = Plan(path, streams, target["index"], duration,
                 intro=f"  {path.name}: {action} stream#{target['index']} "
-                      f"({target['language'] or 'und'}, {target['codec']}) {outcome}")
+                      f"({target['language'] or 'und'}, {target['codec']}) {outcome}",
+                layout=layout)
     progress = Progress(show=HAVE_TQDM and not args.no_progress and args.jobs == 1,
                         position=position, on_progress=on_progress)
     apply = apply_mkv if ext in MKV_EXTS else apply_remux

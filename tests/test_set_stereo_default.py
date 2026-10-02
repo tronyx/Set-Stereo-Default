@@ -32,14 +32,14 @@ def mkvmerge_ids(monkeypatch):
 
 def audio(index, channels, codec="aac", language="eng", default=False, name="",
           comment=False, visual_impaired=False):
-    """An audio stream the way probe_audio_streams() describes it."""
-    return {"index": index, "channels": channels, "codec": codec,
+    """An audio stream the way probe_streams() describes it."""
+    return {"index": index, "type": "audio", "channels": channels, "codec": codec,
             "language": language, "names": [name] if name else [], "default": default,
             "comment": comment, "visual_impaired": visual_impaired}
 
 
 def stream(index, codec_type, default=0, codec="aac", channels=None, language=None):
-    """A stream the way ffprobe reports it to probe_layout()."""
+    """A stream the way ffprobe's JSON reports it."""
     s = {"index": index, "codec_type": codec_type, "codec_name": codec,
          "disposition": {"default": default}}
     if channels:
@@ -266,19 +266,22 @@ def test_check_tools(monkeypatch, caplog, missing, need_mkvmerge, reported):
         assert "MKVToolNix (https://mkvtoolnix.download)" in caplog.text
 
 
-def test_probe_audio_streams_reads_commentary_flags(monkeypatch):
+def test_probe_streams_reads_every_stream_and_the_commentary_flags(monkeypatch):
     probe = {"streams": [
-        {"index": 1, "channels": 2, "codec_name": "aac", "tags": {"language": "eng"},
+        {"index": 0, "codec_type": "video", "codec_name": "h264", "disposition": {"default": 1}},
+        {"index": 1, "codec_type": "audio", "channels": 2, "codec_name": "aac",
+         "tags": {"language": "eng"},
          "disposition": {"default": 0, "comment": 1, "visual_impaired": 0}},
-        {"index": 2, "channels": 2, "codec_name": "aac",
+        {"index": 2, "codec_type": "audio", "channels": 2, "codec_name": "aac",
          "disposition": {"default": 1, "comment": 0, "visual_impaired": 1}},
     ], "format": {"duration": "60.0"}}
     monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
         returncode=0, stdout=json.dumps(probe), stderr=""))
 
-    streams, duration = ssd.probe_audio_streams(Path("v.mkv"))
+    streams, duration = ssd.probe_streams(Path("v.mkv"))
 
-    assert [(s["comment"], s["visual_impaired"], s["default"]) for s in streams] == \
+    assert [s["type"] for s in streams] == ["video", "audio", "audio"]
+    assert [(s["comment"], s["visual_impaired"], s["default"]) for s in streams[1:]] == \
         [(True, False, False), (False, True, True)]
     assert duration == 60.0
 
@@ -290,12 +293,12 @@ def test_probe_audio_streams_reads_commentary_flags(monkeypatch):
     ({"title": "Stereo", "handler_name": "SoundHandler"}, False),
 ], ids=["mkv title", "mp4 name", "mp4 handler_name", "ordinary names"])
 def test_commentary_is_found_by_any_track_name(monkeypatch, tags, is_commentary):
-    probe = {"streams": [{"index": 1, "channels": 2, "codec_name": "aac",
+    probe = {"streams": [{"index": 1, "codec_type": "audio", "channels": 2, "codec_name": "aac",
                           "tags": dict(tags, language="eng"), "disposition": {}}]}
     monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
         returncode=0, stdout=json.dumps(probe), stderr=""))
 
-    streams, _ = ssd.probe_audio_streams(Path("v.mp4"))
+    streams, _ = ssd.probe_streams(Path("v.mp4"))
 
     assert ssd.is_commentary(streams[0]) is is_commentary
 
@@ -710,6 +713,15 @@ def fake_ffprobe(monkeypatch):
 ORIGINAL_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 1, "eac3", 6, "eng"),
                    stream(2, "audio", 0, "aac", 2, "eng"), stream(3, "subtitle")]
 ORIGINAL_AUDIO = [audio(1, 6, "eac3", default=True), audio(2, 2, "aac")]
+REMUX = str(Path("v.mkv" + ssd.TMP_MARKER + ".mkv"))
+
+
+def plan_to_check(duration=None):
+    """The Plan _process_file() would make for v.mkv: ORIGINAL_LAYOUT's
+    streams, of which ORIGINAL_AUDIO are the audio ones, making stream 2
+    default. verify_remux() probes its remux, REMUX."""
+    return ssd.Plan(Path("v.mkv"), ORIGINAL_AUDIO, 2, duration,
+                    layout=[ssd._stream_info(s) for s in ORIGINAL_LAYOUT])
 
 
 @pytest.mark.parametrize("remuxed, expected", [
@@ -727,9 +739,8 @@ ORIGINAL_AUDIO = [audio(1, 6, "eac3", default=True), audio(2, 2, "aac")]
 ], ids=["good", "stream dropped", "flag not moved", "both default", "audio track lost",
         "unreadable"])
 def test_verify_remux(fake_ffprobe, remuxed, expected):
-    fake_ffprobe["orig"] = ORIGINAL_LAYOUT
-    fake_ffprobe["tmp"] = remuxed
-    problem = ssd.verify_remux("orig", "tmp", ORIGINAL_AUDIO, 2, reordered=False)
+    fake_ffprobe[REMUX] = remuxed
+    problem = ssd.verify_remux(plan_to_check(), reordered=False)
     if expected is None:
         assert problem is None
     else:
@@ -737,13 +748,12 @@ def test_verify_remux(fake_ffprobe, remuxed, expected):
 
 
 def test_verify_remux_avi_reorder(fake_ffprobe):
-    fake_ffprobe["orig"] = ORIGINAL_LAYOUT
-    fake_ffprobe["tmp"] = [stream(0, "video", 0, "xvid"), stream(1, "audio", 0, "aac", 2, "eng"),
+    fake_ffprobe[REMUX] = [stream(0, "video", 0, "xvid"), stream(1, "audio", 0, "aac", 2, "eng"),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
-    assert ssd.verify_remux("orig", "tmp", ORIGINAL_AUDIO, 2, reordered=True) is None
+    assert ssd.verify_remux(plan_to_check(), reordered=True) is None
 
-    fake_ffprobe["tmp"] = ORIGINAL_LAYOUT
-    assert "didn't end up first" in ssd.verify_remux("orig", "tmp", ORIGINAL_AUDIO, 2, reordered=True)
+    fake_ffprobe[REMUX] = ORIGINAL_LAYOUT
+    assert "didn't end up first" in ssd.verify_remux(plan_to_check(), reordered=True)
 
 
 REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6),
@@ -766,10 +776,9 @@ REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6
         "original duration unknown", "remux duration unknown"])
 def test_verify_remux_rejects_a_remux_much_shorter_than_the_original(fake_ffprobe, before, after,
                                                                      rejected):
-    fake_ffprobe["orig"] = (ORIGINAL_LAYOUT, before)
-    fake_ffprobe["tmp"] = (REMUXED_LAYOUT, after)
+    fake_ffprobe[REMUX] = (REMUXED_LAYOUT, after)
 
-    problem = ssd.verify_remux("orig", "tmp", ORIGINAL_AUDIO, 2, reordered=False)
+    problem = ssd.verify_remux(plan_to_check(before), reordered=False)
 
     if rejected:
         assert problem == (f"duration dropped from {before:.1f}s to {after:.1f}s; "
@@ -777,6 +786,28 @@ def test_verify_remux_rejects_a_remux_much_shorter_than_the_original(fake_ffprob
     else:
         assert problem is None
 
+
+def test_a_changed_file_is_probed_once_and_its_remux_once(tmp_path, monkeypatch):
+    """The decision and the check share one probe of the original."""
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"original")
+    probed = []
+
+    def fake_ffprobe(cmd, **kw):
+        probed.append(Path(cmd[-1]).name)
+        layout = ORIGINAL_LAYOUT if cmd[-1] == str(video) else REMUXED_LAYOUT
+        data = {"streams": layout, "format": {"duration": "60.0"}}
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+
+    def fake_remux(cmd, *args, **kwargs):
+        Path(cmd[-1]).write_bytes(b"remuxed")
+        return 0, ""
+    monkeypatch.setattr(ssd, "run", fake_ffprobe)
+    monkeypatch.setattr(ssd, "run_with_progress", fake_remux)
+
+    assert ssd.process_file(video, file_args(dry_run=False)) == "changed"
+    assert probed == ["v.mp4", "v.mp4" + ssd.TMP_MARKER + ".mp4"]
+    assert video.read_bytes() == b"remuxed"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows only has a read-only flag, not Unix permissions")
@@ -1256,14 +1287,14 @@ def file_args(**overrides):
 
 @pytest.fixture
 def probed(monkeypatch):
-    """Replace probe_audio_streams() so every file reports ORIGINAL_AUDIO;
+    """Replace probe_streams() so every file reports ORIGINAL_AUDIO;
     the returned list records which files were probed."""
     calls = []
 
     def fake_probe(path):
         calls.append(path.name)
         return [dict(s) for s in ORIGINAL_AUDIO], 100.0
-    monkeypatch.setattr(ssd, "probe_audio_streams", fake_probe)
+    monkeypatch.setattr(ssd, "probe_streams", fake_probe)
     return calls
 
 
@@ -1294,7 +1325,7 @@ def test_avi_reorder_moves_the_stereo_track_first(tmp_path, probed, caplog):
 def test_avi_reorder_leaves_a_file_whose_stereo_track_is_already_first(tmp_path, monkeypatch, caplog):
     caplog.set_level("INFO")
     streams = [audio(1, 2, "aac", default=True), audio(2, 6, "eac3")]
-    monkeypatch.setattr(ssd, "probe_audio_streams", lambda path: (streams, 100.0))
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: (streams, 100.0))
 
     result = ssd.process_file(tmp_path / "v.avi", file_args(avi_reorder=True))
 
@@ -1313,7 +1344,7 @@ def test_other_containers_set_the_default_flag(tmp_path, probed, caplog, name):
 
 def test_file_without_audio_is_skipped(tmp_path, monkeypatch, caplog):
     caplog.set_level("INFO")
-    monkeypatch.setattr(ssd, "probe_audio_streams", lambda path: ([], 100.0))
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: ([], 100.0))
 
     assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
     assert "v.mkv: no audio streams found, skipping" in caplog.text
@@ -1726,7 +1757,7 @@ def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys
         return [1, 2]
 
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
-    monkeypatch.setattr(ssd, "probe_audio_streams",
+    monkeypatch.setattr(ssd, "probe_streams",
                         lambda path: ([dict(s) for s in ORIGINAL_AUDIO], 100.0))
     monkeypatch.setattr(ssd, "mkvmerge_audio_ids", slow_ids)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
