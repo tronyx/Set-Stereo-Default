@@ -33,6 +33,8 @@ def need(*tools):
 
 @dataclass
 class Track:
+    """One audio track for make_video(): its channel count (2 or 6),
+    language, name, and which flags it carries."""
     channels: int
     language: str = "eng"
     title: str = ""
@@ -44,7 +46,9 @@ class Track:
 def make_video(path, tracks):
     """Write a 1-second video at path with one audio stream per Track.
     Video and audio use encoders built into every ffmpeg (mpeg4, ac3), and
-    the audio is silence, so each file is a few KB."""
+    the audio is silence, so each file is a few KB. A track's title is set
+    both as "title" (what MKV uses for a track name) and "handler_name"
+    (what MP4 uses)."""
     cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1"]
     for t in tracks:
         cmd += ["-t", "1", "-f", "lavfi", "-i",
@@ -60,7 +64,6 @@ def make_video(path, tracks):
         if t.language:
             cmd += [f"-metadata:s:a:{i}", f"language={t.language}"]
         if t.title:
-            # MKV keeps a track name in "title"; MP4 keeps it as the handler name.
             cmd += [f"-metadata:s:a:{i}", f"title={t.title}",
                     f"-metadata:s:a:{i}", f"handler_name={t.title}"]
     subprocess.run(cmd + [str(path)], check=True, capture_output=True, text=True)
@@ -126,11 +129,15 @@ def summary(output):
 
 @dataclass
 class Case:
+    """One file to generate and what the script should do with it.
+
+    expect is the summary bucket the file should land in ("changed",
+    "unchanged", ...). For "changed", target is the audio stream (counting
+    from 0) that must end up the only default; with --avi-reorder, it's the
+    original audio stream that must end up first."""
     ext: str
     tracks: list
     expect: str
-    # For "changed": which audio stream (0-based) must end up the only default,
-    # or for --avi-reorder, which original audio stream must end up first.
     target: int = None
     args: list = field(default_factory=list)
 
@@ -163,6 +170,10 @@ CASES = {
 
 @pytest.mark.parametrize("case", CASES.values(), ids=CASES.keys())
 def test_script_on_a_real_file(tmp_path, case):
+    """Generate the case's file, run the script on it, and check the result.
+    Files that shouldn't change must be byte-for-byte identical afterwards.
+    Changed files must keep every stream and their audio order, except that
+    --avi-reorder moves the target to the front and keeps the rest in order."""
     need("ffmpeg", "ffprobe", *(["mkvmerge"] if case.ext == ".mkv" else []))
     video = make_video(tmp_path / f"video{case.ext}", case.tracks)
     before_streams, before_audio, before_digest = probe(video), audio_defaults(video), digest(video)
@@ -179,7 +190,6 @@ def test_script_on_a_real_file(tmp_path, case):
     assert len(probe(video)) == len(before_streams), "a stream was lost"
     assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
     if "--avi-reorder" in case.args:
-        # The target moves to the front; the other audio tracks keep their order.
         moved = before_audio[case.target][0]
         rest = [ch for i, (ch, _) in enumerate(before_audio) if i != case.target]
         assert [ch for ch, _ in after_audio] == [moved] + rest
