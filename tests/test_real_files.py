@@ -292,9 +292,13 @@ def test_a_second_backup_never_loses_the_first_unless_asked(tmp_path, option, ke
 
 
 def test_unreadable_file_is_an_error_and_left_alone(tmp_path):
+    """The file starts with the MKV signature, so ffprobe reads it as MKV
+    and rejects the junk that follows. Random bytes aren't used: ffprobe
+    now and then takes them for some other format (e.g. lyrics), and then
+    the file is merely skipped for having no audio."""
     need("ffmpeg", "ffprobe", "mkvmerge")
     video = tmp_path / "broken.mkv"
-    video.write_bytes(os.urandom(4096))
+    video.write_bytes(bytes.fromhex("1a45dfa3") + b"\xff" * 4092)
     before = digest(video)
 
     code, output = run_script(video)
