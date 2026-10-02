@@ -53,6 +53,23 @@ jobs:
           path: coverage-total.txt
           retention-days: 1
 
+  # Lint (ruff) and type checks (mypy), set up in pyproject.toml. mypy runs
+  # twice: the script imports different modules on Linux and on Windows.
+  lint:
+    name: Lint and type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m ruff check .
+      - run: python -m mypy --platform linux
+      - run: python -m mypy --platform win32
+
   # Writes the coverage total to coverage-<branch>.json on the badges branch,
   # which the README's coverage badges read through shields.io. Only runs
   # for pushes to master and develop, once every test job has passed.

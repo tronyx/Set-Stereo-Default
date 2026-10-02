@@ -665,7 +665,7 @@ def test_can_ask_only_with_a_terminal_for_input_and_output(monkeypatch, stdin_tt
 @pytest.mark.parametrize("mode", ["replace", "number"])
 def test_existing_backups_option_skips_the_question(backed_up, mode):
     _, run = backed_up
-    code, seen, questions = run("--backup", "--existing-backups", mode)
+    _, seen, questions = run("--backup", "--existing-backups", mode)
 
     assert questions == []
     assert seen == [mode, mode]
@@ -674,7 +674,7 @@ def test_existing_backups_option_skips_the_question(backed_up, mode):
 @pytest.mark.parametrize("options", [["--backup", "--dry-run"], []], ids=["dry run", "no --backup"])
 def test_no_backup_question_when_no_backup_will_be_made(backed_up, options):
     _, run = backed_up
-    code, seen, questions = run(*options)
+    _, seen, questions = run(*options)
 
     assert questions == []
     assert len(seen) == 2
@@ -683,7 +683,7 @@ def test_no_backup_question_when_no_backup_will_be_made(backed_up, options):
 def test_no_backup_question_without_existing_backups(backed_up):
     folder, run = backed_up
     (folder / "e00.mkv.bak").unlink()
-    code, seen, questions = run("--backup")
+    _, seen, questions = run("--backup")
 
     assert questions == []
     assert seen == ["number", "number"]
@@ -970,13 +970,13 @@ def test_owner_failures_are_reported_once_at_the_end_with_a_list(nfs_owners, mon
     [listed] = listing.glob("set_stereo_default-owners-*.log")
     assert listed.read_text(encoding="utf-8").splitlines() == [str(v) for v in videos]
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    assert warnings == [
+    assert warnings == [(
         "\nCouldn't give 2 remuxed files their original owner (Operation not permitted). "
         f"You can view the full list of files here: {listed.resolve()}\n\n"
         "These files should belong to tronyx:users (1000:100) but belong to "
         "nobody:nogroup (65534:65534). Permissions were still copied. Changing a file's "
         "owner needs root, and NFS shares usually turn root into 'nobody'. Run the script "
-        "as the files' owner instead (sudo -u tronyx python3 ...)."]
+        "as the files' owner instead (sudo -u tronyx python3 ...).")]
 
 
 def test_files_with_different_owners_are_listed_with_each_files_owners(nfs_owners, tmp_path,
@@ -989,8 +989,8 @@ def test_files_with_different_owners_are_listed_with_each_files_owners(nfs_owner
 
     [listed] = tmp_path.glob("set_stereo_default-owners-*.log")
     assert listed.read_text(encoding="utf-8").splitlines() == [
-        f"{tmp_path / 'a.mkv'}  (should belong to tronyx:users (1000:100), "
-        f"belongs to nobody:nogroup (65534:65534))",
+        (f"{tmp_path / 'a.mkv'}  (should belong to tronyx:users (1000:100), "
+         f"belongs to nobody:nogroup (65534:65534))"),
         f"{tmp_path / 'b.mkv'}  (should belong to 99:100, belongs to nobody:nogroup (65534:65534))"]
     assert ("Their owners vary (the list shows each file's); for example, a.mkv should belong "
             "to tronyx:users (1000:100)") in caplog.text
@@ -1290,8 +1290,8 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
 def file_args(**overrides):
     """The parsed options process_file() and the apply functions take, as a
     --dry-run with no progress bar."""
-    values = dict(prefer_lang=None, avi_reorder=False, force=False, dry_run=True,
-                  backup=False, keep_dates=False, no_progress=True, jobs=1)
+    values = {"prefer_lang": None, "avi_reorder": False, "force": False, "dry_run": True,
+              "backup": False, "keep_dates": False, "no_progress": True, "jobs": 1}
     values.update(overrides)
     return types.SimpleNamespace(**values)
 

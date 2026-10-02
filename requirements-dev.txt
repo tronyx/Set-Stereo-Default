@@ -1,4 +1,9 @@
-# For running the tests (python -m pytest). Not needed to use the script.
+# For running the tests (python -m pytest) and the checks GitHub runs
+# (python -m ruff check . and python -m mypy). Not needed to use the script.
 -r requirements.txt
 pytest>=7
 coverage>=7
+# Pinned, so a new release with new rules can't suddenly fail the checks.
+# Bump them on purpose, and fix anything new they find in the same change.
+ruff==0.16.10
+mypy==2.4.0

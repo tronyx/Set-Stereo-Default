@@ -121,7 +121,7 @@ def digest(path):
 def run_script(*args):
     """Run the script as a user would. Returns (exit code, combined output)."""
     res = subprocess.run([sys.executable, str(SCRIPT), "--no-progress", *map(str, args)],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, check=False)
     return res.returncode, res.stdout + res.stderr
 
 

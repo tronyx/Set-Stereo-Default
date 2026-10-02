@@ -31,14 +31,18 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 
 3. Make your change. Keep each pull request to one change.
 
-4. Install the test requirements and run the tests:
+4. Install the dev requirements, then run the tests and the checks:
 
    ```bash
    pip install -r requirements-dev.txt
    python -m pytest
+   python -m ruff check .
+   python -m mypy
    ```
 
    The real-file tests are skipped unless ffmpeg, ffprobe and mkvmerge are installed. GitHub runs them for you on every pull request, but it's quicker to catch problems locally. To see which lines your tests reach, run `python -m coverage run -m pytest` and then `python -m coverage report`.
+
+   `ruff` is a linter and `mypy` checks the type hints; both are set up in `pyproject.toml`, and GitHub runs them on every push too.
 
 5. Commit, push, and open a pull request against `develop`:
 
@@ -55,5 +59,6 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 - **Linux, macOS and Windows.** Use `pathlib` for paths, pass commands as lists rather than through a shell, and don't assume a file system feature (hard links, symlinks, owners) is always available.
 - **Docstrings, not comments.** Explain code in the docstring of the function it belongs to. Module-level settings get a docstring on the line after them. Don't add `#` comments.
 - **Keep docstrings short and plain.** Say what something does and, where it isn't obvious, why.
+- **Type hints on every function.** `mypy` checks them, so they stay accurate. If it objects to something, fix the code rather than silencing it: a `# type: ignore` is a comment, which the rule above rules out.
 - **Add or update tests** for any change in behavior. Logic tests go in `tests/test_set_stereo_default.py`. Anything that depends on how ffmpeg or mkvmerge really behave goes in `tests/test_real_files.py`.
 - **Update the README** if you add an option or change what the script does.
