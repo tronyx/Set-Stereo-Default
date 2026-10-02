@@ -7,6 +7,7 @@
 - [ ] This pull request makes one change.
 - [ ] I've documented my change in docstrings (no `#` comments), and updated the README if needed.
 - [ ] I've tested my change and added or updated tests for it.
+- [ ] My change works on Python 3.10 and doesn't add a required package.
 - [ ] I'm willing to help maintain this change if problems come up later.
 - [ ] I'm giving this submission freely and claim no ownership of it.
 
