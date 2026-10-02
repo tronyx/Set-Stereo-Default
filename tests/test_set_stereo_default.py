@@ -1362,9 +1362,9 @@ def test_file_without_audio_is_skipped(tmp_path, monkeypatch, caplog):
 
 
 def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatch):
-    def fake_run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
+    def fake_run_with_progress(cmd, label, parse_pct, progress=None):
         for us in (25_000_000, 50_000_000, 100_000_000):
-            on_progress(parse_pct(f"out_time_us={us}\n"))
+            progress.on_progress(parse_pct(f"out_time_us={us}\n"))
         return 1, ""
     monkeypatch.setattr(ssd, "run_with_progress", fake_run_with_progress)
 
@@ -1404,8 +1404,8 @@ def test_ffmpeg_failure_message_leaves_out_progress_lines(tmp_path, monkeypatch,
 def test_run_with_progress_reports_increases_and_finishes_at_100():
     seen = []
     code = "for p in (10, 40, 40, 30, 70): print(f'pct={p}')"
-    returncode, _ = ssd.run_with_progress(python_cmd(code), "x", False, parse_pct_line,
-                                          on_progress=seen.append)
+    returncode, _ = ssd.run_with_progress(python_cmd(code), "x", parse_pct_line,
+                                          ssd.Progress(on_progress=seen.append))
     assert returncode == 0
     assert seen == [10, 40, 70, 100]
 
@@ -1415,7 +1415,7 @@ def test_run_with_progress_keeps_only_the_last_50_lines():
             "for i in range(500): print(i)\n"
             "print('Error: boom', file=sys.stderr)\n"
             "sys.exit(3)")
-    returncode, output = ssd.run_with_progress(python_cmd(code), "x", False, parse_pct_line)
+    returncode, output = ssd.run_with_progress(python_cmd(code), "x", parse_pct_line)
     lines = output.splitlines()
     assert returncode == 3
     assert len(lines) == 50
@@ -1425,7 +1425,7 @@ def test_run_with_progress_keeps_only_the_last_50_lines():
 def test_run_with_progress_leaves_progress_lines_out_of_the_output():
     code = ("print('Warning: early')\n"
             "for p in range(1, 101): print(f'pct={p}')")
-    _, output = ssd.run_with_progress(python_cmd(code), "x", False, parse_pct_line)
+    _, output = ssd.run_with_progress(python_cmd(code), "x", parse_pct_line)
     assert output.splitlines() == ["Warning: early"]
 
 
@@ -1455,7 +1455,8 @@ def test_run_with_progress_shows_a_per_file_bar_and_closes_it(monkeypatch, exit_
             "for p in (10, 40, 40, 30, 70): print(f'pct={p}')\n"
             f"sys.exit({exit_code})")
 
-    returncode, _ = ssd.run_with_progress(python_cmd(code), "Episode 1.mkv", True, parse_pct_line)
+    returncode, _ = ssd.run_with_progress(python_cmd(code), "Episode 1.mkv", parse_pct_line,
+                                          ssd.Progress(show=True))
 
     assert returncode == exit_code
     [bar] = bars
@@ -1478,7 +1479,7 @@ def test_run_reads_output_as_utf8_and_replaces_invalid_bytes():
 
 
 def test_run_with_progress_reads_output_as_utf8_and_replaces_invalid_bytes():
-    returncode, output = ssd.run_with_progress(UTF8_OUTPUT_CMD, "x", False, parse_pct_line)
+    returncode, output = ssd.run_with_progress(UTF8_OUTPUT_CMD, "x", parse_pct_line)
     assert returncode == 0
     assert output.splitlines() == ["Título: Été — 日本語", "bad \ufffd byte"]
 
@@ -1558,7 +1559,7 @@ def test_run_with_progress_kills_its_subprocess_on_an_exception(monkeypatch):
         raise RuntimeError("stop")
 
     with pytest.raises(RuntimeError):
-        ssd.run_with_progress(SLOW_CMD, "x", False, parse_pct_line, on_progress=fail)
+        ssd.run_with_progress(SLOW_CMD, "x", parse_pct_line, ssd.Progress(on_progress=fail))
     assert started[0].poll() is not None
     assert not ssd._active_procs
 
@@ -1578,7 +1579,7 @@ def test_run_with_progress_kills_its_subprocess_if_the_bar_cant_be_created(monke
     monkeypatch.setattr(ssd, "tqdm", broken_tqdm)
 
     with pytest.raises(RuntimeError):
-        ssd.run_with_progress(SLOW_CMD, "x", True, parse_pct_line)
+        ssd.run_with_progress(SLOW_CMD, "x", parse_pct_line, ssd.Progress(show=True))
     assert started[0].poll() is not None
     assert not ssd._active_procs
 
@@ -1600,7 +1601,7 @@ def test_stop_handler_doesnt_hang_if_it_interrupts_the_lock_holder():
 def test_run_with_progress_kills_a_subprocess_started_after_ctrl_c():
     ssd._cancelled.set()
     t0 = time.monotonic()
-    returncode, _ = ssd.run_with_progress(SLOW_CMD, "x", False, parse_pct_line)
+    returncode, _ = ssd.run_with_progress(SLOW_CMD, "x", parse_pct_line)
     assert returncode != 0
     assert time.monotonic() - t0 < 5
     assert not ssd._active_procs
@@ -1610,7 +1611,7 @@ def test_terminate_active_procs_unblocks_a_worker_thread():
     result = {}
 
     def worker():
-        result["returncode"] = ssd.run_with_progress(SLOW_CMD, "x", False, parse_pct_line)[0]
+        result["returncode"] = ssd.run_with_progress(SLOW_CMD, "x", parse_pct_line)[0]
 
     thread = threading.Thread(target=worker)
     thread.start()

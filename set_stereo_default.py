@@ -69,8 +69,11 @@ missing, 2 invalid options, 130 stopped by Ctrl+C, 143 stopped by SIGTERM.
 Full guide: https://github.com/tronyx/Set-Stereo-Default
 """
 
+from __future__ import annotations
+
 import argparse
 import contextlib
+import importlib
 import json
 import logging
 import os
@@ -84,10 +87,12 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import FrameType, ModuleType
+from typing import NoReturn
 
 try:
     from tqdm import tqdm
@@ -95,11 +100,21 @@ try:
 except ImportError:
     HAVE_TQDM = False
 
-try:
-    import grp
-    import pwd
-except ImportError:
-    grp = pwd = None
+
+
+def _optional_module(name: str) -> ModuleType | None:
+    """Import a module that only some systems have, or return None."""
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
+
+
+grp = _optional_module("grp")
+"""Group names (Linux and macOS only; None on Windows)."""
+
+pwd = _optional_module("pwd")
+"""User names (Linux and macOS only; None on Windows)."""
 
 DEFAULT_EXTS = {".mkv", ".webm", ".mp4", ".m4v", ".mov", ".avi"}
 """Extensions processed when --ext isn't given."""
@@ -181,14 +196,14 @@ class TqdmLoggingHandler(logging.Handler):
     """Routes log messages through tqdm.write() so they don't clobber an
     active progress bar."""
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         try:
             tqdm.write(self.format(record))
         except Exception:
             self.handleError(record)
 
 
-def setup_logging(log_file):
+def setup_logging(log_file: str | None) -> None:
     """Send log messages to the console, or with --log-file to that file.
     With a log file, warnings and errors still reach the console too, so a
     failed run (e.g. a missing tool) never ends without saying why."""
@@ -234,7 +249,7 @@ class _FileHeaderFilter(logging.Filter):
     printed twice. Lines logged outside file_context() pass straight
     through."""
 
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
         header = getattr(_file_context, "header", None)
         if header is None:
             return True
@@ -250,7 +265,7 @@ log.addFilter(_FileHeaderFilter())
 
 
 @contextlib.contextmanager
-def file_context(header):
+def file_context(header: str) -> Iterator[None]:
     """Mark this thread as working on the file with this "[i/N] path" header
     until the block ends, so its lines are kept under that header (see
     _FileHeaderFilter)."""
@@ -261,7 +276,7 @@ def file_context(header):
         _file_context.header = None
 
 
-_active_procs = set()
+_active_procs: set[subprocess.Popen[str]] = set()
 """Running mkvmerge/ffmpeg remuxes, so a stop can kill them."""
 
 _active_procs_lock = threading.RLock()
@@ -271,7 +286,7 @@ main thread, which may be the thread it interrupted while holding it."""
 _cancelled = threading.Event()
 """Set once Ctrl+C or SIGTERM arrives, so files that haven't started are skipped."""
 
-_ownership_failures = []
+_ownership_failures: list[tuple[str, tuple[int, int], tuple[int, int], str]] = []
 """Remuxed files that couldn't be given their original owner, as (full path,
 wanted owner, actual owner, reason). Reported once, at the end of the run,
 by report_ownership_failures()."""
@@ -280,26 +295,22 @@ _ownership_lock = threading.Lock()
 """Guards _ownership_failures, which several --jobs threads add to at once."""
 
 
-def _terminate_active_procs():
+def _terminate_active_procs() -> None:
     """Stop every running remux: terminate() first, then kill() anything
     still running after 5 seconds. The 5 seconds is shared, not per
     process, so stopping never takes longer however many --jobs run."""
     with _active_procs_lock:
         procs = list(_active_procs)
     for proc in procs:
-        try:
+        with contextlib.suppress(Exception):
             proc.terminate()
-        except Exception:
-            pass
     deadline = time.monotonic() + 5
     for proc in procs:
         try:
             proc.wait(timeout=max(0, deadline - time.monotonic()))
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
 
 
 class Stopped(KeyboardInterrupt):
@@ -307,12 +318,12 @@ class Stopped(KeyboardInterrupt):
     KeyboardInterrupt, so everything that cleans up after Ctrl+C also
     cleans up after SIGTERM."""
 
-    def __init__(self, signum):
+    def __init__(self, signum: int) -> None:
         super().__init__()
         self.signum = signum
 
 
-def _stop_handler(signum, frame):
+def _stop_handler(signum: int, frame: FrameType | None) -> NoReturn:
     """Handle Ctrl+C (SIGINT) and SIGTERM: kill every running remux, then
     raise Stopped in the main thread.
 
@@ -325,7 +336,7 @@ def _stop_handler(signum, frame):
     raise Stopped(signum)
 
 
-def _stop_reason(exc):
+def _stop_reason(exc: BaseException) -> tuple[int, str]:
     """Return (signal number, message) for a stop: a Stopped from
     _stop_handler(), or a plain KeyboardInterrupt, which counts as Ctrl+C."""
     signum = getattr(exc, "signum", signal.SIGINT)
@@ -340,7 +351,7 @@ class Cancelled(Exception):
     than reporting the killed command as a failure."""
 
 
-def run(cmd):
+def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     """Run a quick command (e.g. ffprobe) and capture its output. Remuxes use
     run_with_progress() instead.
 
@@ -375,16 +386,17 @@ def run(cmd):
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
-def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
+def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int | None],
+                      progress: Progress | None = None) -> tuple[int, str]:
     """Run a remux, reading its output as it arrives so progress can be shown
     live. Returns (returncode, output), where output is the last 50 lines
     that aren't progress updates: that's where warnings and errors end up.
 
     parse_pct(line) returns 0-100 for a progress line and None for anything
-    else. With show_progress, a tqdm bar titled label shows this file's
-    progress at the given row position. on_progress(pct), if given, is
-    called on every increase and with 100 on success; main() uses it to
-    move the overall bar. Output is read as UTF-8, as in run().
+    else. With progress.show, a tqdm bar titled label shows this file's
+    progress at row progress.position. progress.on_progress(pct), if set,
+    is called on every increase and with 100 on success; process_all()
+    uses it to move the overall bar. Output is read as UTF-8, as in run().
 
     The process is listed in _active_procs while it runs and is killed if
     anything goes wrong, so it's never left running on its own. If a stop
@@ -392,19 +404,23 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     that check, and the stop handler sets _cancelled before reading the
     list, so a remux starting at the same moment as a stop can't slip
     through."""
+    progress = progress or Progress()
     bar = None
     last_pct = 0
-    lines = deque(maxlen=50)
+    lines: deque[str] = deque(maxlen=50)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              encoding="utf-8", errors="replace", bufsize=1)
+    stdout = proc.stdout
+    assert stdout is not None
     try:
         with _active_procs_lock:
             _active_procs.add(proc)
         if _cancelled.is_set():
             proc.kill()
-        if show_progress and HAVE_TQDM:
-            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=position)
-        for line in proc.stdout:
+        if progress.show and HAVE_TQDM:
+            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False,
+                       position=progress.position)
+        for line in stdout:
             pct = parse_pct(line)
             if pct is None:
                 lines.append(line)
@@ -414,20 +430,20 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
                     if bar:
                         bar.update(pct - last_pct)
                     last_pct = pct
-                    if on_progress:
-                        on_progress(pct)
+                    if progress.on_progress:
+                        progress.on_progress(pct)
         proc.wait()
         if last_pct < 100 and proc.returncode == 0:
             if bar:
                 bar.update(100 - last_pct)
-            if on_progress:
-                on_progress(100)
+            if progress.on_progress:
+                progress.on_progress(100)
     except BaseException:
         proc.kill()
         proc.wait()
         raise
     finally:
-        proc.stdout.close()
+        stdout.close()
         with _active_procs_lock:
             _active_procs.discard(proc)
         if bar:
@@ -435,14 +451,11 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     return proc.returncode, "".join(lines)
 
 
-def check_tools(need_mkvmerge):
+def check_tools(need_mkvmerge: bool) -> bool:
     """True if ffmpeg and ffprobe are on PATH, and mkvmerge too when there are
     .mkv/.webm files to process. Otherwise logs what's missing, with
     install links, and returns False."""
-    missing = []
-    for tool in ("ffmpeg", "ffprobe"):
-        if shutil.which(tool) is None:
-            missing.append(tool)
+    missing = [tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None]
     if need_mkvmerge and shutil.which("mkvmerge") is None:
         missing.append("mkvmerge (install MKVToolNix)")
     if missing:
@@ -467,10 +480,10 @@ class Stream:
     comment: bool = False
     visual_impaired: bool = False
     language: str = ""
-    names: tuple = ()
+    names: tuple[str, ...] = ()
 
 
-def _stream_info(raw):
+def _stream_info(raw: dict) -> Stream:
     """One stream from ffprobe's JSON (raw) as a Stream."""
     tags = raw.get("tags", {}) or {}
     disposition = raw.get("disposition", {}) or {}
@@ -487,7 +500,7 @@ def _stream_info(raw):
     )
 
 
-def probe_streams(path, report=True):
+def probe_streams(path: Path, report: bool = True) -> tuple[list[Stream] | None, float | None]:
     """Return (streams, duration in seconds) for path: every stream, as a
     Stream, and the duration (None if unknown). Returns
     (None, None) if ffprobe can't read the file, after logging why unless
@@ -519,7 +532,7 @@ def probe_streams(path, report=True):
     return [_stream_info(s) for s in data.get("streams", [])], duration
 
 
-def is_commentary(stream):
+def is_commentary(stream: Stream) -> bool:
     """True for a commentary or audio-description track. These are often
     stereo but should never play by default. They're recognized by the
     file's own flags, or failing that by the track's name."""
@@ -527,7 +540,7 @@ def is_commentary(stream):
             or any(COMMENTARY_NAME_RE.search(n) for n in stream.names))
 
 
-def normalize_language(code):
+def normalize_language(code: str | None) -> str:
     """Return code in one standard form, so different tags for the same
     language compare equal: lowercased, with any region or script part
     dropped ("pt-BR" -> "pt"), then mapped to its ISO 639-2/T code through
@@ -537,7 +550,8 @@ def normalize_language(code):
     return LANGUAGE_ALIASES.get(base, base)
 
 
-def choose_target(streams, prefer_lang):
+def choose_target(streams: list[Stream],
+                  prefer_lang: str | None) -> tuple[Stream | None, str | None]:
     """Return (stream, note): the stereo track to make default, or None and a
     note saying why the file should be skipped.
 
@@ -549,7 +563,7 @@ def choose_target(streams, prefer_lang):
     language, but a track tagged with the wanted one wins over it. Codes
     are compared after normalize_language(), so "de", "ger" and "deu" all
     mean German."""
-    def describe(ss):
+    def describe(ss: list[Stream]) -> str:
         """List tracks for a skip note, e.g. "stream#2 (eng/aac), stream#3 (spa/ac3)"."""
         return ", ".join(f"stream#{s.index} ({s.language or 'und'}/{s.codec})" for s in ss)
 
@@ -579,12 +593,12 @@ def choose_target(streams, prefer_lang):
     )
 
 
-def needs_change(streams, target_index):
+def needs_change(streams: list[Stream], target_index: int) -> bool:
     """True unless the target is already the only audio track flagged default."""
     return any((s.index == target_index) != s.default for s in streams)
 
 
-def verify_remux(plan, reordered):
+def verify_remux(plan: Plan, reordered: bool) -> str | None:
     """Check the finished remux at plan.tmp_path before it replaces the
     original. Returns None if it looks right, otherwise a short reason why
     not. The original isn't probed again: plan.layout and plan.duration
@@ -637,7 +651,7 @@ def verify_remux(plan, reordered):
     return None
 
 
-def backup_path(path, replace):
+def backup_path(path: Path, replace: bool) -> Path:
     """Where to keep path's original: <name>.bak, unless that already exists
     and replace is false, in which case the first free <name>.bak.1,
     <name>.bak.2, ... so an earlier backup is never lost."""
@@ -650,7 +664,7 @@ def backup_path(path, replace):
     return path.with_name(f"{path.name}.bak.{n}")
 
 
-def make_backup(path, replace=False):
+def make_backup(path: Path, replace: bool = False) -> Path:
     """Keep the original at backup_path() and return that path. A hard link
     is instant and needs no room while the remux runs; once the new file
     replaces the original, the backup holds the original's data on its
@@ -665,36 +679,40 @@ def make_backup(path, replace=False):
     return bak_path
 
 
-def _owner(path):
+def _owner(path: Path) -> tuple[int, int]:
     """Return path's owner as (user ID, group ID)."""
     st = os.stat(path)
     return st.st_uid, st.st_gid
 
 
-def _user_name(uid):
+def _user_name(uid: int) -> str | None:
     """The name of user ID uid, or None if it has none here (or on Windows)."""
+    if pwd is None:
+        return None
     try:
         return pwd.getpwuid(uid).pw_name
-    except (AttributeError, KeyError):
+    except KeyError:
         return None
 
 
-def _group_name(gid):
+def _group_name(gid: int) -> str | None:
     """The name of group ID gid, or None if it has none here (or on Windows)."""
+    if grp is None:
+        return None
     try:
         return grp.getgrgid(gid).gr_name
-    except (AttributeError, KeyError):
+    except KeyError:
         return None
 
 
-def _owner_name(uid, gid):
+def _owner_name(uid: int, gid: int) -> str:
     """Describe an owner as "tronyx:users (1000:100)", or as just "1000:100"
     if either ID has no name on this system."""
     user, group = _user_name(uid), _group_name(gid)
     return f"{user}:{group} ({uid}:{gid})" if user and group else f"{uid}:{gid}"
 
 
-def copy_ownership(src, dst):
+def copy_ownership(src: Path, dst: Path) -> None:
     """Give dst the same permissions and owner as src. A remux creates a new
     file owned by whoever ran the script, which could lock out tools that
     share your media through a group (Sonarr, Radarr, Plex, containers).
@@ -718,10 +736,10 @@ def copy_ownership(src, dst):
         os.chown(dst, *wanted)
     except OSError as exc:
         with _ownership_lock:
-            _ownership_failures.append((str(src), wanted, got, exc.strerror))
+            _ownership_failures.append((str(src), wanted, got, exc.strerror or str(exc)))
 
 
-def _write_ownership_list(folder):
+def _write_ownership_list(folder: Path | str) -> Path | None:
     """Write the full path of every file in _ownership_failures to a new
     set_stereo_default-owners-<date>-<time>.log in folder, one per line in
     path order (they're recorded in whatever order --jobs finishes them),
@@ -744,7 +762,7 @@ def _write_ownership_list(folder):
     return None
 
 
-def report_ownership_failures(folder="."):
+def report_ownership_failures(folder: Path | str = ".") -> None:
     """Warn once about every remuxed file that couldn't be given its original
     owner: how many, the owner they should have and the one they got, and
     the command to run the script as the right user. With more than one,
@@ -783,7 +801,7 @@ def report_ownership_failures(folder="."):
                 f"{where}\n\n{owners} {advice}")
 
 
-def swap_in(path, tmp_path, backup, keep_dates=False):
+def swap_in(path: Path, tmp_path: Path, backup: str | bool, keep_dates: bool = False) -> None:
     """Replace path with the checked remux at tmp_path. Copies the original's
     permissions and owner (and with keep_dates, its access and modification
     times), keeps the original as a backup if backup is set, then swaps the
@@ -816,14 +834,14 @@ class Plan:
     in the file, which verify_remux() compares the remux against. The
     streams, duration and layout all come from one probe_streams() call."""
     path: Path
-    streams: list
+    streams: list[Stream]
     target_index: int
     duration: float | None = None
     intro: str | None = None
-    layout: list | None = None
+    layout: list[Stream] = field(default_factory=list)
 
     @property
-    def tmp_path(self):
+    def tmp_path(self) -> Path:
         """Where the remux is written before it replaces the original."""
         return self.path.with_name(self.path.name + TMP_MARKER + self.path.suffix)
 
@@ -837,7 +855,7 @@ class Progress:
     on_progress: Callable[[int], None] | None = None
 
 
-def check_and_swap_in(plan, reordered, args):
+def check_and_swap_in(plan: Plan, reordered: bool, args: argparse.Namespace) -> bool:
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged).
@@ -859,7 +877,7 @@ def check_and_swap_in(plan, reordered, args):
         raise
 
 
-def mkvmerge_audio_ids(path):
+def mkvmerge_audio_ids(path: Path) -> list[int] | None:
     """Return mkvmerge's track IDs for path's audio tracks, in file order, or
     None if mkvmerge can't read it. mkvmerge -J exits 0 even for a file it
     doesn't recognize, but then lists no tracks, so that gives []."""
@@ -873,7 +891,7 @@ def mkvmerge_audio_ids(path):
     return [t["id"] for t in tracks if t.get("type") == "audio"]
 
 
-def _announce(intro, line=None):
+def _announce(intro: str | None, line: str | None = None) -> None:
     """Log a file's intro (what's about to happen to it, from
     _process_file()) and line together, as one message. With --jobs > 1,
     nothing from another file can then land between the two, so the
@@ -894,20 +912,20 @@ _FFMPEG_PROGRESS_RE = re.compile(r"[a-z0-9_]+=")
 """ffmpeg -progress output: a block of key=value lines per update."""
 
 
-def _mkvmerge_pct(line):
+def _mkvmerge_pct(line: str) -> int | None:
     """Read the percentage from mkvmerge's "#GUI#progress 42%" lines; None
     for any other line."""
     m = _MKVMERGE_PCT_RE.search(line)
     return int(m.group(1)) if m else None
 
 
-def _ffmpeg_pct(duration):
+def _ffmpeg_pct(duration: float | None) -> Callable[[str], int | None]:
     """Return a parse_pct for ffmpeg's -progress output (see
     run_with_progress()). out_time_us gives the percentage done, which
     needs the file's duration in seconds. Every other key returns 0: still
     a progress line, so it's kept out of error messages, but it doesn't
     move the bar. Without a duration, the bar only fills at the end."""
-    def parse_pct(line):
+    def parse_pct(line: str) -> int | None:
         """Read one line of ffmpeg's -progress output."""
         line = line.strip()
         if not _FFMPEG_PROGRESS_RE.match(line):
@@ -921,7 +939,9 @@ def _ffmpeg_pct(duration):
     return parse_pct
 
 
-def _remux_and_swap(plan, cmd, parse_pct, args, progress, reordered=False, warnings_exit=None):
+def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int | None],
+                    args: argparse.Namespace, progress: Progress, *, reordered: bool = False,
+                    warnings_exit: int | None = None) -> bool:
     """Run a remux command written to plan.tmp_path, then check it and swap it
     in. Returns True on success (or after a dry run, which only logs the
     command), False on failure (already logged). Shared by apply_mkv() and
@@ -944,8 +964,7 @@ def _remux_and_swap(plan, cmd, parse_pct, args, progress, reordered=False, warni
     _announce(plan.intro)
 
     try:
-        returncode, output = run_with_progress(cmd, path.name, progress.show, parse_pct,
-                                               progress.position, progress.on_progress)
+        returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -967,7 +986,7 @@ def _remux_and_swap(plan, cmd, parse_pct, args, progress, reordered=False, warni
     return check_and_swap_in(plan, reordered, args)
 
 
-def apply_mkv(plan, args, progress=None):
+def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = None) -> bool:
     """Remux an MKV/WebM file with mkvmerge so only plan.target_index is
     flagged default, using args.dry_run, args.backup and args.keep_dates.
     Returns True on success, False on failure (already logged). The steps
@@ -1011,7 +1030,7 @@ def apply_mkv(plan, args, progress=None):
                            warnings_exit=1)
 
 
-def apply_remux(plan, args, progress=None):
+def apply_remux(plan: Plan, args: argparse.Namespace, progress: Progress | None = None) -> bool:
     """Remux any non-MKV file with ffmpeg (-c copy, so nothing is re-encoded)
     so only plan.target_index is flagged default, using args.dry_run,
     args.backup, args.keep_dates and args.avi_reorder. Returns True on
@@ -1051,7 +1070,8 @@ def apply_remux(plan, args, progress=None):
                            progress or Progress(), reordered=reordered)
 
 
-def process_file(path, args, position=0, on_progress=None):
+def process_file(path: Path, args: argparse.Namespace, position: int = 0,
+                 on_progress: Callable[[int], None] | None = None) -> str:
     """Check one file, fix it if needed, and return "changed", "unchanged",
     "skipped" or "error", or "cancelled" if a stop interrupted it (see
     Cancelled). An unexpected error is logged and returned as "error" so
@@ -1069,7 +1089,8 @@ def process_file(path, args, position=0, on_progress=None):
         return "error"
 
 
-def _process_file(path, args, position=0, on_progress=None):
+def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
+                  on_progress: Callable[[int], None] | None = None) -> str:
     """The work behind process_file(). For AVI files with --avi-reorder,
     "already correct" means the target is already the first audio track.
     --force remuxes even files that are already correct.
@@ -1121,7 +1142,8 @@ def _process_file(path, args, position=0, on_progress=None):
     return "changed" if apply(plan, args, progress) else "error"
 
 
-def _walk(folder, recursive, follow_symlinks, visited=None):
+def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
+          visited: set[str] | None = None) -> Iterator[tuple[Path, os.DirEntry[str], str]]:
     """Yield (path, entry, real path) for every entry in folder that isn't a
     folder, and with recursive, in its subfolders too. entry is the
     os.DirEntry, whose type checks (is_file(), is_symlink()) are answered
@@ -1165,7 +1187,8 @@ def _walk(folder, recursive, follow_symlinks, visited=None):
         yield from _walk(entry.path, recursive, follow_symlinks, visited)
 
 
-def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=False):
+def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
+               skip_symlinks: bool = False, follow_symlinks: bool = False) -> Iterator[Path]:
     """Yield every file in paths with an extension in exts. Files are used
     as given; folders are searched (into subfolders if recursive). The
     extension is checked before anything else, and files found in a folder
@@ -1188,6 +1211,7 @@ def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=Fals
     warning, so a mistake in one of several paths doesn't go unnoticed."""
     seen = set()
     for p in map(Path, paths):
+        candidates: Iterable[tuple[Path, os.DirEntry[str] | None, str | None]]
         if p.is_file():
             candidates = [(p, None, None)]
         elif p.is_dir():
@@ -1205,7 +1229,8 @@ def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=Fals
                 yield found[0]
 
 
-def _video_file(path, entry, real, exts, skip_symlinks):
+def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, exts: set[str],
+                skip_symlinks: bool) -> tuple[Path, str] | None:
     """Decide about one candidate for iter_files(): return (the file to
     process, its real path), or None to leave it out, logging why where
     that's worth saying. entry and real come from _walk(), or are None for
@@ -1230,7 +1255,7 @@ def _video_file(path, entry, real, exts, skip_symlinks):
     return path, real or os.path.realpath(path)
 
 
-def _can_ask():
+def _can_ask() -> bool:
     """True if someone is at a terminal to answer a question: both input and
     output must be terminals. Checking input alone isn't enough: Windows
     counts the NUL device as a terminal, and Task Scheduler and other
@@ -1239,7 +1264,7 @@ def _can_ask():
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def ask_about_existing_backups(count):
+def ask_about_existing_backups(count: int) -> str:
     """Ask once what to do about files that already have a <name>.bak.
     Returns "replace", "number" or "quit". Asks again on any other answer.
     End of input (Ctrl+D, or no one there after all) counts as "number",
@@ -1263,7 +1288,7 @@ def ask_about_existing_backups(count):
             return choices[answer]
 
 
-def parse_args(argv=None):
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse and check the command line (sys.argv's, unless argv is given).
     Invalid options exit with argparse's usage message and code 2."""
     ap = argparse.ArgumentParser(description=__doc__,
@@ -1329,7 +1354,7 @@ def parse_args(argv=None):
     return args
 
 
-def _tell(args, line):
+def _tell(args: argparse.Namespace, line: str) -> None:
     """Log line, and with --log-file print it too, so it stays on the console
     (where a log file only sends warnings and errors)."""
     log.info(line)
@@ -1337,7 +1362,7 @@ def _tell(args, line):
         print(line)
 
 
-def find_files(args):
+def find_files(args: argparse.Namespace) -> list[Path]:
     """Every file to process, sorted: the ones under args.paths with an
     extension from --ext (or DEFAULT_EXTS). See iter_files()."""
     if args.ext:
@@ -1348,7 +1373,7 @@ def find_files(args):
                                  args.skip_symlinks, args.follow_symlinks)))
 
 
-def choose_backup_mode(args, files):
+def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:
     """What to do with backups when <name>.bak already exists: "replace",
     "number" or "quit". --existing-backups decides if given. Otherwise,
     if any of files has one, the user is asked (see
@@ -1366,7 +1391,7 @@ def choose_backup_mode(args, files):
     return "number"
 
 
-def process_all(files, args, stats):
+def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, int]) -> None:
     """Process every file, adding each outcome to stats ("changed": 3, ...).
     A stop (Ctrl+C, SIGTERM) comes out as KeyboardInterrupt, with the
     progress bars closed and stats holding the files that finished.
@@ -1401,20 +1426,22 @@ def process_all(files, args, stats):
         bars.append(overall)
     overall_lock = threading.Lock()
 
-    def advance_overall(delta):
+    def advance_overall(delta: float) -> None:
         """Move the overall bar by delta files. Several threads report at once
         with --jobs > 1, so updates go through a lock."""
+        if overall is None:
+            return
         with overall_lock:
             overall.n = min(round(overall.n + delta, 6), overall.total)
             overall.refresh()
 
-    def run_one(i, f):
+    def run_one(i: int, f: Path) -> str:
         """Process file number i, keeping the overall bar in step."""
         if _cancelled.is_set():
             return "cancelled"
         last_reported = 0.0
 
-        def on_progress(pct):
+        def on_progress(pct: int) -> None:
             """Move the overall bar by however much this file has progressed
             since its last report."""
             nonlocal last_reported
@@ -1427,7 +1454,7 @@ def process_all(files, args, stats):
             advance_overall(1.0 - last_reported)
         return result
 
-    def show_counter(n):
+    def show_counter(n: int) -> None:
         """Show "Processing n/N..." in place, when it stands in for the bars."""
         if counter:
             print(f"\rProcessing {n}/{len(files)}...", end="", flush=True)
@@ -1453,7 +1480,8 @@ def process_all(files, args, stats):
         print()
 
 
-def print_summary(stats, args, partial=False, cancelled=0):
+def print_summary(stats: dict[str, int], args: argparse.Namespace, partial: bool = False,
+                  cancelled: int = 0) -> None:
     """Log the counts, printing them too with --log-file (see _tell()). In a
     dry run nothing was changed, so the heading says so and "Changed" reads
     "Would change". partial marks a run that was stopped, where cancelled
@@ -1472,7 +1500,7 @@ def print_summary(stats, args, partial=False, cancelled=0):
         _tell(args, f"Cancelled: {cancelled}")
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     """Run the command line: find the files, process each one, and print a
     summary. Returns the exit code: 0 when done, 1 if no files were found,
     a tool is missing or any file had an error, or 128 + the signal number
