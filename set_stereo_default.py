@@ -987,9 +987,14 @@ def ask_about_existing_backups(count):
     """Ask once what to do about files that already have a <name>.bak.
     Returns "replace", "number" or "quit". Asks again on any other answer.
     End of input (Ctrl+D, or no one there after all) counts as "number",
-    as when no one can be asked, since numbering never deletes anything."""
-    question = (f"{count} file(s) already have a backup: [d]elete and replace them, "
-                f"[n]umber new ones (.bak.1, .bak.2...), or [q]uit? ")
+    as when no one can be asked, since numbering never deletes anything.
+
+    It's asked before any file is checked, so count includes files that
+    turn out to need no change. The question says the answer only applies
+    to files that do; counting only those would mean probing every file
+    twice."""
+    question = (f"{count} file(s) already have a backup. If they're changed: [d]elete and "
+                f"replace the old backup, [n]umber the new one (.bak.1, .bak.2...), or [q]uit? ")
     choices = {"d": "replace", "n": "number", "q": "quit"}
     while True:
         try:

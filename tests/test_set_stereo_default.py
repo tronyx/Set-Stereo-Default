@@ -551,8 +551,9 @@ def test_ask_about_existing_backups(monkeypatch, answers, expected):
     monkeypatch.setattr("builtins.input", fake_input)
 
     assert ssd.ask_about_existing_backups(3) == expected
-    assert questions[0] == ("3 file(s) already have a backup: [d]elete and replace them, "
-                            "[n]umber new ones (.bak.1, .bak.2...), or [q]uit? ")
+    assert questions[0] == ("3 file(s) already have a backup. If they're changed: [d]elete and "
+                            "replace the old backup, [n]umber the new one (.bak.1, .bak.2...), "
+                            "or [q]uit? ")
     assert len(questions) == len(answers)
 
 

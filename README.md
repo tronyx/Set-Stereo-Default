@@ -248,8 +248,10 @@ Every change is a **remux**: the audio and video are copied as-is into a new fil
 With `--backup`, each original is kept next to the new file as `<name>.bak`. If some files already have a `.bak` (from an earlier run, say), you're asked once, before any file is changed:
 
 ```text
-3 file(s) already have a backup: [d]elete and replace them, [n]umber new ones (.bak.1, .bak.2...), or [q]uit?
+3 file(s) already have a backup. If they're changed: [d]elete and replace the old backup, [n]umber the new one (.bak.1, .bak.2...), or [q]uit?
 ```
+
+The question comes before any file is checked, so the count can include files that turn out to be correct already. Those are left alone whatever you answer; it only matters for files that get changed.
 
 - **d** replaces each existing `<name>.bak` with the new backup.
 - **n** keeps every existing backup and saves the new one as the first free `<name>.bak.1`, `<name>.bak.2`, ...
