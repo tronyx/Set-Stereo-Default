@@ -512,9 +512,13 @@ def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypat
     (["N"], "number"),
     (["q"], "quit"),
     (["", "maybe", " n "], "number"),
-    ([EOFError], "quit"),
+    ([EOFError], "number"),
 ], ids=["delete", "number", "quit", "asks again until it understands", "ctrl+d"])
 def test_ask_about_existing_backups(monkeypatch, answers, expected):
+    """End of input numbers new backups, as when no one can be asked, rather
+    than quitting: on Windows a run started with input from NUL gets end of
+    input straight away, and quitting would end every such run doing
+    nothing while reporting success."""
     questions = []
 
     def fake_input(prompt):
@@ -556,7 +560,7 @@ def backed_up(tmp_path, monkeypatch):
 
         monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
         monkeypatch.setattr(ssd, "process_file", fake_process_file)
-        monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(isatty=lambda: tty))
+        monkeypatch.setattr(ssd, "_can_ask", lambda: tty)
         monkeypatch.setattr("builtins.input", fake_input)
         monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
                                           "--no-progress", *options])
@@ -610,6 +614,21 @@ def test_existing_backups_are_numbered_when_no_one_can_answer(backed_up, capsys)
     assert questions == []
     assert seen == ["number", "number"]
     assert "Use --existing-backups to choose" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("stdin_tty, stdout_tty, expected", [
+    (True, True, True),
+    (True, False, False),
+    (False, True, False),
+], ids=["both terminals", "output piped", "input redirected"])
+def test_can_ask_only_with_a_terminal_for_input_and_output(monkeypatch, stdin_tty, stdout_tty,
+                                                          expected):
+    """Input alone isn't enough: Windows reports NUL as a terminal, so a run
+    started with input from NUL would otherwise be asked a question no one
+    can answer."""
+    monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(isatty=lambda: stdin_tty))
+    monkeypatch.setattr(ssd.sys, "stdout", types.SimpleNamespace(isatty=lambda: stdout_tty))
+    assert ssd._can_ask() is expected
 
 
 @pytest.mark.parametrize("mode", ["replace", "number"])

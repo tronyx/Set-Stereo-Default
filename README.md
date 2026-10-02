@@ -255,7 +255,7 @@ With `--backup`, each original is kept next to the new file as `<name>.bak`. If 
 - **n** keeps every existing backup and saves the new one as the first free `<name>.bak.1`, `<name>.bak.2`, ...
 - **q** stops without changing anything.
 
-To skip the question, pass `--existing-backups replace` or `--existing-backups number`. When there's no one to ask (cron, Docker, output piped to another program), new backups are numbered, since that never deletes anything.
+To skip the question, pass `--existing-backups replace` or `--existing-backups number`. When there's no one to ask (cron, Docker, Windows Task Scheduler, or input or output redirected), new backups are numbered, since that never deletes anything. The same happens if the question gets no answer at all (Ctrl+D).
 
 ### 🪢 Symlinks
 

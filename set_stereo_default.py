@@ -966,10 +966,20 @@ def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=Fals
             yield f
 
 
+def _can_ask():
+    """True if someone is at a terminal to answer a question: both input and
+    output must be terminals. Checking input alone isn't enough: Windows
+    counts the NUL device as a terminal, and Task Scheduler and other
+    launchers start programs with input from NUL. And with output piped
+    (e.g. to tee), the question may never be seen."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def ask_about_existing_backups(count):
     """Ask once what to do about files that already have a <name>.bak.
-    Returns "replace", "number" or "quit". Asks again on any other answer;
-    end of input (Ctrl+D) counts as quit."""
+    Returns "replace", "number" or "quit". Asks again on any other answer.
+    End of input (Ctrl+D, or no one there after all) counts as "number",
+    as when no one can be asked, since numbering never deletes anything."""
     question = (f"{count} file(s) already have a backup: [d]elete and replace them, "
                 f"[n]umber new ones (.bak.1, .bak.2...), or [q]uit? ")
     choices = {"d": "replace", "n": "number", "q": "quit"}
@@ -978,7 +988,8 @@ def ask_about_existing_backups(count):
             answer = input(question).strip().lower()
         except EOFError:
             print()
-            return "quit"
+            log.info("No answer given; new backups will be numbered (.bak.1, .bak.2, ...).")
+            return "number"
         if answer in choices:
             return choices[answer]
 
@@ -1099,7 +1110,7 @@ def main():
         with_backup = sum(1 for f in files if f.with_name(f.name + ".bak").exists())
         mode = args.existing_backups or "number"
         if with_backup and not args.existing_backups:
-            if sys.stdin.isatty():
+            if _can_ask():
                 try:
                     mode = ask_about_existing_backups(with_backup)
                 except KeyboardInterrupt as exc:
