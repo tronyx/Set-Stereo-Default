@@ -364,6 +364,27 @@ def test_iter_files_warns_about_a_path_that_isnt_a_file_or_folder(tmp_path, capl
     assert f"Skipping {pipe}: not a file or directory" in caplog.text
 
 
+def test_iter_files_warns_about_a_folder_it_cant_open(library, monkeypatch, caplog):
+    """os.walk() skips a folder it can't open without a word, so its files
+    would quietly be missing from the run. The folder is made unreadable by
+    failing os.scandir() for it, which works the same on every platform
+    and when run as root."""
+    real_scandir = os.scandir
+    locked = library / "Season 01"
+
+    def scandir(path="."):
+        if os.path.abspath(path) == str(locked):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_scandir(path)
+    monkeypatch.setattr(os, "scandir", scandir)
+
+    found = names(ssd.iter_files([library], ssd.DEFAULT_EXTS, recursive=True), library)
+
+    assert found == ["a.mkv", "b.MP4"]
+    assert f"Couldn't search {locked}: Permission denied" in caplog.text
+    assert [r.levelname for r in caplog.records if "Couldn't search" in r.message] == ["WARNING"]
+
+
 def test_a_mistyped_path_is_reported_on_the_console_and_the_rest_still_run(tmp_path, monkeypatch,
                                                                          capsys):
     """The warning must show even with --log-file, where only warnings and

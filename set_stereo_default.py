@@ -888,9 +888,17 @@ def _walk(folder, recursive, follow_symlinks):
     Symlinked subfolders are only searched with follow_symlinks; otherwise
     each one is logged, so it's clear why its files weren't found. Every
     folder is searched at most once, so a symlink loop can't make the
-    search run forever."""
+    search run forever.
+
+    A folder that can't be opened (no permission, a network share that
+    dropped) gets a warning; os.walk() would otherwise skip it silently,
+    and its files would just be missing from the run."""
+    def warn(err):
+        """Report a folder os.walk() couldn't open."""
+        log.warning(f"Couldn't search {err.filename}: {err.strerror}")
+
     visited = set()
-    for dirpath, dirnames, filenames in os.walk(folder, followlinks=follow_symlinks):
+    for dirpath, dirnames, filenames in os.walk(folder, onerror=warn, followlinks=follow_symlinks):
         real = os.path.realpath(dirpath)
         if real in visited:
             dirnames[:] = []
