@@ -10,6 +10,10 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
+# Only the coverage-badge job needs more than this.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -39,6 +43,61 @@ jobs:
         run: |
           echo "### Coverage of set_stereo_default.py (logic tests)" >> "$GITHUB_STEP_SUMMARY"
           python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+      - name: Save the coverage total for the badge
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        run: python -m coverage report --format=total > coverage-total.txt
+      - uses: actions/upload-artifact@v7
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        with:
+          name: coverage-total
+          path: coverage-total.txt
+          retention-days: 1
+
+  # Writes the coverage total to coverage-<branch>.json on the badges branch,
+  # which the README's coverage badges read through shields.io. Only runs
+  # for pushes to master and develop, once every test job has passed.
+  coverage-badge:
+    name: Update the coverage badge
+    needs: test
+    if: github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'develop')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-total
+      - name: Commit the badge to the badges branch
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          total=$(cat coverage-total.txt)
+          if [ "$total" -ge 90 ]; then color=brightgreen
+          elif [ "$total" -ge 75 ]; then color=yellowgreen
+          elif [ "$total" -ge 60 ]; then color=yellow
+          else color=red
+          fi
+          if git fetch --depth=1 origin badges; then
+            git worktree add --detach "$RUNNER_TEMP/badges" FETCH_HEAD
+          else
+            git worktree add --orphan -b badges "$RUNNER_TEMP/badges"
+          fi
+          cd "$RUNNER_TEMP/badges"
+          printf '{"schemaVersion": 1, "label": "coverage: %s", "message": "%s%%", "color": "%s"}\n' \
+            "$BRANCH" "$total" "$color" > "coverage-$BRANCH.json"
+          git add "coverage-$BRANCH.json"
+          if git diff --cached --quiet; then
+            echo "Coverage unchanged at $total%"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -qm "Coverage on $BRANCH: $total%"
+          # A push to the other branch may have updated its badge in the meantime.
+          git push origin HEAD:badges || {
+            git pull -q --rebase origin badges && git push origin HEAD:badges
+          }
 
   # Runs the script on real files generated with ffmpeg (tests/test_real_files.py),
   # once per ffmpeg version that common distros ship, plus the newest release.
