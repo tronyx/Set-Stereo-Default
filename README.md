@@ -1,105 +1,125 @@
-# set_stereo_default
+# 🔊 set_stereo_default
 
 [![tests: master](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=master&label=tests%3A%20master)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Amaster)
 [![tests: develop](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=develop&label=tests%3A%20develop)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Adevelop)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](#requirements)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](#-requirements)
 [![License: MIT](https://img.shields.io/github/license/tronyx/Set-Stereo-Default)](LICENSE.md)
 
-> **Beta.** This has been tested pretty heavily on my own library, but it's still early — use it with caution. Try it on a handful of files (or with `--dry-run`) before pointing it at your whole collection, and keep backups (`--backup`) until you've seen it behave the way you expect.
+**Make the stereo track play by default, across your whole video library.**
 
-A small command-line tool that bulk-fixes a common annoyance in ripped or downloaded video files: the audio track flagged as "default" isn't the 2-channel stereo track, so playback starts on a 5.1/7.1 track that sounds wrong on a TV soundbar or laptop speakers.
+Plenty of ripped and downloaded videos flag a 5.1 or 7.1 surround track as the default audio. On a TV, soundbar or laptop, that often means quiet dialogue and booming effects. `set_stereo_default.py` finds the 2-channel stereo track in each file and makes it the default instead. Nothing is re-encoded, so picture and sound quality stay exactly the same.
 
-`set_stereo_default.py` scans a folder of video files, figures out which audio stream is stereo, and flips the default flag onto it — clearing it from every other audio track in the process.
+> [!WARNING]
+> **This is beta software.** It's been tested heavily on my own library, but it's still early. Try it on a few files first, start with `--dry-run`, and use `--backup` until you're happy with how it behaves.
 
-## Features
+## ✨ Features
 
-- **Safe by default.** Files already in the correct state are skipped. `--dry-run` shows exactly what would change without touching anything. Every remux goes to a temp file first and is only swapped in after a check confirms no streams were lost and the right audio track is now the default; if that check fails, the original is left untouched and the file is counted as an error. Ctrl+C stops cleanly, too — in-flight remuxes are killed and their partial temp files removed, files that haven't started are skipped, and already-finished files are unaffected. The partial summary counts everything that didn't finish as `cancelled`. (Exception: hardlinks & cross-seeding — see [Limitations](#limitations).)
-- **Format-aware.** Uses `mkvmerge` for `.mkv`/`.webm` and `ffmpeg` for everything else, each with format-specific fixes (see [How it works](#how-it-works)) so tools like Windows Explorer don't lose video thumbnails on the files it touches.
-- **Live progress.** A live per-file `%` bar plus an overall batch bar (via `tqdm`, if installed) so you can see how a large batch is going. The per-file bar only shows up on sequential (`--jobs 1`) runs — see [Options](#options).
-- **Flexible logging.** Send detailed output to a log file with `--log-file` while the console stays clean.
-- **Concurrent processing.** `--jobs N` remuxes several files at once (default: `1`, one at a time) — useful since this work is mostly waiting on disk I/O, not CPU.
+- 🛡️ **Safe by default.** Files that are already right are left alone, `--dry-run` previews every change, and each new file is checked before it replaces the original.
+- 🎯 **Picks the right track.** Commentary and audio-description tracks are never chosen, and a stereo dub in another language never replaces the original language.
+- 🧩 **Format-aware.** MKV, WebM, MP4, M4V, MOV and AVI, each handled in a way that keeps Windows Explorer thumbnails working.
+- 📊 **Live progress.** A bar for the current file and one for the whole batch.
+- ⚡ **Parallel.** `--jobs N` works on several files at once.
+- 📝 **Quiet logging.** `--log-file` keeps the details in a file and the console tidy.
+- 🛑 **Stops cleanly.** Ctrl+C or `docker stop` halts mid-run without leaving half-written files.
 
-## Requirements
+## 📋 Requirements
 
-- Python 3.8+
-- [ffmpeg / ffprobe](https://ffmpeg.org)
-- [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) — only needed if you have `.mkv`/`.webm` files
-- `tqdm` — optional, enables the progress bar (see [requirements.txt](requirements.txt))
-- Free disk space: every remux writes a full temp copy of the file next to the original before swapping it in, so you need free space roughly equal to your largest file. `--backup` normally costs no extra space, since the `.bak` is a hard link to the original; on filesystems without hard-link support it falls back to a full copy, which doubles that
+| What | Version | Needed for |
+| --- | --- | --- |
+| [Python](https://www.python.org) | 3.8 or newer | Everything |
+| [ffmpeg and ffprobe](https://ffmpeg.org) | 4.4 or newer | Everything |
+| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any | `.mkv` and `.webm` files |
+| [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
 
-## Installation
+The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45 through 102.
+
+> [!NOTE]
+> ffmpeg versions older than 4.4 can't read the commentary and audio-description flags in MKV files, so they might make a commentary track the default.
+
+### 💾 Disk space
+
+Each file is rewritten to a temporary copy next to the original before it's swapped in, so you need free space about the size of your largest file. `--backup` doesn't add to that, because the backup is a hard link to the original rather than a copy (except on filesystems that don't support hard links).
+
+## 📦 Installation
+
+1. Get the script:
+
+   ```bash
+   git clone https://github.com/tronyx/Set-Stereo-Default.git
+   cd Set-Stereo-Default
+   pip install -r requirements.txt
+   ```
+
+2. Install ffmpeg and MKVToolNix:
+
+   | System | Command |
+   | --- | --- |
+   | Debian / Ubuntu | `sudo apt install ffmpeg mkvtoolnix` |
+   | macOS ([Homebrew](https://brew.sh)) | `brew install ffmpeg mkvtoolnix` |
+   | Windows | `winget install Gyan.FFmpeg` and `winget install MoritzBunkus.MKVToolNix` |
+
+3. Check that everything is found:
+
+   ```bash
+   ffmpeg -version
+   mkvmerge --version
+   ```
+
+> [!TIP]
+> On Windows, if `mkvmerge` isn't found after installing, add the MKVToolNix folder (usually `C:\Program Files\MKVToolNix`) to your `PATH` and open a new terminal.
+
+## 🚀 Quick start
 
 ```bash
-pip install -r requirements.txt
+# 1. See what would change, without touching anything
+python3 set_stereo_default.py "/path/to/videos" --dry-run
+
+# 2. Try it for real on one folder, keeping backups
+python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
+
+# 3. Happy? Run it on everything
+python3 set_stereo_default.py "/path/to/videos"
 ```
 
-Then make sure `ffmpeg`, `ffprobe`, and (if you have MKV/WebM files) `mkvmerge` are installed and on your `PATH`.
+Folders are searched recursively. You can also pass individual files, or a mix of files and folders.
 
-## Usage
+## ⚙️ Options
 
-```bash
-python3 set_stereo_default.py /path/to/videos
-```
-
-That's the basic case: scan a folder recursively and fix any file that needs it. A few other examples:
-
-```bash
-# Preview changes without touching any files
-python3 set_stereo_default.py /path/to/videos --dry-run
-
-# Process specific files instead of a folder
-python3 set_stereo_default.py file1.mkv file2.mp4
-
-# Prefer English when a file has more than one 2-channel track
-python3 set_stereo_default.py /path/to/videos --prefer-lang eng
-
-# Log details to a file, keep the console output to just the progress bar
-python3 set_stereo_default.py /path/to/videos --log-file run.log
-
-# Remux up to 4 files at once instead of one at a time
-python3 set_stereo_default.py /path/to/videos --jobs 4
-```
-
-### Options
-
-| Flag | Description |
+| Option | What it does |
 | --- | --- |
-| `--ext EXT1,EXT2` | Comma-separated extensions to include (default: `mkv,webm,mp4,m4v,mov,avi`) |
-| `--no-recursive` | Don't recurse into subdirectories |
 | `--dry-run` | Show what would change without touching any files |
-| `--backup` | Keep the pre-change original as `<name>.bak` (a hard link where supported, so no extra disk space) |
-| `--prefer-lang LANG` | If multiple 2-channel tracks exist, prefer this language code (e.g. `eng`) |
-| `--avi-reorder` | For `.avi` files (which have no real "default" flag), reorder streams instead so the target track comes first |
-| `--force` | Re-apply even to files that already look correct |
-| `--log-file PATH` | Write detailed output to a file instead of the console |
-| `--no-progress` | Disable the progress bar |
-| `--jobs N` | Remux up to `N` files concurrently (default: `1`, sequential) |
+| `--backup` | Keep each original as `<name>.bak` (a hard link where possible, so it takes no extra space) |
+| `--prefer-lang LANG` | Language the stereo track must be in, e.g. `eng`. Also picks between several stereo tracks. Default: the language of the track that plays by default now |
+| `--jobs N` | Work on up to `N` files at once (default: `1`) |
+| `--log-file PATH` | Write the details to a file. Warnings, errors, the progress bar and the summary still show on the console |
+| `--ext EXT1,EXT2` | Extensions to process (default: `mkv,webm,mp4,m4v,mov,avi`). This replaces the default list, so list every extension you want |
+| `--no-recursive` | Don't look inside subfolders |
+| `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](#-changing-the-file)) |
+| `--force` | Remux even files that are already correct |
+| `--no-progress` | Hide the progress bars, e.g. for cron or CI logs |
 
-`--ext` replaces the default extension list rather than adding to it — pass every extension you want included.
+> [!TIP]
+> **Choosing `--jobs`:** the work is limited by disk speed, not CPU, so pick a number your storage can keep up with rather than your core count. Above `1`, you'll see only the overall progress bar, and log lines from different files can interleave.
 
-`--jobs` is I/O-bound work, not CPU-bound, so pick a value based on what your storage can sustain rather than core count. Above `1`, there's no per-file `%` bar — just the overall batch bar, which tracks the combined progress of every in-flight file — and log lines from different files may interleave, since several files are being remuxed at the same time.
+Run `python3 set_stereo_default.py --help` for the full built-in help.
 
-Run `python3 set_stereo_default.py --help` for the full list with details.
+## 👀 Sample output
 
-## Sample output
-
-### One Job At A Time
+<details>
+<summary>One file at a time (the default)</summary>
 
 ```text
-$ python3 set_stereo_default.py /path/to/videos/TV\ Shows/Awesome Show (2026)/
+$ python3 set_stereo_default.py "/path/to/videos/TV Shows/Awesome Show (2026)"
 Found 32 file(s).
 
 [1/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 01/Awesome Show (2026) - S01E01 - Episode 1.mkv
   Awesome Show (2026) - S01E01 - Episode 1.mkv: setting stream#1 (eng, aac) as default audio
 
-[2/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 01/Awesome Show (2026) - S01E02 - Episode 2.mkv
-  Awesome Show (2026) - S01E02 - Episode 2.mkv: setting stream#1 (eng, aac) as default audio
-
 ...
 
 [12/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 02/Awesome Show (2026) - S02E04 - Episode 12.mkv
   Awesome Show (2026) - S02E04 - Episode 12.mkv: setting stream#1 (eng, aac) as default audio
-  Awesome Show (2026) - S02E04 - A Night at t:  45%|████████████▌               | 45/100 [00:09<00:11,  4.87%/s]
+  Awesome Show (2026) - S02E04 - Episode:  45%|████████████▌               | 45/100 [00:09<00:11,  4.87%/s]
 
 Processing:  36%|██████████████▊                                   | 11.45/32 [06:05<10:48, 31.56s/file]
 
@@ -109,64 +129,56 @@ Processing:  36%|██████████████▊                  
   Awesome Show (2026) - S04E01 - Episode 25.mkv: already correct (stream#1 is default), skipping
 
 [26/32] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E02 - Episode 26.mkv
-  Awesome Show (2026) - S04E02 - Episode 26.mkv: already correct (stream#1 is default), skipping
-```
+  Awesome Show (2026) - S04E02 - Episode 26.mkv: SKIP (no 2-channel track in 'eng' [found stream#2 (spa/aac)] -- use --prefer-lang to pick another language)
 
-Files that already have the right track marked default are left untouched — no remux, no per-file progress bar, just a one-line note before the script moves on. This example is a sequential (`--jobs 1`) run: the top bar tracks the file currently remuxing, and the bottom one tracks the whole batch and stays pinned to the last line. The batch bar moves as the current file progresses rather than waiting for it to finish, which is why its count is fractional (11.45 files done out of 32). Under `--jobs N > 1` there's no per-file bar, just the batch one (see [Options](#options)). Once every file's been processed, you'll get a summary like:
+...
 
-```text
 ----- Summary -----
 changed: 30
-unchanged: 2
-skipped: 0
+unchanged: 1
+skipped: 1
 error: 0
 ```
 
-### Multiple Jobs At A Time
+The top bar follows the file being remuxed, and the bottom one follows the whole batch. The batch count moves during each file rather than jumping when it finishes, which is why it shows fractions like `11.45/32`.
+
+</details>
+
+<details>
+<summary>Several files at once (--jobs 5)</summary>
 
 ```text
-$ python3 scripts/fix_default_audio_track.py /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/ --jobs 5
+$ python3 set_stereo_default.py "/path/to/videos/TV Shows/Awesome Show (2026)/Season 06" --jobs 5
 Found 5 file(s).
 
-[5/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E05 - Episode 45.mkv                                                                                                                                            
-  Awesome Show (2026) - S06E05 - Episode 52.mkv: setting stream#1 (eng, aac) as default audio
-
-[3/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E03 - Episode 43.mkv                                                                                                                                
-  Awesome Show (2026) - S06E03 - Episode 43.mkv: setting stream#1 (eng, aac) as default audio
-
-[2/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E02 - Episode 42.mkv                                                                                                                               
+[2/5] /path/to/videos/TV Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E02 - Episode 42.mkv
   Awesome Show (2026) - S06E02 - Episode 42.mkv: setting stream#1 (eng, aac) as default audio
 
-[1/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E01 - Episode 41.mkv                                                                                                                                   
+[1/5] /path/to/videos/TV Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E01 - Episode 41.mkv
   Awesome Show (2026) - S06E01 - Episode 41.mkv: setting stream#1 (eng, aac) as default audio
 
-[4/5] /path/to/videos/TV\ Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E04 - Episode 44.mkv                                                                                                                                
+[4/5] /path/to/videos/TV Shows/Awesome Show (2026)/Season 06/Awesome Show (2026) - S06E04 - Episode 44.mkv
   Awesome Show (2026) - S06E04 - Episode 44.mkv: setting stream#1 (eng, aac) as default audio
 
-Processing:  27%|██████████████████████████████████████████████████████▊                                                                                                                                                    | 1.35/5 [00:04<00:12,  3.56s/file]
+Processing:  27%|██████████████▊                                        | 1.35/5 [00:04<00:12,  3.56s/file]
 ```
 
-### Dry run
+Files finish in whatever order they're done, so the `[i/N]` numbers aren't in sequence.
 
-`--dry-run` prints exactly what it would do without touching any files, including the `mkvmerge`/`ffmpeg` command it would run, quoted so you can paste it into a shell:
+</details>
+
+<details>
+<summary>Dry run (--dry-run)</summary>
 
 ```text
-$ python3 set_stereo_default.py "/path/to/videos/TV Shows/Awesome Show (2026)/Season 04/" --dry-run
+$ python3 set_stereo_default.py "/path/to/videos/TV Shows/Awesome Show (2026)/Season 04" --dry-run
 Found 8 file(s) (dry run).
 
 [1/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
   Awesome Show (2026) - S04E01 - Episode 25.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --default-track-flag 1:yes --default-track-flag 4:no '.../S04E01 - Episode 25.mkv'
-
-[2/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E02 - Episode 26.mkv
-  Awesome Show (2026) - S04E02 - Episode 26.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode -o '.../S04E02 - Episode 26.mkv.tmp_remux.mkv' --default-track-flag 1:yes --default-track-flag 3:no '.../S04E02 - Episode 26.mkv'
+    [dry-run] mkvmerge --gui-mode -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
 
 ...
-
-[8/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E08 - Episode 32.mkv
-  Awesome Show (2026) - S04E08 - Episode 32.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode -o '.../S04E08 - Episode 32.mkv.tmp_remux.mkv' --default-track-flag 1:yes --default-track-flag 4:no '.../S04E08 - Episode 32.mkv'
 
 ----- Summary -----
 changed: 8
@@ -175,55 +187,95 @@ skipped: 0
 error: 0
 ```
 
-## How it works
+Each `[dry-run]` line is the exact command the script would run, quoted so you can paste it into a shell. In a dry run, `changed` counts the files that *would* change.
 
-For each file, the script inspects every audio stream's channel count. The one stream with exactly 2 channels becomes "default"; every other audio stream gets its default flag cleared. If a file has zero or multiple 2-channel tracks, it's skipped and logged (use `--prefer-lang` to break ties).
+</details>
 
-A file is skipped (and counted under `skipped:` in the summary) when:
+## 🔍 How it works
 
-- It has no audio streams at all.
-- It has zero or multiple 2-channel tracks and `--prefer-lang` doesn't resolve the ambiguity.
-- It's an `.avi` file and `--avi-reorder` wasn't passed (AVI has no real "default" flag to set).
+### 🎯 Picking the track
 
-If a run is killed outright (`kill -9`, a reboot, a container stopping) rather than stopped with Ctrl+C, a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning instead of treating them as videos. They're safe to delete, since the original is only replaced after a remux fully succeeds.
+The script looks for the audio track with exactly 2 channels and makes it the default, clearing the default flag from every other audio track. Two kinds of stereo track are passed over:
 
-How the change actually gets applied depends on the container:
+- **Commentary and audio description.** These are often stereo but shouldn't play by default. A track counts as one if the file flags it that way, or if its name contains "commentary", "audio description", "descriptive", "described" or "DVS".
+- **Other languages.** The stereo track has to be in the same language as the track that plays by default now, so an English 5.1 film with a Spanish stereo dub keeps playing in English. Use `--prefer-lang` to choose the language yourself. Tracks with no language tag (or `und`) match any language, but a track tagged with the right language wins over them.
 
-- **`.mkv` / `.webm`** — a clean single-pass remux via `mkvmerge`, rather than editing the file header in place. In-place edits can push the file's track metadata to the very end of the file, which is exactly the shape of file that breaks Windows Explorer's thumbnail generation even though the video plays fine everywhere else.
-- **`.mp4` / `.m4v` / `.mov`** — remuxed with `ffmpeg -c copy` (no re-encoding) with `-movflags +faststart`, so the index ffmpeg would otherwise leave at the end of the file stays at the front where thumbnailers expect it.
-- **`.avi`** — AVI has no standard "default track" flag that players honor. With `--avi-reorder`, the script instead reorders streams so the target audio track comes first. Without that flag, AVI files are skipped with a warning.
+A file is **skipped** (and counted under `skipped` in the summary) when:
 
-Because a remux produces a brand-new file, the script copies the original's permissions and owner onto it before swapping it in, so tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it. Changing a file's owner requires root. If the script can't do it, the new file belongs to whoever ran the script, and you'll see a warning once per run; the permissions are still copied. A common cause is a network share (NFS, for example) that maps root to `nobody`. In that case, run the script as the user that owns your media, or fix the owner afterwards with `chown`.
+- it has no audio at all
+- it has no stereo track, or only commentary/audio-description ones
+- none of its stereo tracks is in the wanted language
+- several stereo tracks qualify and `--prefer-lang` doesn't settle it
+- it's an `.avi` file and `--avi-reorder` wasn't given
 
-## Limitations
+### 🧩 Changing the file
 
-**Hardlinks will be broken.** Every remux (mkv, mp4, avi) works by building a brand-new file at a temp path and then replacing the original with it — that's what makes the dry-run/temp-file/sanity-check safety guarantees above possible, but it also means the original inode goes away. If another path on your filesystem is hardlinked to that same file — a common setup with Sonarr/Radarr/qBittorrent, which hardlink between a download folder and a library folder to avoid duplicating disk space — that other path will keep pointing at the old, unmodified file instead of the fixed one, and the two paths will no longer share disk space. If your setup relies on hardlinks, run this script *before* hardlinking rather than after, or re-hardlink the affected files afterward.
+Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged) before it replaces the original. If the check fails, the original is kept and the file is counted as an `error`.
 
-**Cross-seeding will break too, for a different reason.** A remux produces a new file with different bytes, even though it's a lossless stream copy — the container is rebuilt, not just patched. That means the file no longer matches the piece hashes your torrent client (and any tracker) expects, so any torrent seeding that file — including cross-seeded torrents sharing it via hardlink — will fail its hash check and get flagged as missing/corrupt data. Don't run this on files you're actively seeding or cross-seeding unless you're prepared to re-download or re-hash them, and check with your private trackers' rules before doing so, since a failed hash check can look like a hit-and-run.
+| Format | How it's changed |
+| --- | --- |
+| `.mkv` `.webm` | Remuxed with `mkvmerge`. The script doesn't edit the file in place, because in-place edits can move the track list to the end of the file, which breaks Windows Explorer thumbnails even though the video plays fine. |
+| `.mp4` `.m4v` `.mov` | Remuxed with `ffmpeg`, with the file's index kept at the front where thumbnailers expect it (`-movflags +faststart`). |
+| `.avi` | AVI has no "default track" flag. With `--avi-reorder`, the stereo track is moved to the front instead, which most players treat the same way. Without it, AVI files are skipped. |
 
-## A note on how this was built
+### 🔐 Permissions and ownership
 
-This script was largely written with [Claude](https://claude.ai), Anthropic's AI coding assistant — I described what I needed, directed the design, and asked for changes across many iterations rather than writing most of the code by hand myself. Every feature went through real testing before landing here, including dry-run checks and stubbed test runs simulating `ffmpeg`/`mkvmerge` output, and the safety measures baked into the script (dry-run mode, temp-file-first remuxing, post-remux sanity checks) are exactly the kind of thing I insisted on because this touches a media library I actually care about.
+A remux creates a brand-new file, so the script copies the original's permissions and owner onto it. That way tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it.
 
-I'd rather say that plainly than let it pass as fully hand-written. There's a lot of AI-generated code floating around that hasn't been reviewed or tested and ends up breaking people's setups, and I don't want this to be mistaken for that. If something looks off, please open an issue.
+> [!NOTE]
+> Changing a file's owner requires root. If the script can't do it, the new file belongs to whoever ran the script, and you'll see one warning per run (the permissions are still copied). This often happens on network shares, such as NFS, that map root to `nobody`. Run the script as the user that owns your media, or fix the owner afterwards with `chown`.
 
-## Exit status
+### 🧹 Leftover temp files
 
-The script exits `1` if no matching files are found, a required tool is missing, or one or more files ended up in the `error:` bucket of the summary; `130` if you interrupt it with Ctrl+C; and `0` otherwise. If you're scripting this (cron, CI, etc.), the exit code alone tells you whether anything went wrong, but check the printed summary for the `changed`/`unchanged`/`skipped`/`error` breakdown.
+Ctrl+C and SIGTERM (what `docker stop`, `kill` and systemd send) stop the script cleanly: running remuxes are killed, their temp files are removed, and finished files are untouched. The partial summary counts every file that didn't finish as `cancelled`.
 
-## Running the tests
+If the script is killed outright instead (`kill -9`, a power cut, a container that doesn't stop in time), a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning. They're safe to delete, since the original is only ever replaced by a finished, checked file.
 
-The tests cover the script's own logic: choosing the track, finding files, backups, checking a remux before it replaces the original, progress reporting, and Ctrl+C cleanup. Anything that would call ffmpeg, ffprobe or mkvmerge is replaced with a stand-in, so none of those need to be installed:
+## ⚠️ Limitations
+
+> [!CAUTION]
+> Both of these come from the same thing: every change replaces the original with a new file.
+
+### 🔗 Hard links will be broken
+
+If another path is hard-linked to the original (a common Sonarr/Radarr/qBittorrent setup, linking a download folder to a library folder), that path keeps pointing at the old, unfixed file, and the two no longer share disk space. If you rely on hard links, run this script *before* linking, or re-link the affected files afterwards.
+
+### 🌱 Seeding and cross-seeding will break
+
+Even though nothing is re-encoded, the remuxed file's bytes are different, so it no longer matches the torrent's piece hashes. Any torrent seeding that file, including cross-seeds sharing it through a hard link, will fail its hash check. Don't run this on files you're seeding unless you're ready to re-download or re-check them, and check your private trackers' rules first, since a failed hash check can look like a hit-and-run.
+
+## 🚦 Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Finished, with no errors |
+| `1` | No matching files found, a required tool is missing, or at least one file ended up as an `error` |
+| `2` | Invalid command-line options |
+| `130` | Stopped with Ctrl+C |
+| `143` | Stopped with SIGTERM |
+
+If you're running this from cron or another script, the exit code tells you whether anything went wrong. The printed summary has the details.
+
+## 🧪 Running the tests
 
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-GitHub also runs them automatically on every push and pull request, on the oldest and newest supported Python versions (see [.github/workflows/tests.yml](.github/workflows/tests.yml)).
+There are two sets of tests:
 
-Because the real tools are never run, the tests can't tell you whether ffmpeg or mkvmerge will accept a changed command. If you change how the script calls them, also try it on a few real files, starting with `--dry-run`.
+- **Logic tests** ([tests/test_set_stereo_default.py](tests/test_set_stereo_default.py)) cover the script's own decisions: picking the track, finding files, backups, checking a remux, progress reporting and clean stopping. They stand in for ffmpeg and mkvmerge, so they run anywhere.
+- **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4 and AVI files for each case the script handles, run the script on them, and check the results. They need ffmpeg, ffprobe and mkvmerge on your `PATH`, and are skipped if those aren't installed.
 
-## License
+GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions, and the real-file tests run against every ffmpeg version listed under [Requirements](#-requirements).
 
-MIT — see [LICENSE.md](LICENSE.md).
+## 🤖 A note on how this was built
+
+This script was largely written with [Claude](https://claude.ai), Anthropic's AI coding assistant. I described what I needed, directed the design, and asked for changes across many iterations rather than writing most of the code by hand. Every feature went through real testing before landing here, and the safety measures (dry-run mode, temp-file-first remuxing, checking every remux before it replaces the original) are exactly the kind of thing I insisted on, because this touches a media library I actually care about. Today the test suite covers both the script's logic and real video files across several ffmpeg and mkvmerge versions.
+
+I'd rather say that plainly than let it pass as fully hand-written. There's a lot of AI-generated code floating around that hasn't been reviewed or tested and ends up breaking people's setups, and I don't want this to be mistaken for that. If something looks off, please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues).
+
+## 📄 License
+
+MIT, see [LICENSE.md](LICENSE.md).

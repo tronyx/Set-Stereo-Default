@@ -1,0 +1,30 @@
+# Pull Request
+
+**By submitting this pull request, I confirm that:**
+*(Tick each box that applies, e.g. `[x]`.)*
+
+- [ ] I've read the [contributing guide](./CONTRIBUTING.md) and this whole template.
+- [ ] This pull request makes one change.
+- [ ] I've documented my change in docstrings (no `#` comments), and updated the README if needed.
+- [ ] I've tested my change and added or updated tests for it.
+- [ ] I'm willing to help maintain this change if problems come up later.
+- [ ] I'm giving this submission freely and claim no ownership of it.
+
+---
+
+## 🎯 What does this pull request do?
+
+*Describe the problem or feature, with screenshots if useful and links to any related issues.*
+
+## 🛠️ How does it do it?
+
+*Summarize the changes, like a short changelog.*
+
+## 📝 Documentation changes
+
+*List any changes needed in the README or elsewhere, or write "None".*
+
+---
+
+> [!NOTE]
+> Pull requests that don't follow this template will be closed. This project is maintained by one volunteer (me!) in my spare time, so thanks for your patience with replies.

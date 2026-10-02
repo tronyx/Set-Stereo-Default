@@ -3,6 +3,12 @@ name: Tests
 on:
   push:
   pull_request:
+  # Weekly, so a new ffmpeg release that breaks the script shows up even
+  # without a push. GitHub only runs this from the default branch's copy of
+  # this file, and pauses it after 60 days without repository activity.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 jobs:
   test:
@@ -21,3 +27,59 @@ jobs:
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest
+
+  # Runs the script on real files generated with ffmpeg (tests/test_real_files.py),
+  # once per ffmpeg version that common distros ship, plus the newest release.
+  real-files:
+    name: Real files, ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ffmpeg 4.4 (Ubuntu 22.04)
+            image: ubuntu:22.04
+          - name: ffmpeg 5.1 (Debian 12)
+            image: debian:12
+          - name: ffmpeg 6.1 (Ubuntu 24.04)
+            image: ubuntu:24.04
+          - name: ffmpeg 7.1 (Debian 13)
+            image: debian:13
+          # The newest ffmpeg release, looked up at run time (see below).
+          - name: newest ffmpeg (static build)
+            image: debian:13
+            static-ffmpeg: true
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      # Fail, rather than skip, if a tool is missing.
+      REQUIRE_MEDIA_TOOLS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends mkvtoolnix python3 python3-pytest python3-tqdm \
+            ${{ matrix.static-ffmpeg && 'ca-certificates curl xz-utils' || 'ffmpeg' }}
+      # https://github.com/BtbN/FFmpeg-Builds keeps builds of the newest release
+      # branches (e.g. ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz) and drops old
+      # ones, so pick the highest version listed rather than pinning one.
+      - name: Install static ffmpeg
+        if: matrix.static-ffmpeg
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build=$(curl -sSLf -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
+            | grep -o 'ffmpeg-n[0-9.]*-latest-linux64-gpl-[0-9.]*\.tar\.xz' | sort -uV | tail -n 1)
+          test -n "$build" || { echo "No ffmpeg release build found"; exit 1; }
+          echo "Using $build"
+          curl -sSLf "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$build" \
+            | tar -xJ -C /opt
+          echo "/opt/${build%.tar.xz}/bin" >> "$GITHUB_PATH"
+      - name: Tool versions
+        run: |
+          ffmpeg -version | head -n 1
+          mkvmerge --version
+          python3 --version
+      - run: python3 -m pytest tests/test_real_files.py -v
