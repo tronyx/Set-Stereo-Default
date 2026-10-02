@@ -84,7 +84,9 @@ import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -771,7 +773,35 @@ def swap_in(path, tmp_path, backup, keep_dates=False):
     os.replace(tmp_path, path)
 
 
-def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, keep_dates=False):
+@dataclass
+class Plan:
+    """What's going to happen to one file, as decided by _process_file():
+    its audio streams (from probe_audio_streams()), the index of the one
+    to make default, its duration in seconds (None if unknown), and intro,
+    the "setting stream#N ..." line logged as the remux starts (see
+    _announce())."""
+    path: Path
+    streams: list
+    target_index: int
+    duration: float | None = None
+    intro: str | None = None
+
+    @property
+    def tmp_path(self):
+        """Where the remux is written before it replaces the original."""
+        return self.path.with_name(self.path.name + TMP_MARKER + self.path.suffix)
+
+
+@dataclass
+class Progress:
+    """How to show a remux's progress: show its own bar at row position
+    (--jobs 1 only), and call on_progress(pct) to move the overall bar."""
+    show: bool = False
+    position: int = 0
+    on_progress: Callable[[int], None] | None = None
+
+
+def check_and_swap_in(plan, reordered, args):
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged).
@@ -779,13 +809,14 @@ def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, 
     The temp file is removed if the check fails or anything interrupts this
     (Ctrl+C, SIGTERM, an unexpected error), so it's never left behind. After
     a successful swap there's no temp file left to remove."""
+    path, tmp_path = plan.path, plan.tmp_path
     try:
-        problem = verify_remux(path, tmp_path, streams, target_index, reordered)
+        problem = verify_remux(path, tmp_path, plan.streams, plan.target_index, reordered)
         if problem:
             log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        swap_in(path, tmp_path, backup, keep_dates)
+        swap_in(path, tmp_path, args.backup, args.keep_dates)
         return True
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -817,17 +848,98 @@ def _announce(intro, line=None):
         log.info(text)
 
 
-def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
-              on_progress=None, keep_dates=False, intro=None):
-    """Remux an MKV/WebM file with mkvmerge so only target_index is flagged
-    default. Returns True on success, False on failure (already logged).
-    With dry_run, just logs the command. intro, if given, is logged with
-    the command, or just before the remux starts (see _announce()).
+_MKVMERGE_PCT_RE = re.compile(r"#GUI#progress\s+(\d+)%")
+"""mkvmerge --gui-mode's progress lines, e.g. "#GUI#progress 42%"."""
+
+_MKVMERGE_WARNING_PREFIX_RE = re.compile(r"^(?:#GUI#warning\s*)?(?:warning:\s*)?", re.IGNORECASE)
+"""The "#GUI#warning" and "Warning:" prefixes on mkvmerge's warnings."""
+
+_FFMPEG_PROGRESS_RE = re.compile(r"[a-z0-9_]+=")
+"""ffmpeg -progress output: a block of key=value lines per update."""
+
+
+def _mkvmerge_pct(line):
+    """Read the percentage from mkvmerge's "#GUI#progress 42%" lines; None
+    for any other line."""
+    m = _MKVMERGE_PCT_RE.search(line)
+    return int(m.group(1)) if m else None
+
+
+def _ffmpeg_pct(duration):
+    """Return a parse_pct for ffmpeg's -progress output (see
+    run_with_progress()). out_time_us gives the percentage done, which
+    needs the file's duration in seconds. Every other key returns 0: still
+    a progress line, so it's kept out of error messages, but it doesn't
+    move the bar. Without a duration, the bar only fills at the end."""
+    def parse_pct(line):
+        """Read one line of ffmpeg's -progress output."""
+        line = line.strip()
+        if not _FFMPEG_PROGRESS_RE.match(line):
+            return None
+        if duration and line.startswith("out_time_us="):
+            try:
+                return int(int(line.split("=", 1)[1]) / 1_000_000 / duration * 100)
+            except ValueError:
+                pass
+        return 0
+    return parse_pct
+
+
+def _remux_and_swap(plan, cmd, parse_pct, args, progress, reordered=False, warnings_exit=None):
+    """Run a remux command written to plan.tmp_path, then check it and swap it
+    in. Returns True on success (or after a dry run, which only logs the
+    command), False on failure (already logged). Shared by apply_mkv() and
+    apply_remux(), which only build the command.
+
+    plan.intro is logged with the dry-run command, or just before the remux
+    starts (see _announce()). warnings_exit is an exit code that means the
+    tool finished but printed warnings (mkvmerge's 1): the warnings are
+    logged and the file is still checked and used. A killed process can
+    also exit with that code (mkvmerge on Windows), so it only counts as
+    finished if no stop was requested.
+
+    The temp file is removed whatever stops the remux: a failure, a stop
+    (Ctrl+C, SIGTERM) or an unexpected error. Until check_and_swap_in()
+    has checked it, the original isn't touched."""
+    path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
+    if args.dry_run:
+        _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
+        return True
+    _announce(plan.intro)
+
+    try:
+        returncode, output = run_with_progress(cmd, path.name, progress.show, parse_pct,
+                                               progress.position, progress.on_progress)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    with_warnings = returncode == warnings_exit and not _cancelled.is_set()
+    if (returncode != 0 and not with_warnings) or not tmp_path.exists():
+        if _cancelled.is_set():
+            log.info(f"    {path.name}: cancelled")
+        else:
+            log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
+        tmp_path.unlink(missing_ok=True)
+        return False
+
+    if with_warnings:
+        warnings = [_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
+                    for line in output.splitlines() if "warning" in line.lower()]
+        log.warning(f"    {path.name}: {tool} finished with warnings: "
+                    + ("; ".join(warnings) or output.strip() or "(no details given)"))
+
+    return check_and_swap_in(plan, reordered, args)
+
+
+def apply_mkv(plan, args, progress=None):
+    """Remux an MKV/WebM file with mkvmerge so only plan.target_index is
+    flagged default, using args.dry_run, args.backup and args.keep_dates.
+    Returns True on success, False on failure (already logged). The steps
+    shared with apply_remux() are in _remux_and_swap().
 
     A full remux is used instead of an in-place mkvpropedit edit, which can
     move the track list to the end of the file and break Windows Explorer
-    thumbnails. The remux is written to a temp file, and the original isn't
-    touched until check_and_swap_in() has checked it.
+    thumbnails.
 
     mkvmerge details:
     - It numbers tracks its own way, which usually matches ffprobe's stream
@@ -842,150 +954,65 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     - --output-charset UTF-8 makes its messages UTF-8 everywhere, as
       run_with_progress() expects; otherwise it uses the system's
       encoding, which isn't UTF-8 on Windows or with LANG=C in Docker.
-    - Exit code 1 means it finished with warnings. They're logged, without
-      mkvmerge's "#GUI#warning" and "Warning:" prefixes, and the file is
-      still checked and used. A killed mkvmerge can also exit with 1 on
-      Windows, so 1 only counts as finished if no stop was requested.
+    - Exit code 1 means it finished with warnings, which are logged
+      without mkvmerge's "#GUI#warning" and "Warning:" prefixes.
     """
-    tmp_path = path.with_name(path.name + TMP_MARKER + path.suffix)
-
+    path = plan.path
     ids = mkvmerge_audio_ids(path)
-    if ids is None or len(ids) != len(streams):
+    if ids is None or len(ids) != len(plan.streams):
         found = "couldn't read the file" if ids is None else f"sees {len(ids)} audio track(s)"
-        _announce(intro)
-        log.error(f"    {path.name}: mkvmerge {found}, but ffprobe sees {len(streams)}; "
+        _announce(plan.intro)
+        log.error(f"    {path.name}: mkvmerge {found}, but ffprobe sees {len(plan.streams)}; "
                   f"leaving the file alone")
         return False
 
-    args = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "-o", str(tmp_path)]
-    for s, track_id in zip(streams, ids):
-        flag = "yes" if s["index"] == target_index else "no"
-        args += ["--default-track", f"{track_id}:{flag}"]
-    args += [str(path)]
-
-    if dry_run:
-        _announce(intro, "    [dry-run] " + shlex.join(args))
-        return True
-    _announce(intro)
-
-    pct_re = re.compile(r"#GUI#progress\s+(\d+)%")
-
-    def parse_pct(line):
-        """Read the percentage from mkvmerge's "#GUI#progress 42%" lines."""
-        m = pct_re.search(line)
-        return int(m.group(1)) if m else None
-
-    try:
-        returncode, output = run_with_progress(args, path.name, show_progress, parse_pct, position, on_progress)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-    finished = returncode == 0 or (returncode == 1 and not _cancelled.is_set())
-    if not finished or not tmp_path.exists():
-        if _cancelled.is_set():
-            log.info(f"    {path.name}: cancelled")
-        else:
-            log.error(f"    {path.name}: mkvmerge remux failed: {output.strip()}")
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-        return False
-
-    if returncode == 1:
-        warning_prefix_re = re.compile(r"^(?:#GUI#warning\s*)?(?:warning:\s*)?", re.IGNORECASE)
-        warnings = [warning_prefix_re.sub("", line.strip()) for line in output.splitlines()
-                    if "warning" in line.lower()]
-        log.warning(f"    {path.name}: mkvmerge finished with warnings: "
-                    + ("; ".join(warnings) or output.strip() or "(no details given)"))
-
-    return check_and_swap_in(path, tmp_path, streams, target_index, False, backup, keep_dates)
+    cmd = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "-o", str(plan.tmp_path)]
+    for s, track_id in zip(plan.streams, ids, strict=True):
+        flag = "yes" if s["index"] == plan.target_index else "no"
+        cmd += ["--default-track", f"{track_id}:{flag}"]
+    cmd.append(str(path))
+    return _remux_and_swap(plan, cmd, _mkvmerge_pct, args, progress or Progress(),
+                           warnings_exit=1)
 
 
-def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
-                 duration=None, show_progress=False, position=0, on_progress=None,
-                 keep_dates=False, intro=None):
+def apply_remux(plan, args, progress=None):
     """Remux any non-MKV file with ffmpeg (-c copy, so nothing is re-encoded)
-    so only target_index is flagged default. Returns True on success, False
-    on failure (already logged). With dry_run, just logs the command. intro,
-    if given, is logged with the command, or just before the remux starts
-    (see _announce()).
+    so only plan.target_index is flagged default, using args.dry_run,
+    args.backup, args.keep_dates and args.avi_reorder. Returns True on
+    success, False on failure (already logged). The steps shared with
+    apply_mkv() are in _remux_and_swap().
 
-    With reorder_for_avi, an AVI file instead gets the target moved to the
+    With --avi-reorder, an AVI file instead gets the target moved to the
     first audio track, since AVI has no default flag. MP4/M4V/MOV files get
     -movflags +faststart, which keeps the index at the front of the file
-    where thumbnailers expect it. The remux is written to a temp file, and
-    the original isn't touched until check_and_swap_in() has checked it.
-    duration (seconds) drives the progress bar; without it, the bar only
-    fills at the end.
+    where thumbnailers expect it. plan.duration drives the progress bar.
     """
-    suffix = path.suffix
-    tmp_path = path.with_name(path.name + TMP_MARKER + suffix)
-
-    audio_indices = [s["index"] for s in streams]
-    reordered = reorder_for_avi and suffix.lower() in AVI_EXTS
+    path, target_index = plan.path, plan.target_index
+    ext = path.suffix.lower()
+    reordered = args.avi_reorder and ext in AVI_EXTS
 
     if reordered:
-        others = [i for i in audio_indices if i != target_index]
-        map_args = ["-map", "0:v?"]
-        map_args += ["-map", f"0:{target_index}"]
+        others = [s["index"] for s in plan.streams if s["index"] != target_index]
+        map_args = ["-map", "0:v?", "-map", f"0:{target_index}"]
         for i in others:
             map_args += ["-map", f"0:{i}"]
         map_args += ["-map", "0:s?", "-map", "0:d?"]
         disp_args = ["-disposition:a:0", "+default"]
-        for out_idx in range(1, len(audio_indices)):
+        for out_idx in range(1, len(plan.streams)):
             disp_args += [f"-disposition:a:{out_idx}", "-default"]
     else:
         map_args = ["-map", "0"]
         disp_args = []
-        for out_idx, s in enumerate(streams):
+        for out_idx, s in enumerate(plan.streams):
             flag = "+default" if s["index"] == target_index else "-default"
             disp_args += [f"-disposition:a:{out_idx}", flag]
 
-    extra_args = []
-    if suffix.lower() in MOV_FASTSTART_EXTS:
-        extra_args += ["-movflags", "+faststart"]
-
+    faststart = ["-movflags", "+faststart"] if ext in MOV_FASTSTART_EXTS else []
     cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
-           "-i", str(path)] + map_args + [
-        "-c", "copy", "-map_metadata", "0",
-    ] + disp_args + extra_args + [str(tmp_path)]
-
-    if dry_run:
-        _announce(intro, "    [dry-run] " + shlex.join(cmd))
-        return True
-    _announce(intro)
-
-    progress_re = re.compile(r"[a-z0-9_]+=")
-
-    def parse_pct(line):
-        """Read one line of ffmpeg's -progress output, a block of key=value
-        lines per update. out_time_us gives the percentage done. Every
-        other key returns 0: still a progress line, so it's kept out of
-        error messages, but it doesn't move the bar."""
-        line = line.strip()
-        if not progress_re.match(line):
-            return None
-        if duration and line.startswith("out_time_us="):
-            try:
-                return int(int(line.split("=", 1)[1]) / 1_000_000 / duration * 100)
-            except ValueError:
-                pass
-        return 0
-
-    try:
-        returncode, output = run_with_progress(cmd, path.name, show_progress, parse_pct, position, on_progress)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-    if returncode != 0 or not tmp_path.exists():
-        if _cancelled.is_set():
-            log.info(f"    {path.name}: cancelled")
-        else:
-            log.error(f"    {path.name}: ffmpeg remux failed: {output.strip()}")
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-        return False
-
-    return check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, keep_dates)
+           "-i", str(path), *map_args, "-c", "copy", "-map_metadata", "0",
+           *disp_args, *faststart, str(plan.tmp_path)]
+    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), args,
+                           progress or Progress(), reordered=reordered)
 
 
 def process_file(path, args, position=0, on_progress=None):
@@ -1007,8 +1034,8 @@ def _process_file(path, args, position=0, on_progress=None):
     "already correct" means the target is already the first audio track.
     --force remuxes even files that are already correct.
 
-    The "setting stream#N ..." line isn't logged here but handed to
-    apply_mkv()/apply_remux() as intro. They log it with the dry-run
+    The "setting stream#N ..." line isn't logged here but goes into the
+    Plan as its intro. apply_mkv()/apply_remux() log it with the dry-run
     command, or as the remux starts, so in a --jobs dry run each file's
     lines come out together under one header."""
     ext = path.suffix.lower()
@@ -1036,31 +1063,20 @@ def _process_file(path, args, position=0, on_progress=None):
     else:
         changed = needs_change(streams, target["index"])
 
-    if args.force:
-        changed = True
-
-    if not changed:
+    if not changed and not args.force:
         what = "is first audio stream" if is_avi_reorder else "is default"
         log.info(f"  {path.name}: already correct (stream#{target['index']} {what}), skipping")
         return "unchanged"
 
     action = "moving" if is_avi_reorder else "setting"
     outcome = "to the first audio track" if is_avi_reorder else "as default audio"
-    intro = (f"  {path.name}: {action} stream#{target['index']} "
-             f"({target['language'] or 'und'}, {target['codec']}) {outcome}")
-
-    show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1
-
-    if ext in MKV_EXTS:
-        ok = apply_mkv(path, streams, target["index"], args.dry_run, args.backup,
-                        show_progress, position, on_progress, args.keep_dates, intro=intro)
-    else:
-        ok = apply_remux(path, streams, target["index"], args.dry_run,
-                          args.backup, is_avi_reorder,
-                          duration, show_progress, position, on_progress, args.keep_dates,
-                          intro=intro)
-
-    return "changed" if ok else "error"
+    plan = Plan(path, streams, target["index"], duration,
+                intro=f"  {path.name}: {action} stream#{target['index']} "
+                      f"({target['language'] or 'und'}, {target['codec']}) {outcome}")
+    progress = Progress(show=HAVE_TQDM and not args.no_progress and args.jobs == 1,
+                        position=position, on_progress=on_progress)
+    apply = apply_mkv if ext in MKV_EXTS else apply_remux
+    return "changed" if apply(plan, args, progress) else "error"
 
 
 def _walk(folder, recursive, follow_symlinks):

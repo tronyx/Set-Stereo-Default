@@ -1059,14 +1059,14 @@ def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, 
 def remux_with_mkvmerge(path):
     """Fix path with apply_mkv(), as if it had ORIGINAL_AUDIO's tracks,
     keeping a backup."""
-    return ssd.apply_mkv(path, ORIGINAL_AUDIO, 2, dry_run=False, backup=True)
+    return ssd.apply_mkv(ssd.Plan(path, ORIGINAL_AUDIO, 2), file_args(dry_run=False, backup=True))
 
 
 def remux_with_ffmpeg(path):
     """Fix path with apply_remux(), as if it had ORIGINAL_AUDIO's tracks,
     keeping a backup."""
-    return ssd.apply_remux(path, ORIGINAL_AUDIO, 2, dry_run=False, backup=True,
-                           reorder_for_avi=False, duration=100.0)
+    return ssd.apply_remux(ssd.Plan(path, ORIGINAL_AUDIO, 2, duration=100.0),
+                           file_args(dry_run=False, backup=True))
 
 
 @pytest.fixture(params=[(remux_with_mkvmerge, "v.mkv"), (remux_with_ffmpeg, "v.mp4")],
@@ -1190,7 +1190,7 @@ def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypat
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")
 
-    assert ssd.apply_mkv(video, ORIGINAL_AUDIO, 2, dry_run=False, backup=False) is True
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is True
     assert caplog.records[-1].getMessage() == \
         "    v.mkv: mkvmerge finished with warnings: odd timestamps; gap in track 1"
 
@@ -1234,9 +1234,8 @@ def test_exit_code_1_after_ctrl_c_counts_as_cancelled(remux, caplog):
 
 
 @pytest.mark.parametrize("apply, tool", [
-    (lambda p: ssd.apply_mkv(p, ORIGINAL_AUDIO, 2, dry_run=True, backup=False), "mkvmerge"),
-    (lambda p: ssd.apply_remux(p, ORIGINAL_AUDIO, 2, dry_run=True, backup=False,
-                               reorder_for_avi=False), "ffmpeg"),
+    (lambda p: ssd.apply_mkv(ssd.Plan(p, ORIGINAL_AUDIO, 2), file_args()), "mkvmerge"),
+    (lambda p: ssd.apply_remux(ssd.Plan(p, ORIGINAL_AUDIO, 2), file_args()), "ffmpeg"),
 ], ids=["mkvmerge", "ffmpeg"])
 def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, caplog, apply, tool):
     caplog.set_level("INFO")
@@ -1254,7 +1253,8 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
 
 
 def file_args(**overrides):
-    """process_file()'s args, as a --dry-run with no progress bar."""
+    """The parsed options process_file() and the apply functions take, as a
+    --dry-run with no progress bar."""
     values = dict(prefer_lang=None, avi_reorder=False, force=False, dry_run=True,
                   backup=False, keep_dates=False, no_progress=True, jobs=1)
     values.update(overrides)
@@ -1334,9 +1334,8 @@ def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatc
     monkeypatch.setattr(ssd, "run_with_progress", fake_run_with_progress)
 
     seen = []
-    ssd.apply_remux(tmp_path / "v.mp4", ORIGINAL_AUDIO, 2, dry_run=False, backup=False,
-                    reorder_for_avi=False, duration=100.0, show_progress=False,
-                    on_progress=seen.append)
+    ssd.apply_remux(ssd.Plan(tmp_path / "v.mp4", ORIGINAL_AUDIO, 2, duration=100.0),
+                    file_args(dry_run=False), ssd.Progress(on_progress=seen.append))
     assert seen == [25, 50, 100]
 
 
@@ -1358,9 +1357,8 @@ def test_ffmpeg_failure_message_leaves_out_progress_lines(tmp_path, monkeypatch,
     monkeypatch.setattr(ssd, "run_with_progress", fake_ffmpeg)
 
     seen = []
-    assert ssd.apply_remux(tmp_path / "v.mp4", ORIGINAL_AUDIO, 2, dry_run=False, backup=False,
-                           reorder_for_avi=False, duration=duration, show_progress=False,
-                           on_progress=seen.append) is False
+    assert ssd.apply_remux(ssd.Plan(tmp_path / "v.mp4", ORIGINAL_AUDIO, 2, duration=duration),
+                           file_args(dry_run=False), ssd.Progress(on_progress=seen.append)) is False
 
     error = caplog.records[-1].getMessage()
     assert error.endswith("ffmpeg remux failed: [mp4 @ 0x5581] Could not find tag for codec")
@@ -1452,7 +1450,7 @@ def test_run_with_progress_reads_output_as_utf8_and_replaces_invalid_bytes():
 
 def test_mkvmerge_is_told_to_write_utf8(tmp_path, caplog):
     caplog.set_level("INFO")
-    ssd.apply_mkv(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2, dry_run=True, backup=False)
+    ssd.apply_mkv(ssd.Plan(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2), file_args())
     args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
     assert args[args.index("--output-charset") + 1] == "UTF-8"
 
@@ -1470,7 +1468,7 @@ def test_mkvmerge_gets_its_own_track_ids_when_they_differ_from_ffprobes(tmp_path
     caplog.set_level("INFO")
     mkvmerge_ids.value = [2, 3]
 
-    assert ssd.apply_mkv(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2, dry_run=True, backup=False)
+    assert ssd.apply_mkv(ssd.Plan(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2), file_args())
 
     assert dry_run_flags(caplog) == ["2:no", "3:yes"]
 
@@ -1486,7 +1484,7 @@ def test_mkvmerge_and_ffprobe_disagreeing_leaves_the_file_alone(tmp_path, caplog
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")
 
-    assert ssd.apply_mkv(video, ORIGINAL_AUDIO, 2, dry_run=False, backup=False) is False
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is False
 
     assert message in caplog.text
     assert video.read_bytes() == b"original"
