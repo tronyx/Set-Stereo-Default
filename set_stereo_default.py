@@ -334,16 +334,45 @@ def _stop_reason(exc):
     return signum, f"Stopped by {signal.Signals(signum).name}"
 
 
-def run(cmd, **kw):
+class Cancelled(Exception):
+    """Raised by run() when a stop (Ctrl+C, SIGTERM) killed the command it
+    was waiting for. process_file() reports the file as cancelled, rather
+    than reporting the killed command as a failure."""
+
+
+def run(cmd):
     """Run a quick command (e.g. ffprobe) and capture its output. Remuxes use
     run_with_progress() instead.
+
+    Like a remux, the process is listed in _active_procs while it runs, so a
+    stop kills it rather than waiting for it (e.g. ffprobe on a network
+    share that has stopped answering), and it's killed straight away if a
+    stop was already requested. If a stop is requested while it runs,
+    Cancelled is raised once it has ended.
 
     Output is read as UTF-8, which ffprobe, ffmpeg and mkvmerge (given
     --output-charset UTF-8) all write, rather than in the system's own
     encoding: on Windows that's usually cp1252, which garbles non-English
     track names or fails on them outright. A byte that isn't valid UTF-8
     is replaced rather than stopping the run."""
-    return subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", **kw)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            encoding="utf-8", errors="replace")
+    try:
+        with _active_procs_lock:
+            _active_procs.add(proc)
+        if _cancelled.is_set():
+            proc.kill()
+        stdout, stderr = proc.communicate()
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        with _active_procs_lock:
+            _active_procs.discard(proc)
+    if _cancelled.is_set():
+        raise Cancelled
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
@@ -1006,13 +1035,17 @@ def apply_remux(plan, args, progress=None):
 
 def process_file(path, args, position=0, on_progress=None):
     """Check one file, fix it if needed, and return "changed", "unchanged",
-    "skipped" or "error". An unexpected error is logged and returned as
-    "error" so one bad file doesn't stop the run. position is the progress
-    bar's row (--jobs 1 only). Run it inside file_context(), which puts the
-    file's header above its lines.
+    "skipped" or "error", or "cancelled" if a stop interrupted it (see
+    Cancelled). An unexpected error is logged and returned as "error" so
+    one bad file doesn't stop the run. position is the progress bar's row
+    (--jobs 1 only). Run it inside file_context(), which puts the file's
+    header above its lines.
     """
     try:
         return _process_file(path, args, position, on_progress)
+    except Cancelled:
+        log.info(f"  {path.name}: cancelled")
+        return "cancelled"
     except Exception as exc:
         log.error(f"  {path.name}: unexpected error, skipping rest of file ({exc})")
         return "error"

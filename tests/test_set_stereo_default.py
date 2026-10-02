@@ -1615,6 +1615,62 @@ def test_terminate_active_procs_unblocks_a_worker_thread():
     assert not ssd._active_procs
 
 
+def test_a_stop_kills_a_quick_command_too_and_cancels_the_file():
+    """run() (ffprobe, mkvmerge -J) is killed by a stop like a remux, e.g.
+    when a network share has stopped answering, and raises Cancelled
+    rather than returning a failure."""
+    result = {}
+
+    def worker():
+        try:
+            ssd.run(SLOW_CMD)
+            result["outcome"] = "returned"
+        except ssd.Cancelled:
+            result["outcome"] = "cancelled"
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not ssd._active_procs and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    ssd._cancelled.set()
+    ssd._terminate_active_procs()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert result["outcome"] == "cancelled"
+    assert not ssd._active_procs
+
+
+def test_a_quick_command_started_after_a_stop_is_killed_straight_away():
+    ssd._cancelled.set()
+    started = time.monotonic()
+    with pytest.raises(ssd.Cancelled):
+        ssd.run(SLOW_CMD)
+    assert time.monotonic() - started < 5
+    assert not ssd._active_procs
+
+
+def test_a_quick_command_is_only_listed_while_it_runs():
+    assert ssd.run(python_cmd("print('done')")).stdout == "done\n"
+    assert not ssd._active_procs
+
+
+def test_a_file_stopped_while_being_checked_is_reported_as_cancelled(tmp_path, monkeypatch,
+                                                                     caplog):
+    """Not as "ffprobe failed": the command only failed because it was killed."""
+    caplog.set_level("INFO")
+
+    def stopped_probe(path, report=True):
+        raise ssd.Cancelled
+    monkeypatch.setattr(ssd, "probe_streams", stopped_probe)
+
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "cancelled"
+    assert caplog.records[-1].getMessage() == "  v.mkv: cancelled"
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
 def test_terminate_active_procs_waits_5s_in_total_not_per_process(monkeypatch):
     clock = [0.0]
     monkeypatch.setattr(ssd, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
