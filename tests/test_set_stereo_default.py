@@ -1183,6 +1183,39 @@ def test_partial_summary_counts_unfinished_files_as_cancelled(tmp_path, monkeypa
     assert "cancelled: 3" in out
 
 
+@pytest.mark.parametrize("dry_run, interrupted, heading, first_line", [
+    (False, False, "----- Summary -----", "changed: 2"),
+    (True, False, "----- Summary (dry run, nothing was changed) -----", "would change: 2"),
+    (False, True, "----- Summary (partial -- interrupted) -----", "changed: 1"),
+    (True, True, "----- Summary (partial -- interrupted; dry run, nothing was changed) -----",
+     "would change: 1"),
+], ids=["normal", "dry run", "interrupted", "interrupted dry run"])
+def test_summary_says_what_kind_of_run_it_was(tmp_path, monkeypatch, capsys, dry_run, interrupted,
+                                              heading, first_line):
+    make_videos(tmp_path, 2)
+    calls = []
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        calls.append(path.name)
+        if interrupted and len(calls) == 2:
+            raise KeyboardInterrupt
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
+                                      *(["--dry-run"] if dry_run else [])])
+
+    try:
+        ssd.main()
+    except SystemExit:
+        pass
+
+    lines = capsys.readouterr().out.splitlines()
+    start = lines.index(heading)
+    assert lines[start + 1:start + 5] == [first_line, "unchanged: 0", "skipped: 0", "error: 0"]
+
+
 def test_stop_handler_cancels_and_stops_subprocesses(monkeypatch):
     stopped = []
     monkeypatch.setattr(ssd, "_terminate_active_procs", lambda: stopped.append(True))

@@ -1064,11 +1064,17 @@ def main():
     use_bar = HAVE_TQDM and not args.no_progress
     show_fallback_counter = args.log_file and not use_bar
 
-    def print_summary(label="Summary", cancelled=0):
-        """Log the counts, and print them too when the log goes to a file."""
-        lines = ["", f"----- {label} -----"]
+    def print_summary(partial=False, cancelled=0):
+        """Log the counts, and print them too when the log goes to a file. In a
+        dry run nothing was changed, so the heading says so and "changed"
+        reads "would change"."""
+        notes = (["partial -- interrupted"] if partial else []) + (
+            ["dry run, nothing was changed"] if args.dry_run else [])
+        heading = "Summary" + (" (" + "; ".join(notes) + ")" if notes else "")
+        lines = ["", f"----- {heading} -----"]
         for k in ("changed", "unchanged", "skipped", "error"):
-            lines.append(f"{k}: {stats[k]}")
+            name = "would change" if k == "changed" and args.dry_run else k
+            lines.append(f"{name}: {stats[k]}")
         if cancelled:
             lines.append(f"cancelled: {cancelled}")
         for line in lines:
@@ -1151,8 +1157,7 @@ def main():
         print()
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
-        print_summary("Summary (partial -- interrupted)",
-                      cancelled=len(files) - sum(stats.values()))
+        print_summary(partial=True, cancelled=len(files) - sum(stats.values()))
         sys.exit(128 + signum)
 
     print_summary()

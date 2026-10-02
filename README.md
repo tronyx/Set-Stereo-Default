@@ -185,14 +185,14 @@ Found 8 file(s) (dry run).
 
 ...
 
------ Summary -----
-changed: 8
+----- Summary (dry run, nothing was changed) -----
+would change: 8
 unchanged: 0
 skipped: 0
 error: 0
 ```
 
-Each `[dry-run]` line is the exact command the script would run, quoted so you can paste it into a shell. In a dry run, `changed` counts the files that *would* change.
+Each `[dry-run]` line is the exact command the script would run, quoted so you can paste it into a shell.
 
 </details>
 
