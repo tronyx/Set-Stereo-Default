@@ -908,36 +908,87 @@ def test_swap_in_leaves_the_owner_alone_when_it_already_matches(tmp_path, monkey
     assert "Couldn't give" not in caplog.text
 
 
-def test_owner_failures_are_reported_once_at_the_end(nfs_owners, monkeypatch, caplog):
+def not_permitted(*args):
+    """A stand-in for os.chown() on an NFS share that squashes root."""
+    raise PermissionError(1, "Operation not permitted")
+
+
+def test_owner_failures_are_reported_once_at_the_end_with_a_list(nfs_owners, monkeypatch,
+                                                                  tmp_path, caplog):
     """Swapping a file in doesn't warn by itself: the cause affects the
-    whole run, so report_ownership_failures() warns once, with a count."""
+    whole run, so report_ownership_failures() warns once, with a count and
+    a file listing every affected file by its full path."""
     make, _ = nfs_owners
-
-    def not_permitted(*args):
-        raise PermissionError(1, "Operation not permitted")
     monkeypatch.setattr(ssd.os, "chown", not_permitted, raising=False)
-
+    videos = []
     for name in ("a.mkv", "b.mkv"):
         video, tmp = make(name)
         ssd.swap_in(video, tmp, backup=False)
         assert video.read_bytes() == b"remuxed"
+        videos.append(video)
     assert "Couldn't give" not in caplog.text
+    listing = tmp_path / "lists"
+    listing.mkdir()
 
-    ssd.report_ownership_failures()
+    ssd.report_ownership_failures(listing)
 
+    [listed] = listing.glob("set_stereo_default-owners-*.log")
+    assert listed.read_text(encoding="utf-8").splitlines() == [str(v) for v in videos]
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1
-    assert warnings[0].startswith(
+    assert warnings == [
         "\nCouldn't give 2 remuxed files their original owner (Operation not permitted). "
-        "For example, a.mkv should belong to tronyx:users (1000:100) but belongs to "
-        "nobody:nogroup (65534:65534).")
-    assert "sudo -u tronyx python3" in warnings[0]
-    assert "once per run" not in warnings[0]
+        f"You can view the full list of files here: {listed.resolve()}\n\n"
+        "These files should belong to tronyx:users (1000:100) but belong to "
+        "nobody:nogroup (65534:65534). Permissions were still copied. Changing a file's "
+        "owner needs root, and NFS shares usually turn root into 'nobody'. Run the script "
+        "as the files' owner instead (sudo -u tronyx python3 ...)."]
 
 
-def test_nothing_is_reported_when_every_owner_was_kept(caplog):
-    ssd.report_ownership_failures()
+def test_files_with_different_owners_are_listed_with_each_files_owners(nfs_owners, tmp_path,
+                                                                        caplog):
+    for name, wanted in (("a.mkv", (1000, 100)), ("b.mkv", (99, 100))):
+        ssd._ownership_failures.append((str(tmp_path / name), wanted, (65534, 65534),
+                                        "Operation not permitted"))
+
+    ssd.report_ownership_failures(tmp_path)
+
+    [listed] = tmp_path.glob("set_stereo_default-owners-*.log")
+    assert listed.read_text(encoding="utf-8").splitlines() == [
+        f"{tmp_path / 'a.mkv'}  (should belong to tronyx:users (1000:100), "
+        f"belongs to nobody:nogroup (65534:65534))",
+        f"{tmp_path / 'b.mkv'}  (should belong to 99:100, belongs to nobody:nogroup (65534:65534))"]
+    assert ("Their owners vary (the list shows each file's); for example, a.mkv should belong "
+            "to tronyx:users (1000:100)") in caplog.text
+
+
+def test_owner_list_falls_back_to_the_temp_folder(tmp_path, monkeypatch, caplog):
+    """e.g. the script was run from a folder it can't write to."""
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(ssd.tempfile, "gettempdir", lambda: str(temp))
+    for name in ("a.mkv", "b.mkv"):
+        ssd._ownership_failures.append((name, (1000, 100), (65534, 65534), "Operation not permitted"))
+
+    ssd.report_ownership_failures(tmp_path / "missing")
+
+    [listed] = temp.glob("set_stereo_default-owners-*.log")
+    assert f"You can view the full list of files here: {listed.resolve()}" in caplog.text
+
+
+def test_owner_list_goes_in_the_warning_if_it_cant_be_saved(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(ssd.tempfile, "gettempdir", lambda: str(tmp_path / "missing too"))
+    for name in ("/videos/a.mkv", "/videos/b.mkv"):
+        ssd._ownership_failures.append((name, (1000, 100), (65534, 65534), "Operation not permitted"))
+
+    ssd.report_ownership_failures(tmp_path / "missing")
+
+    assert "The list of files couldn't be saved:\n/videos/a.mkv\n/videos/b.mkv\n\n" in caplog.text
+
+
+def test_nothing_is_reported_when_every_owner_was_kept(tmp_path, caplog):
+    ssd.report_ownership_failures(tmp_path)
     assert caplog.records == []
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("uid, gid, described", [
@@ -956,35 +1007,40 @@ def test_sudo_hint_uses_the_user_id_when_the_owner_has_no_name(nfs_owners, monke
     monkeypatch.setattr(ssd, "_owner",
                         lambda path: (65534, 65534) if ssd.TMP_MARKER in str(path) else (99, 100))
 
-    def not_permitted(*args):
-        raise PermissionError(1, "Operation not permitted")
     monkeypatch.setattr(ssd.os, "chown", not_permitted, raising=False)
     video, tmp = make("v.mkv")
 
     ssd.swap_in(video, tmp, backup=False)
-    ssd.report_ownership_failures()
+    ssd.report_ownership_failures(video.parent)
 
-    assert ("Couldn't give v.mkv its original owner (Operation not permitted): it should "
-            "belong to 99:100 but belongs to nobody:nogroup (65534:65534)") in caplog.text
+    assert (f"Couldn't give {video} its original owner (Operation not permitted).\n\n"
+            f"It should belong to 99:100 but belongs to nobody:nogroup (65534:65534)."
+            ) in caplog.text
     assert "sudo -u '#99' python3" in caplog.text
+    assert not list(video.parent.glob("set_stereo_default-owners-*.log"))
 
 
 def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, monkeypatch,
                                                                         capsys):
     """The run from the bug report: with --jobs, the warning used to appear
-    under whichever file failed first."""
-    make_videos(tmp_path, 3)
+    under whichever file failed first. The list of files is saved in the
+    folder the script was run from."""
+    videos, run_from = tmp_path / "videos", tmp_path / "run from here"
+    videos.mkdir()
+    run_from.mkdir()
+    make_videos(videos, 3)
+    monkeypatch.chdir(run_from)
 
     def fake_process_file(path, args, position=0, header="", on_progress=None):
         ssd.log.info(f"\n{header}\n  {path.name}: setting stream#1 (eng, aac) as default audio")
         with ssd._ownership_lock:
-            ssd._ownership_failures.append((path.name, (1000, 100), (65534, 65534),
+            ssd._ownership_failures.append((str(path), (1000, 100), (65534, 65534),
                                             "Operation not permitted"))
         return "changed"
 
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
-    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(videos),
                                       "--no-progress", "--jobs", "2"])
     ssd.main()
 
@@ -992,7 +1048,12 @@ def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, 
     warning = next(i for i, line in enumerate(lines) if line.startswith("Couldn't give"))
     assert lines[warning].startswith("Couldn't give 3 remuxed files their original owner")
     assert max(i for i, line in enumerate(lines) if "setting stream#1" in line) < warning
-    assert lines[warning + 1:warning + 3] == ["", "----- Summary -----"]
+    assert lines[warning + 1] == ""
+    assert lines[warning + 2].startswith("These files should belong to")
+    assert lines[warning + 3:warning + 5] == ["", "----- Summary -----"]
+    [listed] = run_from.glob("set_stereo_default-owners-*.log")
+    assert sorted(listed.read_text(encoding="utf-8").splitlines()) == \
+        sorted(str(v) for v in videos.iterdir())
 
 
 def remux_with_mkvmerge(path):

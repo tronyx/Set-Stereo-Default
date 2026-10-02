@@ -80,6 +80,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -269,7 +270,7 @@ _cancelled = threading.Event()
 """Set once Ctrl+C or SIGTERM arrives, so files that haven't started are skipped."""
 
 _ownership_failures = []
-"""Remuxed files that couldn't be given their original owner, as (file name,
+"""Remuxed files that couldn't be given their original owner, as (full path,
 wanted owner, actual owner, reason). Reported once, at the end of the run,
 by report_ownership_failures()."""
 
@@ -681,13 +682,38 @@ def copy_ownership(src, dst):
         os.chown(dst, *wanted)
     except OSError as exc:
         with _ownership_lock:
-            _ownership_failures.append((Path(src).name, wanted, got, exc.strerror))
+            _ownership_failures.append((str(src), wanted, got, exc.strerror))
 
 
-def report_ownership_failures():
+def _write_ownership_list(folder):
+    """Write the full path of every file in _ownership_failures to a new
+    set_stereo_default-owners-<date>-<time>.log in folder, one per line in
+    path order (they're recorded in whatever order --jobs finishes them),
+    and return its path. If the files don't all share one wanted and one actual
+    owner, each line also says which. Falls back to the system's temp
+    folder if folder can't be written to; returns None if that fails too.
+    The timestamp means a later run never overwrites an earlier list."""
+    owners = {(wanted, got) for _, wanted, got, _ in _ownership_failures}
+    lines = [path if len(owners) == 1
+             else f"{path}  (should belong to {_owner_name(*wanted)}, belongs to {_owner_name(*got)})"
+             for path, wanted, got, _ in sorted(_ownership_failures)]
+    name = f"set_stereo_default-owners-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    for place in (Path(folder), Path(tempfile.gettempdir())):
+        target = (place / name).resolve()
+        try:
+            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return target
+        except OSError:
+            continue
+    return None
+
+
+def report_ownership_failures(folder="."):
     """Warn once about every remuxed file that couldn't be given its original
-    owner: how many, one example with the owner it should have and the one
-    it got, and the command to run the script as the right user.
+    owner: how many, the owner they should have and the one they got, and
+    the command to run the script as the right user. With more than one,
+    the full list goes to a file in folder (see _write_ownership_list())
+    and the warning says where.
 
     It's one warning at the end of the run, just before the summary, because
     the cause (usually running as root on an NFS share) affects the whole
@@ -695,18 +721,30 @@ def report_ownership_failures():
     it looked like that file's problem."""
     if not _ownership_failures:
         return
-    name, wanted, got, reason = _ownership_failures[0]
+    path, wanted, got, reason = _ownership_failures[0]
     count = len(_ownership_failures)
     user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
+    advice = (f"Permissions were still copied. Changing a file's owner needs root, and NFS "
+              f"shares usually turn root into 'nobody'. Run the script as the files' owner "
+              f"instead (sudo -u {user} python3 ...).")
     if count == 1:
-        what = f"Couldn't give {name} its original owner ({reason}): it should belong to"
+        log.warning(f"\nCouldn't give {path} its original owner ({reason}).\n\n"
+                    f"It should belong to {_owner_name(*wanted)} but belongs to "
+                    f"{_owner_name(*got)}. {advice}")
+        return
+    listed = _write_ownership_list(folder)
+    where = (f"You can view the full list of files here: {listed}" if listed
+             else "The list of files couldn't be saved:\n" +
+                  "\n".join(p for p, _, _, _ in _ownership_failures))
+    if len({(w, g) for _, w, g, _ in _ownership_failures}) == 1:
+        owners = (f"These files should belong to {_owner_name(*wanted)} but belong to "
+                  f"{_owner_name(*got)}.")
     else:
-        what = (f"Couldn't give {count} remuxed files their original owner ({reason}). "
-                f"For example, {name} should belong to")
-    log.warning(f"\n{what} {_owner_name(*wanted)} but belongs to {_owner_name(*got)}. "
-                f"Permissions were still copied. Changing a file's owner needs root, and NFS "
-                f"shares usually turn root into 'nobody'. Run the script as the files' owner "
-                f"instead (sudo -u {user} python3 ...).")
+        owners = (f"Their owners vary (the list shows each file's); for example, "
+                  f"{Path(path).name} should belong to {_owner_name(*wanted)} but belongs to "
+                  f"{_owner_name(*got)}.")
+    log.warning(f"\nCouldn't give {count} remuxed files their original owner ({reason}). "
+                f"{where}\n\n{owners} {advice}")
 
 
 def swap_in(path, tmp_path, backup, keep_dates=False):
@@ -1157,7 +1195,8 @@ def main():
     - With --log-file, the "Found N file(s)" line and the summary are also
       printed, so they stay on the console.
     - Files that couldn't be given their original owner are reported in one
-      warning just before the summary (report_ownership_failures()).
+      warning just before the summary (report_ownership_failures()), with
+      the full list saved next to --log-file, or in the current folder.
 
     When stopped (Ctrl+C or SIGTERM), the stop handler has already killed
     every remux and each one has removed its temp file. What's left is to
@@ -1276,6 +1315,7 @@ def main():
         args.backup = mode
 
     stats = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
+    list_folder = Path(args.log_file).parent if args.log_file else Path.cwd()
     use_bar = HAVE_TQDM and not args.no_progress
     show_fallback_counter = args.log_file and not use_bar
 
@@ -1378,11 +1418,11 @@ def main():
         print()
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
-        report_ownership_failures()
+        report_ownership_failures(list_folder)
         print_summary(partial=True, cancelled=len(files) - sum(stats.values()))
         sys.exit(128 + signum)
 
-    report_ownership_failures()
+    report_ownership_failures(list_folder)
     print_summary()
 
     if stats["error"]:
