@@ -119,7 +119,7 @@ On Windows, type `py` instead of `python3`.
 | `--no-progress` | Hide the progress bars, e.g. for cron or CI logs |
 
 > [!TIP]
-> **Choosing `--jobs`:** the work is limited by disk speed, not CPU, so pick a number your storage can keep up with rather than your core count. Above `1`, you'll see only the overall progress bar, and each file's lines are shown together once that file is done, so files appear in the order they finish rather than in `[i/N]` order.
+> **Choosing `--jobs`:** the work is limited by disk speed, not CPU, so pick a number your storage can keep up with rather than your core count. Above `1`, you'll see only the overall progress bar. Lines from different files print as they happen, so when a file's line follows another file's, its `[i/N]` header is printed again first to show which file it belongs to.
 
 Run `python3 set_stereo_default.py --help` for the full built-in help.
 

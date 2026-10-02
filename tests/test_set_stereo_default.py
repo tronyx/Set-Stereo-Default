@@ -1482,57 +1482,82 @@ def make_videos(folder, count):
         (folder / f"e{i:02}.mkv").write_text("x")
 
 
-def test_grouped_log_keeps_each_threads_messages_together(caplog):
-    """Both threads log their first line, wait until the other has too, then
-    log their second, so without grouping the lines would interleave every
-    time. Grouped, each thread's lines come out together, in order, with
-    their levels kept."""
+def under_headers(lines):
+    """Pair each line with the file whose "[i/N] name" header it sits under,
+    as a reader would: [(header file, line), ...] for every non-header,
+    non-blank line. A header's file is the last part of its path."""
+    pairs, current = [], None
+    for line in lines:
+        if line.startswith("[") and "] " in line:
+            current = Path(line.split("] ", 1)[1]).name
+        elif line.strip():
+            pairs.append((current, line))
+    return pairs
+
+
+def test_lines_from_two_files_each_stay_under_their_own_header(caplog):
+    """Both threads log their header line, wait until the other has too, then
+    log a later line, so the later lines always follow the other file's
+    header. Each is printed under its own header, repeated for it."""
     caplog.set_level("INFO")
     barrier = threading.Barrier(2, timeout=5)
 
-    def work(name):
-        with ssd.grouped_log():
-            ssd.log.info(f"{name} first")
+    def work(i, name):
+        header = f"[{i}/2] {name}"
+        with ssd.file_context(header):
+            ssd.log.info(f"\n{header}\n  {name} checked")
             barrier.wait()
-            ssd.log.warning(f"{name} second")
+            ssd.log.warning(f"    {name} command")
 
-    threads = [threading.Thread(target=work, args=(name,)) for name in ("a", "b")]
+    threads = [threading.Thread(target=work, args=(i, name))
+               for i, name in ((1, "a"), (2, "b"))]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
-    shown = [(r.getMessage(), r.levelname) for r in caplog.records]
-    assert len(shown) == 4
-    for first, second in (shown[0:2], shown[2:4]):
-        name = first[0].split()[0]
-        assert first == (f"{name} first", "INFO")
-        assert second == (f"{name} second", "WARNING")
+    lines = "\n".join(r.getMessage() for r in caplog.records).splitlines()
+    pairs = under_headers(lines)
+    assert len(pairs) == 4
+    assert all(line.split()[0] == owner for owner, line in pairs)
+    assert [r.levelname for r in caplog.records if "command" in r.getMessage()] == ["WARNING"] * 2
 
 
-def test_grouped_log_shows_messages_straight_away_after_the_block(caplog):
+def test_a_files_lines_print_straight_away_without_repeating_its_own_header(caplog):
     caplog.set_level("INFO")
-    with ssd.grouped_log():
-        ssd.log.info("held")
-        assert caplog.records == []
-    assert [r.getMessage() for r in caplog.records] == ["held"]
-
-    ssd.log.info("not held")
-    assert caplog.records[-1].getMessage() == "not held"
+    with ssd.file_context("[1/1] a"):
+        ssd.log.info("\n[1/1] a\n  a checked")
+        assert len(caplog.records) == 1
+        ssd.log.info("    a command")
+        assert caplog.records[-1].getMessage() == "    a command"
 
 
-def test_jobs_shows_each_files_lines_together(tmp_path, monkeypatch, capsys):
+def test_a_files_first_line_gets_its_header_if_it_lacks_one(caplog):
+    """e.g. "ffprobe failed on ...", logged before the header has been."""
+    caplog.set_level("INFO")
+    with ssd.file_context("[1/1] a"):
+        ssd.log.error("  ffprobe failed on a")
+    assert caplog.records[0].getMessage() == "\n[1/1] a\n  ffprobe failed on a"
+
+
+def test_lines_outside_a_file_pass_straight_through(caplog):
+    caplog.set_level("INFO")
+    ssd.log.info("Found 2 file(s).")
+    assert caplog.records[0].getMessage() == "Found 2 file(s)."
+
+
+def test_jobs_keeps_each_files_lines_under_its_own_header(tmp_path, monkeypatch, capsys):
     """The run from the bug report: with --jobs, each file logs its header,
     then later its command. Both files are made to log their header before
     either logs its command, which used to put both commands under the
-    second header."""
+    second header. Lines must still print as they happen, not at the end."""
     make_videos(tmp_path, 2)
     barrier = threading.Barrier(2, timeout=5)
 
     def fake_process_file(path, args, position=0, header="", on_progress=None):
-        ssd.log.info(f"{path.name} checked")
+        ssd.log.info(f"\n{header}\n  {path.name} checked")
         barrier.wait()
-        ssd.log.info(f"{path.name} command")
+        ssd.log.info(f"    {path.name} command")
         return "changed"
 
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
@@ -1541,12 +1566,10 @@ def test_jobs_shows_each_files_lines_together(tmp_path, monkeypatch, capsys):
                                       "--no-progress", "--jobs", "2"])
     ssd.main()
 
-    lines = [line for line in capsys.readouterr().out.splitlines()
+    pairs = [(owner, line) for owner, line in under_headers(capsys.readouterr().out.splitlines())
              if line.endswith((" checked", " command"))]
-    assert len(lines) == 4
-    for checked, command in (lines[0:2], lines[2:4]):
-        name = checked.split()[0]
-        assert (checked, command) == (f"{name} checked", f"{name} command")
+    assert len(pairs) == 4
+    assert all(line.split()[0] == owner for owner, line in pairs)
 
 
 def test_ctrl_c_with_jobs_skips_files_that_havent_started(tmp_path, monkeypatch):

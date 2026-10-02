@@ -195,50 +195,61 @@ def setup_logging(log_file):
     log.addHandler(console)
 
 
-_group = threading.local()
-"""Per thread: the log records held back by grouped_log(), or None when
-that thread's messages are shown straight away."""
+_file_context = threading.local()
+"""Per thread: the "[i/N] path" header of the file it's working on, or None
+outside file_context()."""
 
-_group_flush_lock = threading.Lock()
-"""Makes each grouped_log() block print in one piece, so two files' blocks
-can't mix."""
+_last_header = [None]
+"""The header of the file that printed the most recent line."""
+
+_print_lock = threading.Lock()
+"""Makes choosing whether to repeat a header and printing the line one step,
+so another file's line can't land in between."""
 
 
-class _GroupFilter(logging.Filter):
-    """Holds back a record instead of passing it on while its thread is
-    inside grouped_log()."""
+class _FileHeaderFilter(logging.Filter):
+    """Keeps every line under its own file's header when several files are
+    worked on at once (--jobs > 1).
+
+    Each file logs at several moments: its header and decision, then later
+    its command, warnings or result. Meanwhile other files print their own
+    lines. So before printing a line, this checks which file printed last;
+    if it was a different one, the line's own header is printed again
+    first. Lines still appear as they happen.
+
+    The check and the printing must happen as one step, or two files
+    printing at the same moment could still mix. The filter runs before
+    anything is printed, so it takes the lock, adds the header if needed,
+    hands the line to the handlers itself, and returns False so it isn't
+    printed twice. Lines logged outside file_context() pass straight
+    through."""
 
     def filter(self, record):
-        held = getattr(_group, "records", None)
-        if held is None:
+        header = getattr(_file_context, "header", None)
+        if header is None:
             return True
-        held.append(record)
+        with _print_lock:
+            message = record.getMessage()
+            if _last_header[0] != header and not message.startswith(f"\n{header}\n"):
+                record.msg, record.args = f"\n{header}\n{message}", None
+            _last_header[0] = header
+            log.callHandlers(record)
         return False
 
 
-log.addFilter(_GroupFilter())
+log.addFilter(_FileHeaderFilter())
 
 
 @contextlib.contextmanager
-def grouped_log():
-    """Hold back everything this thread logs inside the block, then show it
-    all at once, in order, when the block ends.
-
-    With --jobs > 1 several files are worked on at once, and each logs at
-    several moments: its header, then later its command or result. Shown
-    as they happen, a file's later lines landed under another file's
-    header. Grouped, each file's lines read as one block, shown when the
-    file is done. Records keep their level and time, so warnings still
-    reach the console with --log-file, and the log file shows when each
-    line happened."""
-    _group.records = []
+def file_context(header):
+    """Mark this thread as working on the file with this "[i/N] path" header
+    until the block ends, so its lines are kept under that header (see
+    _FileHeaderFilter)."""
+    _file_context.header = header
     try:
         yield
     finally:
-        records, _group.records = _group.records, None
-        with _group_flush_lock:
-            for record in records:
-                log.handle(record)
+        _file_context.header = None
 
 
 _active_procs = set()
@@ -1071,9 +1082,9 @@ def main():
     - The blank line between the bars is an empty tqdm bar, not a print():
       tqdm can't account for output it didn't write, and would draw the
       bars in the wrong place.
-    - With --jobs > 1, each file's messages are held back and shown as one
-      block when it's done (grouped_log()), so they can't land under
-      another file's header.
+    - With --jobs > 1, lines from different files print as they happen, and
+      a file's header is repeated when another file printed in between
+      (_FileHeaderFilter), so no line lands under the wrong header.
     - With --log-file, the "Found N file(s)" line and the summary are also
       printed, so they stay on the console.
 
@@ -1133,9 +1144,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
                      help="Remux up to N files at once (default: 1). The work is limited by "
                           "disk speed, not CPU, so choose N for what your storage can handle. "
-                          "Above 1, only the overall progress bar is shown, and each file's "
-                          "messages are shown together once it's done, so files appear in "
-                          "the order they finish")
+                          "Above 1, only the overall progress bar is shown, and a file's "
+                          "[i/N] header is repeated when its lines follow another file's")
     args = ap.parse_args()
 
     if args.jobs < 1:
@@ -1241,8 +1251,8 @@ def main():
         def run_one(i, f):
             """Process file number i, keeping the overall bar in step. Returns
             "cancelled" without starting if a stop was already requested.
-            With --jobs > 1, the file's messages are shown together when it's
-            done (see grouped_log())."""
+            The file's lines are kept under its header, which is repeated
+            if another file printed in between (see _FileHeaderFilter)."""
             if _cancelled.is_set():
                 return "cancelled"
             last_reported = 0.0
@@ -1255,8 +1265,9 @@ def main():
                 advance_overall(frac - last_reported)
                 last_reported = frac
 
-            with grouped_log() if args.jobs > 1 else contextlib.nullcontext():
-                result = process_file(f, args, header=f"[{i}/{len(files)}] {f}",
+            header = f"[{i}/{len(files)}] {f}"
+            with file_context(header):
+                result = process_file(f, args, header=header,
                                        on_progress=on_progress if overall else None)
 
             if overall:
