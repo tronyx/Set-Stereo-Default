@@ -233,6 +233,19 @@ def test_jobs_must_be_at_least_1(tmp_path, monkeypatch, capsys):
     assert "--jobs must be >= 1" in capsys.readouterr().err
 
 
+def test_existing_backups_needs_backup(tmp_path, monkeypatch, capsys):
+    """Without --backup no backup is made, so --existing-backups would be
+    silently ignored; most likely --backup was forgotten."""
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
+                                      "--existing-backups", "replace"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    assert exit_info.value.code == 2
+    assert "--existing-backups only applies with --backup" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("missing, need_mkvmerge, reported", [
     ([], True, None),
     (["mkvmerge"], False, None),

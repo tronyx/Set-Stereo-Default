@@ -1089,6 +1089,8 @@ def main():
 
     if args.jobs < 1:
         ap.error("--jobs must be >= 1")
+    if args.existing_backups and not args.backup:
+        ap.error("--existing-backups only applies with --backup; add --backup to keep backups")
     if args.prefer_lang is not None and not re.fullmatch("[a-z]{3}",
                                                          normalize_language(args.prefer_lang)):
         ap.error(f"--prefer-lang {args.prefer_lang!r} isn't a language code; use a 2- or "
