@@ -70,6 +70,7 @@ Full guide: https://github.com/tronyx/Set-Stereo-Default
 """
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -192,6 +193,52 @@ def setup_logging(log_file):
         log.addHandler(handler)
         console.setLevel(logging.WARNING)
     log.addHandler(console)
+
+
+_group = threading.local()
+"""Per thread: the log records held back by grouped_log(), or None when
+that thread's messages are shown straight away."""
+
+_group_flush_lock = threading.Lock()
+"""Makes each grouped_log() block print in one piece, so two files' blocks
+can't mix."""
+
+
+class _GroupFilter(logging.Filter):
+    """Holds back a record instead of passing it on while its thread is
+    inside grouped_log()."""
+
+    def filter(self, record):
+        held = getattr(_group, "records", None)
+        if held is None:
+            return True
+        held.append(record)
+        return False
+
+
+log.addFilter(_GroupFilter())
+
+
+@contextlib.contextmanager
+def grouped_log():
+    """Hold back everything this thread logs inside the block, then show it
+    all at once, in order, when the block ends.
+
+    With --jobs > 1 several files are worked on at once, and each logs at
+    several moments: its header, then later its command or result. Shown
+    as they happen, a file's later lines landed under another file's
+    header. Grouped, each file's lines read as one block, shown when the
+    file is done. Records keep their level and time, so warnings still
+    reach the console with --log-file, and the log file shows when each
+    line happened."""
+    _group.records = []
+    try:
+        yield
+    finally:
+        records, _group.records = _group.records, None
+        with _group_flush_lock:
+            for record in records:
+                log.handle(record)
 
 
 _active_procs = set()
@@ -1024,6 +1071,9 @@ def main():
     - The blank line between the bars is an empty tqdm bar, not a print():
       tqdm can't account for output it didn't write, and would draw the
       bars in the wrong place.
+    - With --jobs > 1, each file's messages are held back and shown as one
+      block when it's done (grouped_log()), so they can't land under
+      another file's header.
     - With --log-file, the "Found N file(s)" line and the summary are also
       printed, so they stay on the console.
 
@@ -1083,8 +1133,9 @@ def main():
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
                      help="Remux up to N files at once (default: 1). The work is limited by "
                           "disk speed, not CPU, so choose N for what your storage can handle. "
-                          "Above 1, only the overall progress bar is shown and log lines from "
-                          "different files may interleave")
+                          "Above 1, only the overall progress bar is shown, and each file's "
+                          "messages are shown together once it's done, so files appear in "
+                          "the order they finish")
     args = ap.parse_args()
 
     if args.jobs < 1:
@@ -1187,7 +1238,9 @@ def main():
 
         def run_one(i, f):
             """Process file number i, keeping the overall bar in step. Returns
-            "cancelled" without starting if a stop was already requested."""
+            "cancelled" without starting if a stop was already requested.
+            With --jobs > 1, the file's messages are shown together when it's
+            done (see grouped_log())."""
             if _cancelled.is_set():
                 return "cancelled"
             last_reported = 0.0
@@ -1200,8 +1253,9 @@ def main():
                 advance_overall(frac - last_reported)
                 last_reported = frac
 
-            result = process_file(f, args, header=f"[{i}/{len(files)}] {f}",
-                                   on_progress=on_progress if overall else None)
+            with grouped_log() if args.jobs > 1 else contextlib.nullcontext():
+                result = process_file(f, args, header=f"[{i}/{len(files)}] {f}",
+                                       on_progress=on_progress if overall else None)
 
             if overall:
                 advance_overall(1.0 - last_reported)

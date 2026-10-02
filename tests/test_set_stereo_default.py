@@ -1482,6 +1482,73 @@ def make_videos(folder, count):
         (folder / f"e{i:02}.mkv").write_text("x")
 
 
+def test_grouped_log_keeps_each_threads_messages_together(caplog):
+    """Both threads log their first line, wait until the other has too, then
+    log their second, so without grouping the lines would interleave every
+    time. Grouped, each thread's lines come out together, in order, with
+    their levels kept."""
+    caplog.set_level("INFO")
+    barrier = threading.Barrier(2, timeout=5)
+
+    def work(name):
+        with ssd.grouped_log():
+            ssd.log.info(f"{name} first")
+            barrier.wait()
+            ssd.log.warning(f"{name} second")
+
+    threads = [threading.Thread(target=work, args=(name,)) for name in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    shown = [(r.getMessage(), r.levelname) for r in caplog.records]
+    assert len(shown) == 4
+    for first, second in (shown[0:2], shown[2:4]):
+        name = first[0].split()[0]
+        assert first == (f"{name} first", "INFO")
+        assert second == (f"{name} second", "WARNING")
+
+
+def test_grouped_log_shows_messages_straight_away_after_the_block(caplog):
+    caplog.set_level("INFO")
+    with ssd.grouped_log():
+        ssd.log.info("held")
+        assert caplog.records == []
+    assert [r.getMessage() for r in caplog.records] == ["held"]
+
+    ssd.log.info("not held")
+    assert caplog.records[-1].getMessage() == "not held"
+
+
+def test_jobs_shows_each_files_lines_together(tmp_path, monkeypatch, capsys):
+    """The run from the bug report: with --jobs, each file logs its header,
+    then later its command. Both files are made to log their header before
+    either logs its command, which used to put both commands under the
+    second header."""
+    make_videos(tmp_path, 2)
+    barrier = threading.Barrier(2, timeout=5)
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        ssd.log.info(f"{path.name} checked")
+        barrier.wait()
+        ssd.log.info(f"{path.name} command")
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
+                                      "--no-progress", "--jobs", "2"])
+    ssd.main()
+
+    lines = [line for line in capsys.readouterr().out.splitlines()
+             if line.endswith((" checked", " command"))]
+    assert len(lines) == 4
+    for checked, command in (lines[0:2], lines[2:4]):
+        name = checked.split()[0]
+        assert (checked, command) == (f"{name} checked", f"{name} command")
+
+
 def test_ctrl_c_with_jobs_skips_files_that_havent_started(tmp_path, monkeypatch):
     """Leaving the thread pool waits for its workers, which kept taking
     queued files after Ctrl+C until the whole queue had been remuxed."""
