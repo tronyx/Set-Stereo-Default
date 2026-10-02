@@ -315,6 +315,8 @@ def library(tmp_path):
 
 
 def names(paths, root):
+    """paths relative to root, sorted and with forward slashes, so results
+    compare the same way on every system."""
     return sorted(p.relative_to(root).as_posix() for p in paths)
 
 
@@ -824,10 +826,14 @@ def test_swap_in_warns_once_when_the_owner_cant_be_changed(tmp_path, monkeypatch
 
 
 def remux_with_mkvmerge(path):
+    """Fix path with apply_mkv(), as if it had ORIGINAL_AUDIO's tracks,
+    keeping a backup."""
     return ssd.apply_mkv(path, ORIGINAL_AUDIO, 2, dry_run=False, backup=True)
 
 
 def remux_with_ffmpeg(path):
+    """Fix path with apply_remux(), as if it had ORIGINAL_AUDIO's tracks,
+    keeping a backup."""
     return ssd.apply_remux(path, ORIGINAL_AUDIO, 2, dry_run=False, backup=True,
                            reorder_for_avi=False, duration=100.0)
 
@@ -835,10 +841,13 @@ def remux_with_ffmpeg(path):
 @pytest.fixture(params=[(remux_with_mkvmerge, "v.mkv"), (remux_with_ffmpeg, "v.mp4")],
                 ids=["mkvmerge", "ffmpeg"])
 def remux(request, tmp_path, monkeypatch):
-    """Returns (apply, video, set_outcome). Instead of running a real remux,
-    the stand-in writes "remuxed" to the temp file; set_outcome("fail"),
-    set_outcome("warn"), set_outcome("interrupt") or set_outcome(<reason>)
-    changes what happens."""
+    """Runs each test once with mkvmerge and once with ffmpeg. Returns
+    (apply, video, set_outcome): apply() fixes video, which starts out
+    containing "original". No real remux runs: the stand-in writes
+    "remuxed" to the temp file and succeeds, unless set_outcome() says
+    otherwise first. "fail" makes the tool exit with an error, "warn" exit
+    with code 1 and a warning, and "interrupt" raise KeyboardInterrupt.
+    Any other string makes the post-remux check fail with that reason."""
     apply, filename = request.param
     video = tmp_path / filename
     video.write_bytes(b"original")
@@ -865,6 +874,7 @@ def remux(request, tmp_path, monkeypatch):
 
 
 def leftover_temp_files(video):
+    """Any temp remux files left next to video."""
     return list(video.parent.glob("*" + ssd.TMP_MARKER + "*"))
 
 
@@ -1411,6 +1421,9 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
 
 
 def make_videos(folder, count):
+    """Create count placeholder videos in folder: e00.mkv, e01.mkv, ... Only
+    their names matter, since the tests that use them replace
+    process_file()."""
     for i in range(count):
         (folder / f"e{i:02}.mkv").write_text("x")
 

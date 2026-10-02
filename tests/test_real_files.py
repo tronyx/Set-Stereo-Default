@@ -18,7 +18,10 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "set_stereo_default.py"
+"""The script under test, run as a separate program like a user would."""
+
 LAYOUTS = {2: "stereo", 6: "5.1"}
+"""ffmpeg's channel layout name for each channel count make_video() supports."""
 
 
 def need(*tools):
@@ -111,6 +114,7 @@ def top_level_boxes(path):
 
 
 def digest(path):
+    """SHA-256 of path's contents, to tell whether a file changed at all."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
