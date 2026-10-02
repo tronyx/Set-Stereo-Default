@@ -11,6 +11,16 @@
 
 Plenty of ripped and downloaded videos flag a 5.1 or 7.1 surround track as the default audio. On a TV, soundbar or laptop, that often means quiet dialogue and booming effects. `set_stereo_default.py` finds the 2-channel stereo track in each file and makes it the default instead. Nothing is re-encoded, so picture and sound quality stay exactly the same.
 
+Here's a typical movie before and after:
+
+| Audio track | Before | After |
+| --- | :---: | :---: |
+| English, 5.1 surround | ✅ default | |
+| English, stereo | | ✅ default |
+| Director's commentary, stereo | | |
+
+The commentary is stereo too, but it's never picked (see [Picking the track](#-picking-the-track)).
+
 > [!WARNING]
 > **This is beta software.** It's been tested heavily on my own library, but it's still early. Try it on a few files first, start with `--dry-run`, and use `--backup` until you're happy with how it behaves.
 
@@ -46,7 +56,7 @@ Each file is rewritten to a temporary copy next to the original before it's swap
 
 ## 📦 Installation
 
-1. Get the script:
+1. Get the script, and optionally tqdm for the progress bars:
 
    ```bash
    git clone https://github.com/tronyx/Set-Stereo-Default.git
@@ -87,6 +97,8 @@ python3 set_stereo_default.py "/path/to/videos"
 
 Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
 
+On Windows, type `py` instead of `python3`.
+
 ## ⚙️ Options
 
 | Option | What it does |
@@ -102,7 +114,7 @@ Folders are searched recursively. You can also pass individual files, or a mix o
 | `--skip-symlinks` | Skip symlinked files. By default, the file a link points to is fixed and the link keeps working |
 | `--follow-symlinks` | Also look inside symlinked subfolders. By default they're skipped (folders you name on the command line are always searched) |
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](#-changing-the-file)) |
-| `--force` | Remux even files that are already correct |
+| `--force` | Remux even files that are already correct, e.g. to restore thumbnails (see [Troubleshooting](#-troubleshooting)) |
 | `--keep-dates` | Give each changed file the original's modification date, so it doesn't look newly changed (see [File dates](#-file-dates)) |
 | `--no-progress` | Hide the progress bars, e.g. for cron or CI logs |
 
@@ -290,13 +302,31 @@ Even though nothing is re-encoded, the remuxed file's bytes are different, so it
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Finished, with no errors |
+| `0` | Finished with no errors, or you chose **q** at the [backup question](#-backups) |
 | `1` | No matching files found, a required tool is missing, or at least one file ended up as an `error` |
 | `2` | Invalid command-line options |
 | `130` | Stopped with Ctrl+C |
 | `143` | Stopped with SIGTERM |
 
 If you're running this from cron or another script, the exit code tells you whether anything went wrong. The printed summary has the details.
+
+## 🩺 Troubleshooting
+
+Every skipped or failed file gets a line saying why. Here's what the common ones mean.
+
+**`SKIP (...)` on a file you expected to change.** Usually the stereo track is in a different language from the current default, or several stereo tracks qualify. Both are settled with `--prefer-lang`. See [Picking the track](#-picking-the-track).
+
+**`post-remux check failed (duration dropped from ...)`.** The original contains less than its header claims, usually because it's an incomplete download. It's left untouched; re-download it or check it in a player. See [Changing the file](#-changing-the-file).
+
+**`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
+
+**`Couldn't give remuxed files their original owner`.** The new files work, but belong to whoever ran the script. See [Permissions and ownership](#-permissions-and-ownership).
+
+**`Skipping leftover temp file`.** An earlier run was killed mid-file. The temp file is safe to delete. See [Leftover temp files](#-leftover-temp-files).
+
+**No thumbnail in Windows Explorer.** If another tool (such as `mkvpropedit`) edited the file in place, its track list may have moved to the end of the file, where Explorer doesn't look. `--force` remuxes the file even when the right track is already default, which puts everything back where it belongs.
+
+**`Missing required tool(s)`.** ffmpeg, ffprobe or mkvmerge isn't on your `PATH`. See [Installation](#-installation).
 
 ## 🧪 Running the tests
 
@@ -308,7 +338,7 @@ python -m pytest
 There are two sets of tests:
 
 - **Logic tests** ([tests/test_set_stereo_default.py](tests/test_set_stereo_default.py)) cover the script's own decisions: picking the track, finding files, backups, checking a remux, progress reporting and clean stopping. They stand in for ffmpeg and mkvmerge, so they run anywhere.
-- **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4 and AVI files for each case the script handles, run the script on them, and check the results. They need ffmpeg, ffprobe and mkvmerge on your `PATH`, and are skipped if those aren't installed.
+- **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4 and AVI files for each case the script handles, run the script on them, and check the results. They need ffmpeg, ffprobe and mkvmerge on your `PATH`, and are skipped if those aren't installed. Set `REQUIRE_MEDIA_TOOLS=1` to make a missing tool fail them instead, as GitHub does.
 
 GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions, and on Windows too, and the real-file tests run against every ffmpeg version listed under [Requirements](#-requirements).
 
