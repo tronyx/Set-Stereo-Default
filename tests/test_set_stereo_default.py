@@ -1723,6 +1723,37 @@ def test_lines_outside_a_file_pass_straight_through(caplog):
     assert caplog.records[0].getMessage() == "Found 2 file(s)."
 
 
+def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys):
+    """The run from the bug report: in a --jobs dry run, each file printed
+    its "setting ..." line after ffprobe, then its command after the
+    mkvmerge lookup, by which time other files had printed, so its header
+    was repeated. Both files are held at the lookup until both get there;
+    the "setting ..." line now waits for the command and prints with it."""
+    make_videos(tmp_path, 2)
+    barrier = threading.Barrier(2, timeout=5)
+
+    def slow_ids(path):
+        barrier.wait()
+        return [1, 2]
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "probe_audio_streams",
+                        lambda path: ([dict(s) for s in ORIGINAL_AUDIO], 100.0))
+    monkeypatch.setattr(ssd, "mkvmerge_audio_ids", slow_ids)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
+                                      "--jobs", "2", "--dry-run"])
+    ssd.main()
+
+    lines = capsys.readouterr().out.splitlines()
+    headers = [line for line in lines if line.startswith("[")]
+    assert sorted(headers) == [f"[1/2] {tmp_path / 'e00.mkv'}", f"[2/2] {tmp_path / 'e01.mkv'}"]
+    for header in headers:
+        name = Path(header.split("] ", 1)[1]).name
+        at = lines.index(header)
+        assert lines[at + 1].startswith(f"  {name}: setting stream#2")
+        assert lines[at + 2].startswith("    [dry-run] mkvmerge") and name in lines[at + 2]
+
+
 def test_jobs_keeps_each_files_lines_under_its_own_header(tmp_path, monkeypatch, capsys):
     """The run from the bug report: with --jobs, each file logs its header,
     then later its command. Both files are made to log their header before

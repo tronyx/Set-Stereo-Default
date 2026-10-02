@@ -330,6 +330,22 @@ def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
     assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
 
 
+def test_a_jobs_dry_run_shows_each_files_header_once(tmp_path):
+    """With --jobs, each file's "setting ..." line and dry-run command come
+    out together, so its [i/N] header is never printed a second time."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    for i in range(4):
+        make_video(tmp_path / f"e{i}.mkv", [Track(6, default=True), Track(2)])
+
+    code, output = run_script(tmp_path, "--jobs", "2", "--dry-run")
+
+    assert code == 0, output
+    headers = [line for line in output.splitlines() if line.startswith("[")]
+    assert sorted(headers) == sorted(f"[{i}/4] {tmp_path / f'e{i - 1}.mkv'}" for i in range(1, 5)), \
+        output
+    assert output.count("[dry-run] mkvmerge") == 4
+
+
 def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path):
     need("ffmpeg", "ffprobe", "mkvmerge")
     make_video(tmp_path / "fix.mkv", [Track(6, default=True), Track(2)])

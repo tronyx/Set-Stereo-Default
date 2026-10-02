@@ -806,11 +806,23 @@ def mkvmerge_audio_ids(path):
     return [t["id"] for t in tracks if t.get("type") == "audio"]
 
 
+def _announce(intro, line=None):
+    """Log a file's intro (its header and what's about to happen, from
+    _process_file()) and line together, as one message. With --jobs > 1,
+    nothing from another file can then land between the two, so the
+    file's header isn't printed a second time for line (see
+    _FileHeaderFilter). Either can be None."""
+    text = "\n".join(part for part in (intro, line) if part)
+    if text:
+        log.info(text)
+
+
 def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
-              on_progress=None, keep_dates=False):
+              on_progress=None, keep_dates=False, intro=None):
     """Remux an MKV/WebM file with mkvmerge so only target_index is flagged
     default. Returns True on success, False on failure (already logged).
-    With dry_run, just logs the command.
+    With dry_run, just logs the command. intro, if given, is logged with
+    the command, or just before the remux starts (see _announce()).
 
     A full remux is used instead of an in-place mkvpropedit edit, which can
     move the track list to the end of the file and break Windows Explorer
@@ -840,6 +852,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     ids = mkvmerge_audio_ids(path)
     if ids is None or len(ids) != len(streams):
         found = "couldn't read the file" if ids is None else f"sees {len(ids)} audio track(s)"
+        _announce(intro)
         log.error(f"    {path.name}: mkvmerge {found}, but ffprobe sees {len(streams)}; "
                   f"leaving the file alone")
         return False
@@ -851,8 +864,9 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     args += [str(path)]
 
     if dry_run:
-        log.info("    [dry-run] " + shlex.join(args))
+        _announce(intro, "    [dry-run] " + shlex.join(args))
         return True
+    _announce(intro)
 
     pct_re = re.compile(r"#GUI#progress\s+(\d+)%")
 
@@ -888,10 +902,12 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
 
 def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
                  duration=None, show_progress=False, position=0, on_progress=None,
-                 keep_dates=False):
+                 keep_dates=False, intro=None):
     """Remux any non-MKV file with ffmpeg (-c copy, so nothing is re-encoded)
     so only target_index is flagged default. Returns True on success, False
-    on failure (already logged). With dry_run, just logs the command.
+    on failure (already logged). With dry_run, just logs the command. intro,
+    if given, is logged with the command, or just before the remux starts
+    (see _announce()).
 
     With reorder_for_avi, an AVI file instead gets the target moved to the
     first audio track, since AVI has no default flag. MP4/M4V/MOV files get
@@ -934,8 +950,9 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     ] + disp_args + extra_args + [str(tmp_path)]
 
     if dry_run:
-        log.info("    [dry-run] " + shlex.join(cmd))
+        _announce(intro, "    [dry-run] " + shlex.join(cmd))
         return True
+    _announce(intro)
 
     progress_re = re.compile(r"[a-z0-9_]+=")
 
@@ -991,7 +1008,12 @@ def process_file(path, args, position=0, header="", on_progress=None):
 def _process_file(path, args, position=0, header="", on_progress=None):
     """The work behind process_file(). For AVI files with --avi-reorder,
     "already correct" means the target is already the first audio track.
-    --force remuxes even files that are already correct."""
+    --force remuxes even files that are already correct.
+
+    The "setting stream#N ..." line isn't logged here but handed to
+    apply_mkv()/apply_remux() as intro. They log it with the dry-run
+    command, or as the remux starts, so in a --jobs dry run each file's
+    lines come out together under one header."""
     prefix = f"\n{header}\n" if header else ""
     ext = path.suffix.lower()
     is_avi_reorder = ext in AVI_EXTS and args.avi_reorder
@@ -1028,18 +1050,19 @@ def _process_file(path, args, position=0, header="", on_progress=None):
 
     action = "moving" if is_avi_reorder else "setting"
     outcome = "to the first audio track" if is_avi_reorder else "as default audio"
-    log.info(f"{prefix}  {path.name}: {action} stream#{target['index']} "
+    intro = (f"{prefix}  {path.name}: {action} stream#{target['index']} "
              f"({target['language'] or 'und'}, {target['codec']}) {outcome}")
 
     show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1
 
     if ext in MKV_EXTS:
         ok = apply_mkv(path, streams, target["index"], args.dry_run, args.backup,
-                        show_progress, position, on_progress, args.keep_dates)
+                        show_progress, position, on_progress, args.keep_dates, intro=intro)
     else:
         ok = apply_remux(path, streams, target["index"], args.dry_run,
                           args.backup, is_avi_reorder,
-                          duration, show_progress, position, on_progress, args.keep_dates)
+                          duration, show_progress, position, on_progress, args.keep_dates,
+                          intro=intro)
 
     return "changed" if ok else "error"
 
