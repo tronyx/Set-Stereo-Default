@@ -83,7 +83,7 @@ python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
 python3 set_stereo_default.py "/path/to/videos"
 ```
 
-Folders are searched recursively. You can also pass individual files, or a mix of files and folders.
+Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
 
 ## ⚙️ Options
 

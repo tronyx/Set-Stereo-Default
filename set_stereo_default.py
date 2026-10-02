@@ -913,7 +913,10 @@ def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=Fals
 
     A run killed outright (kill -9, a reboot) can leave a temp file such as
     "name.mkv.tmp_remux.mkv", which still ends in .mkv. Those are skipped
-    with a warning instead of being treated as videos."""
+    with a warning instead of being treated as videos.
+
+    A path that doesn't exist (a typo, an unmounted share) is skipped with a
+    warning, so a mistake in one of several paths doesn't go unnoticed."""
     seen = set()
     for p in paths:
         p = Path(p)
@@ -921,7 +924,11 @@ def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=Fals
             candidates = [p]
         elif p.is_dir():
             candidates = _walk(p, recursive, follow_symlinks)
+        elif not p.exists():
+            log.warning(f"Skipping {p}: no such file or directory")
+            continue
         else:
+            log.warning(f"Skipping {p}: not a file or directory")
             continue
         for f in candidates:
             if f.suffix.lower() not in exts:

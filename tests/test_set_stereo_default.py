@@ -298,6 +298,48 @@ def test_iter_files_warns_about_leftover_temp_files(library, caplog):
     assert "safe to delete" in caplog.text
 
 
+def test_iter_files_warns_about_a_path_that_doesnt_exist(library, caplog):
+    typo = library.parent / "vidoes"
+
+    found = ssd.iter_files([typo, library], ssd.DEFAULT_EXTS, recursive=True)
+
+    assert names(found, library) == ["Season 01/c.mkv", "a.mkv", "b.MP4"]
+    assert f"Skipping {typo}: no such file or directory" in caplog.text
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a named pipe (not on Windows)")
+def test_iter_files_warns_about_a_path_that_isnt_a_file_or_folder(tmp_path, caplog):
+    pipe = tmp_path / "pipe.mkv"
+    os.mkfifo(pipe)
+
+    assert list(ssd.iter_files([pipe], ssd.DEFAULT_EXTS, recursive=True)) == []
+    assert f"Skipping {pipe}: not a file or directory" in caplog.text
+
+
+def test_a_mistyped_path_is_reported_on_the_console_and_the_rest_still_run(tmp_path, monkeypatch,
+                                                                         capsys):
+    """The warning must show even with --log-file, where only warnings and
+    errors reach the console."""
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    make_videos(videos, 2)
+    typo = tmp_path / "vidoes"
+    processed = []
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        processed.append(path.name)
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(typo), str(videos),
+                                      "--no-progress", "--log-file", str(tmp_path / "run.log")])
+
+    ssd.main()
+
+    assert f"Skipping {typo}: no such file or directory" in capsys.readouterr().out
+    assert sorted(processed) == ["e00.mkv", "e01.mkv"]
+
 @pytest.fixture
 def linked(tmp_path):
     """A library folder full of symlinks, next to the real files they point
