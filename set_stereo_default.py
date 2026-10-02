@@ -39,12 +39,16 @@ Safe by default:
     original. --backup also keeps the original as <name>.bak.
   - Ctrl+C or SIGTERM (docker stop, kill) stops cleanly and removes any
     half-written temp files.
+  - A symlinked file is fixed through its link: the file it points to is
+    changed and the link keeps working. --skip-symlinks skips them
+    instead, and --follow-symlinks also searches symlinked subfolders.
 
 Examples:
   python3 set_stereo_default.py /path/to/videos
   python3 set_stereo_default.py /path/to/videos --dry-run
   python3 set_stereo_default.py file1.mkv file2.mp4
   python3 set_stereo_default.py /path/to/videos --ext mkv,mp4 --no-recursive
+  python3 set_stereo_default.py /path/to/videos --follow-symlinks
   python3 set_stereo_default.py /path/to/videos --prefer-lang eng
   python3 set_stereo_default.py /path/to/videos --avi-reorder
   python3 set_stereo_default.py /path/to/videos --backup
@@ -749,30 +753,83 @@ def _process_file(path, args, position=0, header="", on_progress=None):
     return "changed" if ok else "error"
 
 
-def iter_files(paths, exts, recursive):
+def _walk(folder, recursive, follow_symlinks):
+    """Yield the path of every entry in folder that isn't a folder, and with
+    recursive, in its subfolders too. os.walk() is used rather than
+    Path.rglob(), whose handling of symlinked folders differs between
+    Python versions.
+
+    Symlinked subfolders are only searched with follow_symlinks; otherwise
+    each one is logged, so it's clear why its files weren't found. Every
+    folder is searched at most once, so a symlink loop can't make the
+    search run forever."""
+    visited = set()
+    for dirpath, dirnames, filenames in os.walk(folder, followlinks=follow_symlinks):
+        real = os.path.realpath(dirpath)
+        if real in visited:
+            dirnames[:] = []
+            continue
+        visited.add(real)
+        if not recursive:
+            dirnames[:] = []
+        elif not follow_symlinks:
+            for name in dirnames:
+                if os.path.islink(os.path.join(dirpath, name)):
+                    log.info(f"Not searching symlinked folder (use --follow-symlinks): "
+                             f"{os.path.join(dirpath, name)}")
+        for name in filenames:
+            yield Path(dirpath) / name
+
+
+def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=False):
     """Yield every file in paths with an extension in exts. Files are used
     as given; folders are searched (into subfolders if recursive). The
     extension is checked before touching the disk, so non-video files
     (.nfo, .jpg, .srt, ...) cost nothing.
 
+    A symlinked file is yielded as the file it points to, so that file gets
+    fixed and the link keeps working; replacing the link itself would turn
+    it into a separate copy. With skip_symlinks, linked files are skipped
+    instead. Symlinked subfolders are only searched with follow_symlinks
+    (see _walk()); a folder named in paths is always searched. A file
+    reached by more than one path (through links, or given twice) is only
+    yielded once.
+
     A run killed outright (kill -9, a reboot) can leave a temp file such as
     "name.mkv.tmp_remux.mkv", which still ends in .mkv. Those are skipped
     with a warning instead of being treated as videos."""
+    seen = set()
     for p in paths:
         p = Path(p)
         if p.is_file():
             candidates = [p]
         elif p.is_dir():
-            candidates = p.rglob("*") if recursive else p.glob("*")
+            candidates = _walk(p, recursive, follow_symlinks)
         else:
             continue
         for f in candidates:
-            if f.suffix.lower() not in exts or not f.is_file():
+            if f.suffix.lower() not in exts:
+                continue
+            if f.is_symlink():
+                if skip_symlinks:
+                    log.info(f"Skipping symlink (--skip-symlinks): {f}")
+                    continue
+                target = f.resolve()
+                if target.suffix.lower() not in exts:
+                    log.info(f"Skipping symlink to a file without a video extension: "
+                             f"{f} -> {target}")
+                    continue
+                f = target
+            if not f.is_file():
                 continue
             if f.stem.endswith(TMP_MARKER):
                 log.warning(f"Skipping leftover temp file from an interrupted run "
                             f"(safe to delete): {f}")
                 continue
+            real = f.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
             yield f
 
 
@@ -811,6 +868,12 @@ def main():
                      help="Comma-separated extensions to process, replacing the default list "
                           "(default: mkv,webm,mp4,m4v,mov,avi)")
     ap.add_argument("--no-recursive", action="store_true", help="Don't look inside subfolders")
+    ap.add_argument("--skip-symlinks", action="store_true",
+                     help="Skip symlinked files (default: fix the file the link points to, "
+                          "leaving the link as it is)")
+    ap.add_argument("--follow-symlinks", action="store_true",
+                     help="Also look inside symlinked subfolders (default: skip them; folders "
+                          "you name on the command line are always searched)")
     ap.add_argument("--dry-run", action="store_true",
                      help="Show what would change without touching any files")
     ap.add_argument("--backup", action="store_true",
@@ -847,7 +910,8 @@ def main():
 
     exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")} if args.ext else DEFAULT_EXTS
     try:
-        files = sorted(set(iter_files(args.paths, exts, not args.no_recursive)))
+        files = sorted(set(iter_files(args.paths, exts, not args.no_recursive,
+                                      args.skip_symlinks, args.follow_symlinks)))
     except KeyboardInterrupt as exc:
         signum, reason = _stop_reason(exc)
         log.error(f"{reason} while looking for files. No files were changed.")

@@ -284,3 +284,32 @@ def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path
     assert code == 0, output
     assert summary(output) == {"changed": 0, "unchanged": 3, "skipped": 1, "error": 0}, output
     assert {p: digest(p) for p in tmp_path.rglob("*.m*")} == digests
+
+
+@pytest.mark.parametrize("skip", [False, True], ids=["default", "--skip-symlinks"])
+def test_a_symlinked_file_is_fixed_through_its_link(tmp_path, skip):
+    """By default the file a link points to is fixed and the link survives.
+    With --skip-symlinks, neither is touched."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    real = make_video(tmp_path / "real.mkv", [Track(6, default=True), Track(2)])
+    library = tmp_path / "library"
+    library.mkdir()
+    link = library / "movie.mkv"
+    try:
+        link.symlink_to(real)
+    except OSError as exc:
+        pytest.skip(f"can't create symlinks here: {exc}")
+    before = digest(real)
+
+    code, output = run_script(library, *(["--skip-symlinks"] if skip else []))
+
+    assert link.is_symlink(), "the link was replaced"
+    assert link.resolve() == real.resolve()
+    assert not list(tmp_path.rglob("*.tmp_remux*")), "temp file left behind"
+    if skip:
+        assert code == 1 and "No matching files found" in output, output
+        assert digest(real) == before
+    else:
+        assert code == 0, output
+        assert summary(output)["changed"] == 1, output
+        assert audio_defaults(real) == [(6, False), (2, True)]

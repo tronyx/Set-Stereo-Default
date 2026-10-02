@@ -234,6 +234,78 @@ def test_iter_files_warns_about_leftover_temp_files(library, caplog):
     assert "safe to delete" in caplog.text
 
 
+@pytest.fixture
+def linked(tmp_path):
+    """A library folder full of symlinks, next to the real files they point
+    to. The path is fully resolved, since macOS keeps temp folders behind a
+    symlink (/var -> /private/var).
+
+        real/movie.mkv, real/notes.txt, real/show/ep1.mkv
+        lib/own.mkv                       an ordinary file
+        lib/movie.mkv, lib/again.mkv  ->  real/movie.mkv
+        lib/notes.mkv                 ->  real/notes.txt
+        lib/broken.mkv                ->  real/missing.mkv
+        lib/show                      ->  real/show
+        lib/loop                      ->  lib
+    """
+    root = tmp_path.resolve()
+    for name in ["real/movie.mkv", "real/notes.txt", "real/show/ep1.mkv", "lib/own.mkv"]:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("x")
+    links = {"lib/movie.mkv": "real/movie.mkv", "lib/again.mkv": "real/movie.mkv",
+             "lib/notes.mkv": "real/notes.txt", "lib/broken.mkv": "real/missing.mkv",
+             "lib/show": "real/show", "lib/loop": "lib"}
+    try:
+        for link, target in links.items():
+            (root / link).symlink_to(root / target, target_is_directory=(root / target).is_dir())
+    except OSError as exc:
+        pytest.skip(f"can't create symlinks here: {exc}")
+    return root
+
+
+def test_symlinked_files_are_found_as_the_file_they_point_to(linked, caplog):
+    caplog.set_level("INFO")
+    found = list(ssd.iter_files([linked / "lib"], ssd.DEFAULT_EXTS, recursive=True))
+
+    assert names(found, linked) == ["lib/own.mkv", "real/movie.mkv"]
+    assert "Not searching symlinked folder (use --follow-symlinks)" in caplog.text
+    assert "lib/show" in caplog.text
+    assert "symlink to a file without a video extension" in caplog.text
+
+
+def test_skip_symlinks_leaves_linked_files_out(linked, caplog):
+    caplog.set_level("INFO")
+    found = ssd.iter_files([linked / "lib"], ssd.DEFAULT_EXTS, recursive=True, skip_symlinks=True)
+
+    assert names(found, linked) == ["lib/own.mkv"]
+    assert "Skipping symlink (--skip-symlinks)" in caplog.text
+
+
+def test_follow_symlinks_searches_linked_folders_once_each(linked):
+    found = ssd.iter_files([linked / "lib"], ssd.DEFAULT_EXTS, recursive=True,
+                           follow_symlinks=True)
+
+    assert names(found, linked) == ["lib/own.mkv", "lib/show/ep1.mkv", "real/movie.mkv"]
+
+
+def test_a_symlinked_folder_named_on_the_command_line_is_searched(linked):
+    (linked / "shortcut").symlink_to(linked / "real" / "show", target_is_directory=True)
+
+    found = ssd.iter_files([linked / "shortcut"], ssd.DEFAULT_EXTS, recursive=True)
+
+    assert names(found, linked) == ["shortcut/ep1.mkv"]
+
+
+def test_a_file_given_more_than_once_is_found_once(linked, monkeypatch):
+    monkeypatch.chdir(linked)
+    paths = ["lib/own.mkv", linked / "lib" / "own.mkv", "lib/movie.mkv", "real/movie.mkv"]
+
+    found = ssd.iter_files(paths, ssd.DEFAULT_EXTS, recursive=True)
+
+    assert sorted(str(p.resolve()) for p in found) == [str(linked / "lib" / "own.mkv"),
+                                                        str(linked / "real" / "movie.mkv")]
+
+
 
 def test_make_backup_hard_links_and_replaces_a_stale_backup(tmp_path):
     video = tmp_path / "v.mkv"
@@ -946,7 +1018,7 @@ def test_signal_mid_run_prints_a_partial_summary(tmp_path, monkeypatch, capsys,
 ], ids=["SIGINT", "SIGTERM"])
 def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, capsys,
                                                       signum, code, message):
-    def interrupted_scan(paths, exts, recursive):
+    def interrupted_scan(*args, **kwargs):
         yield tmp_path / "a.mkv"
         signal.raise_signal(signum)
 

@@ -94,6 +94,8 @@ Folders are searched recursively. You can also pass individual files, or a mix o
 | `--log-file PATH` | Write the details to a file. Warnings, errors, the progress bar and the summary still show on the console |
 | `--ext EXT1,EXT2` | Extensions to process (default: `mkv,webm,mp4,m4v,mov,avi`). This replaces the default list, so list every extension you want |
 | `--no-recursive` | Don't look inside subfolders |
+| `--skip-symlinks` | Skip symlinked files. By default, the file a link points to is fixed and the link keeps working |
+| `--follow-symlinks` | Also look inside symlinked subfolders. By default they're skipped (folders you name on the command line are always searched) |
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](#-changing-the-file)) |
 | `--force` | Remux even files that are already correct |
 | `--no-progress` | Hide the progress bars, e.g. for cron or CI logs |
@@ -221,6 +223,12 @@ Every change is a **remux**: the audio and video are copied as-is into a new fil
 | `.mp4` `.m4v` `.mov` | Remuxed with `ffmpeg`, with the file's index kept at the front where thumbnailers expect it (`-movflags +faststart`). |
 | `.avi` | AVI has no "default track" flag. With `--avi-reorder`, the stereo track is moved to the front instead, which most players treat the same way. Without it, AVI files are skipped. |
 
+### 🪢 Symlinks
+
+A symlinked video is fixed through its link: the script changes the file the link points to, and the link keeps working. (Replacing the link itself would turn it into a separate copy and leave the real file unfixed.) A file reached through several links, or passed more than once, is only processed once. Use `--skip-symlinks` to leave linked files alone.
+
+Symlinked subfolders aren't searched unless you add `--follow-symlinks`; each one that's skipped is logged. Folders you name on the command line are always searched, even if they're symlinks themselves. With `--follow-symlinks`, a link that loops back on itself is only searched once.
+
 ### 🔐 Permissions and ownership
 
 A remux creates a brand-new file, so the script copies the original's permissions and owner onto it. That way tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it.
@@ -241,7 +249,7 @@ If the script is killed outright instead (`kill -9`, a power cut, a container th
 
 ### 🔗 Hard links will be broken
 
-If another path is hard-linked to the original (a common Sonarr/Radarr/qBittorrent setup, linking a download folder to a library folder), that path keeps pointing at the old, unfixed file, and the two no longer share disk space. If you rely on hard links, run this script *before* linking, or re-link the affected files afterwards.
+If another path is hard-linked to the original (a common Sonarr/Radarr/qBittorrent setup, linking a download folder to a library folder), that path keeps pointing at the old, unfixed file, and the two no longer share disk space. If you rely on hard links, run this script *before* linking, or re-link the affected files afterwards. (Symlinks don't have this problem; see [Symlinks](#-symlinks).)
 
 ### 🌱 Seeding and cross-seeding will break
 
