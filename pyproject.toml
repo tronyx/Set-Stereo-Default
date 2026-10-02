@@ -1,0 +1,18 @@
+# Settings for the checks GitHub runs on every push (see .github/workflows/tests.yml).
+# Only ruff and mypy read this file; it isn't needed to use the script.
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Catching a broad Exception is deliberate in the three places it's done: a log
+# handler that must never crash, best-effort cleanup when stopping, and
+# process_file()'s guard that keeps one bad file from ending the whole run.
+ignore = ["BLE001"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["set_stereo_default.py"]
+check_untyped_defs = true
+# tqdm is optional and doesn't ship type information.
+ignore_missing_imports = true

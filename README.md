@@ -119,7 +119,7 @@ On Windows, type `py` instead of `python3`.
 | `--no-progress` | Hide the progress bars, e.g. for cron or CI logs |
 
 > [!TIP]
-> **Choosing `--jobs`:** the work is limited by disk speed, not CPU, so pick a number your storage can keep up with rather than your core count. Above `1`, you'll see only the overall progress bar, and log lines from different files can interleave.
+> **Choosing `--jobs`:** the work is limited by disk speed, not CPU, so pick a number your storage can keep up with rather than your core count. Above `1`, you'll see only the overall progress bar. Lines from different files print as they happen, so when a file's line follows another file's, its `[i/N]` header is printed again first to show which file it belongs to.
 
 Run `python3 set_stereo_default.py --help` for the full built-in help.
 
@@ -154,10 +154,10 @@ Processing:  36%|██████████████▊                  
 ...
 
 ----- Summary -----
-changed: 30
-unchanged: 1
-skipped: 1
-error: 0
+Changed: 30
+Unchanged: 1
+Skipped: 1
+Error: 0
 ```
 
 The top bar follows the file being remuxed, and the bottom one follows the whole batch. The batch count moves during each file rather than jumping when it finishes, which is why it shows fractions like `11.45/32`.
@@ -200,11 +200,11 @@ Found 8 file(s) (dry run).
 
 ...
 
------ Summary (dry run, nothing was changed) -----
-would change: 8
-unchanged: 0
-skipped: 0
-error: 0
+----- Summary (Dry run, nothing was changed) -----
+Would change: 8
+Unchanged: 0
+Skipped: 0
+Error: 0
 ```
 
 Each `[dry-run]` line is the exact command the script would run, quoted so you can paste it into a shell.
@@ -222,7 +222,7 @@ The script looks for the audio track with exactly 2 channels and makes it the de
 
   Language tags are compared by meaning, not spelling. The same language can be tagged several ways (MKV files use `ger` for German, MP4 files often `deu`, and you might type `de`), so two- and three-letter codes are treated as equal, and region parts like the `-BR` in `pt-BR` are ignored.
 
-A file is **skipped** (and counted under `skipped` in the summary) when:
+A file is **skipped** (and counted under `Skipped` in the summary) when:
 
 - it has no audio at all
 - it has no stereo track, or only commentary/audio-description ones
@@ -232,10 +232,10 @@ A file is **skipped** (and counted under `skipped` in the summary) when:
 
 ### 🧩 Changing the file
 
-Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged, and not noticeably shorter than the original) before it replaces the original. If the check fails, the original is kept and the file is counted as an `error`.
+Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged, and not noticeably shorter than the original) before it replaces the original. If the check fails, the original is kept and the file is counted as an `Error`.
 
 > [!NOTE]
-> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `error` on every run until it's replaced.
+> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
 
 | Format | How it's changed |
 | --- | --- |
@@ -267,10 +267,26 @@ Symlinked subfolders aren't searched unless you add `--follow-symlinks`; each on
 
 ### 🔐 Permissions and ownership
 
-A remux creates a brand-new file, so the script copies the original's permissions and owner onto it. That way tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it.
+A remux creates a brand-new file, so the script copies the original's permissions and owner onto it. That way tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it. If the new file already has the right owner, it's left as it is.
 
-> [!NOTE]
-> Changing a file's owner requires root. If the script can't do it, the new file belongs to whoever ran the script, and you'll see one warning per run (the permissions are still copied). This often happens on network shares, such as NFS, that map root to `nobody`. Run the script as the user that owns your media, or fix the owner afterwards with `chown`.
+Changing a file's owner requires root. If the script can't do it, the permissions are still copied, and one warning at the end of the run, just before the summary, says how many files are affected, where the full list is, and which owner they should have:
+
+```text
+Couldn't give 5 remuxed files their original owner (Operation not permitted). You can view the full list of files here: /home/tronyx/set_stereo_default-owners-20261002-153012.log
+
+These files should belong to tronyx:users (1000:100) but belong to nobody:nogroup (65534:65534). Permissions were still copied. ...
+```
+
+The list has one full path per line, sorted. It's saved next to your `--log-file` if you use one, otherwise in the folder you ran the script from (or your system's temp folder if that one isn't writable). Each run gets its own list, so an earlier one is never overwritten. If only one file is affected, the warning names it instead.
+
+> [!IMPORTANT]
+> **On an NFS share, run the script as the user that owns your media, not as root.** NFS servers usually turn root into `nobody` ("root squashing"), so files the script creates as root end up owned by `nobody`, and root can't change that from the client. The tools that manage your media may then be unable to rename or replace those files. Running as the media's owner avoids it, because NFS keeps that user's ID:
+>
+> ```bash
+> sudo -u tronyx python3 set_stereo_default.py /mnt/media
+> ```
+>
+> The warning suggests the right `sudo -u` for your files. To fix files that already ended up owned by `nobody`, run `chown` on the NFS server itself, where root isn't squashed.
 
 ### 📅 File dates
 
@@ -283,7 +299,7 @@ With `--keep-dates`, each changed file gets the original's modification and acce
 
 ### 🧹 Leftover temp files
 
-Ctrl+C and SIGTERM (what `docker stop`, `kill` and systemd send) stop the script cleanly: running remuxes are killed, their temp files are removed, and finished files are untouched. The partial summary counts every file that didn't finish as `cancelled`.
+Ctrl+C and SIGTERM (what `docker stop`, `kill` and systemd send) stop the script cleanly: running remuxes are killed, their temp files are removed, and finished files are untouched. The partial summary counts every file that didn't finish as `Cancelled`.
 
 If the script is killed outright instead (`kill -9`, a power cut, a container that doesn't stop in time), a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning. They're safe to delete, since the original is only ever replaced by a finished, checked file.
 
@@ -305,7 +321,7 @@ Even though nothing is re-encoded, the remuxed file's bytes are different, so it
 | Code | Meaning |
 | --- | --- |
 | `0` | Finished with no errors, or you chose **q** at the [backup question](#-backups) |
-| `1` | No matching files found, a required tool is missing, or at least one file ended up as an `error` |
+| `1` | No matching files found, a required tool is missing, or at least one file ended up as an `Error` |
 | `2` | Invalid command-line options |
 | `130` | Stopped with Ctrl+C |
 | `143` | Stopped with SIGTERM |
@@ -322,7 +338,7 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 **`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
 
-**`Couldn't give remuxed files their original owner`.** The new files work, but belong to whoever ran the script. See [Permissions and ownership](#-permissions-and-ownership).
+**`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command. See [Permissions and ownership](#-permissions-and-ownership).
 
 **`Skipping leftover temp file`.** An earlier run was killed mid-file. The temp file is safe to delete. See [Leftover temp files](#-leftover-temp-files).
 
@@ -342,7 +358,7 @@ There are two sets of tests:
 - **Logic tests** ([tests/test_set_stereo_default.py](tests/test_set_stereo_default.py)) cover the script's own decisions: picking the track, finding files, backups, checking a remux, progress reporting and clean stopping. They stand in for ffmpeg and mkvmerge, so they run anywhere.
 - **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4 and AVI files for each case the script handles, run the script on them, and check the results. They need ffmpeg, ffprobe and mkvmerge on your `PATH`, and are skipped if those aren't installed. Set `REQUIRE_MEDIA_TOOLS=1` to make a missing tool fail them instead, as GitHub does.
 
-GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions. The real-file tests run against every ffmpeg version listed under [Requirements](#-requirements) on Linux. Both also run on Windows, with the newest ffmpeg and MKVToolNix.
+GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions. The real-file tests run against every ffmpeg version listed under [Requirements](#-requirements) on Linux. Both also run on Windows, with the newest ffmpeg and MKVToolNix. A third job lints the code (`python -m ruff check .`) and checks its type hints (`python -m mypy`), for Linux and for Windows.
 
 To see which lines of the script the logic tests reach, run them under coverage. GitHub does the same on every run and shows the result on the run's summary page; it's for information only and never fails a build. The coverage badges at the top show the total for the latest push to each branch:
 

@@ -15,10 +15,13 @@ import set_stereo_default as ssd
 
 def _reset():
     """Clear everything the script keeps between calls: tracked remuxes, the
-    stop and owner-warning flags, and log handlers added by main()."""
+    stop and owner-warning flags, which file printed last, and log handlers
+    added by main()."""
     ssd._active_procs.clear()
     ssd._cancelled.clear()
-    ssd._chown_warned.clear()
+    ssd._ownership_failures.clear()
+    ssd._last_header[0] = None
+    ssd._file_context.header = None
     for handler in ssd.log.handlers:
         handler.close()
     ssd.log.handlers.clear()

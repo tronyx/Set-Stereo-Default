@@ -121,16 +121,18 @@ def digest(path):
 def run_script(*args):
     """Run the script as a user would. Returns (exit code, combined output)."""
     res = subprocess.run([sys.executable, str(SCRIPT), "--no-progress", *map(str, args)],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, check=False)
     return res.returncode, res.stdout + res.stderr
 
 
 def summary(output):
     """The summary's counts, e.g. {"changed": 1, "unchanged": 0, ...}, or
-    {"would change": 1, ...} after a dry run."""
+    {"would change": 1, ...} after a dry run. The summary capitalizes each
+    label ("Changed: 1"); they're lowercased here."""
     counts = {}
     for line in output.splitlines():
         key, _, value = line.partition(": ")
+        key = key.lower()
         if key in ("changed", "would change", "unchanged", "skipped", "error", "cancelled") \
                 and value.isdigit():
             counts[key] = int(value)
@@ -228,7 +230,7 @@ def test_dry_run_changes_nothing(tmp_path):
 
     assert code == 0, output
     assert "[dry-run] mkvmerge" in output
-    assert "----- Summary (dry run, nothing was changed) -----" in output
+    assert "----- Summary (Dry run, nothing was changed) -----" in output
     assert summary(output) == {"would change": 1, "unchanged": 0, "skipped": 0, "error": 0}
     assert digest(video) == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ["video.mkv"]
@@ -326,6 +328,22 @@ def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
     assert "duration dropped from" in output, output
     assert digest(video) == before
     assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+
+
+def test_a_jobs_dry_run_shows_each_files_header_once(tmp_path):
+    """With --jobs, each file's "setting ..." line and dry-run command come
+    out together, so its [i/N] header is never printed a second time."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    for i in range(4):
+        make_video(tmp_path / f"e{i}.mkv", [Track(6, default=True), Track(2)])
+
+    code, output = run_script(tmp_path, "--jobs", "2", "--dry-run")
+
+    assert code == 0, output
+    headers = [line for line in output.splitlines() if line.startswith("[")]
+    assert sorted(headers) == sorted(f"[{i}/4] {tmp_path / f'e{i - 1}.mkv'}" for i in range(1, 5)), \
+        output
+    assert output.count("[dry-run] mkvmerge") == 4
 
 
 def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path):
