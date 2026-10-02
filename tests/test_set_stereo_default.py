@@ -408,7 +408,7 @@ def test_a_mistyped_path_is_reported_on_the_console_and_the_rest_still_run(tmp_p
     typo = tmp_path / "vidoes"
     processed = []
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
+    def fake_process_file(path, args, position=0, on_progress=None):
         processed.append(path.name)
         return "changed"
 
@@ -583,7 +583,7 @@ def backed_up(tmp_path, monkeypatch):
     def run(*options, tty=True, answer="n"):
         seen, questions = [], []
 
-        def fake_process_file(path, args, position=0, header="", on_progress=None):
+        def fake_process_file(path, args, position=0, on_progress=None):
             seen.append(args.backup)
             return "changed"
 
@@ -1031,8 +1031,8 @@ def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, 
     make_videos(videos, 3)
     monkeypatch.chdir(run_from)
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
-        ssd.log.info(f"\n{header}\n  {path.name}: setting stream#1 (eng, aac) as default audio")
+    def fake_process_file(path, args, position=0, on_progress=None):
+        ssd.log.info(f"  {path.name}: setting stream#1 (eng, aac) as default audio")
         with ssd._ownership_lock:
             ssd._ownership_failures.append((str(path), (1000, 100), (65534, 65534),
                                             "Operation not permitted"))
@@ -1276,7 +1276,8 @@ def probed(monkeypatch):
 
 def test_avi_without_reorder_is_skipped_before_anything_is_announced(tmp_path, probed, caplog):
     caplog.set_level("INFO")
-    result = ssd.process_file(tmp_path / "v.avi", file_args(), header="[1/1] v.avi")
+    with ssd.file_context("[1/1] v.avi"):
+        result = ssd.process_file(tmp_path / "v.avi", file_args())
 
     assert result == "skipped"
     assert probed == []
@@ -1627,7 +1628,7 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
     for name in ("a.mp4", "b.mp4", "c.mp4"):
         (tmp_path / name).write_text("x")
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
+    def fake_process_file(path, args, position=0, on_progress=None):
         for pct in (25, 50, 75):
             on_progress(pct)
         return "changed"
@@ -1673,16 +1674,16 @@ def under_headers(lines):
 
 
 def test_lines_from_two_files_each_stay_under_their_own_header(caplog):
-    """Both threads log their header line, wait until the other has too, then
+    """Both threads log their first line, wait until the other has too, then
     log a later line, so the later lines always follow the other file's
-    header. Each is printed under its own header, repeated for it."""
+    lines. Each is printed under its own header, repeated for it."""
     caplog.set_level("INFO")
     barrier = threading.Barrier(2, timeout=5)
 
     def work(i, name):
         header = f"[{i}/2] {name}"
         with ssd.file_context(header):
-            ssd.log.info(f"\n{header}\n  {name} checked")
+            ssd.log.info(f"  {name} checked")
             barrier.wait()
             ssd.log.warning(f"    {name} command")
 
@@ -1700,21 +1701,18 @@ def test_lines_from_two_files_each_stay_under_their_own_header(caplog):
     assert [r.levelname for r in caplog.records if "command" in r.getMessage()] == ["WARNING"] * 2
 
 
-def test_a_files_lines_print_straight_away_without_repeating_its_own_header(caplog):
-    caplog.set_level("INFO")
-    with ssd.file_context("[1/1] a"):
-        ssd.log.info("\n[1/1] a\n  a checked")
-        assert len(caplog.records) == 1
-        ssd.log.info("    a command")
-        assert caplog.records[-1].getMessage() == "    a command"
-
-
-def test_a_files_first_line_gets_its_header_if_it_lacks_one(caplog):
-    """e.g. "ffprobe failed on ...", logged before the header has been."""
+def test_a_files_first_line_gets_its_header_and_the_rest_print_straight_away(caplog):
+    """The header is added by the filter, so the code that logs a file's
+    lines never includes it, whatever line comes first (a decision, or
+    "ffprobe failed on ..."). Later lines from the same file don't repeat
+    it."""
     caplog.set_level("INFO")
     with ssd.file_context("[1/1] a"):
         ssd.log.error("  ffprobe failed on a")
-    assert caplog.records[0].getMessage() == "\n[1/1] a\n  ffprobe failed on a"
+        assert caplog.records[-1].getMessage() == "\n[1/1] a\n  ffprobe failed on a"
+        ssd.log.info("    a command")
+        assert caplog.records[-1].getMessage() == "    a command"
+    assert len(caplog.records) == 2
 
 
 def test_lines_outside_a_file_pass_straight_through(caplog):
@@ -1762,8 +1760,8 @@ def test_jobs_keeps_each_files_lines_under_its_own_header(tmp_path, monkeypatch,
     make_videos(tmp_path, 2)
     barrier = threading.Barrier(2, timeout=5)
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
-        ssd.log.info(f"\n{header}\n  {path.name} checked")
+    def fake_process_file(path, args, position=0, on_progress=None):
+        ssd.log.info(f"  {path.name} checked")
         barrier.wait()
         ssd.log.info(f"    {path.name} command")
         return "changed"
@@ -1786,7 +1784,7 @@ def test_ctrl_c_with_jobs_skips_files_that_havent_started(tmp_path, monkeypatch)
     make_videos(tmp_path, 8)
     started = []
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
+    def fake_process_file(path, args, position=0, on_progress=None):
         started.append(path.name)
         ssd._cancelled.set()
         time.sleep(0.1)
@@ -1805,7 +1803,7 @@ def test_partial_summary_counts_unfinished_files_as_cancelled(tmp_path, monkeypa
     make_videos(tmp_path, 5)
     calls = []
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
+    def fake_process_file(path, args, position=0, on_progress=None):
         calls.append(path.name)
         if len(calls) == 3:
             raise KeyboardInterrupt
@@ -1837,7 +1835,7 @@ def test_summary_says_what_kind_of_run_it_was(tmp_path, monkeypatch, capsys, dry
     make_videos(tmp_path, 2)
     calls = []
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
+    def fake_process_file(path, args, position=0, on_progress=None):
         calls.append(path.name)
         if interrupted and len(calls) == 2:
             raise KeyboardInterrupt
@@ -1879,7 +1877,7 @@ def test_signal_mid_run_prints_a_partial_summary(tmp_path, monkeypatch, capsys,
     make_videos(tmp_path, 5)
     calls = []
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
+    def fake_process_file(path, args, position=0, on_progress=None):
         calls.append(path.name)
         if len(calls) == 3:
             signal.raise_signal(signum)
@@ -1933,7 +1931,7 @@ def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     for name in ("a.mkv", "b.mkv"):
         (tmp_path / name).write_text("x")
 
-    def fake_process_file(path, args, position=0, header="", on_progress=None):
+    def fake_process_file(path, args, position=0, on_progress=None):
         for pct in range(1, 99):
             on_progress(pct)
         return "changed"

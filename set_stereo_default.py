@@ -215,14 +215,15 @@ so another file's line can't land in between."""
 
 
 class _FileHeaderFilter(logging.Filter):
-    """Keeps every line under its own file's header when several files are
-    worked on at once (--jobs > 1).
+    """Puts each file's "[i/N] path" header above its lines: before its first
+    line, and again whenever another file has printed since its last one.
+    This is the only place headers are printed, so the code that logs a
+    file's lines never has to.
 
-    Each file logs at several moments: its header and decision, then later
-    its command, warnings or result. Meanwhile other files print their own
-    lines. So before printing a line, this checks which file printed last;
-    if it was a different one, the line's own header is printed again
-    first. Lines still appear as they happen.
+    The repeats matter with --jobs > 1, where several files are worked on
+    at once and each logs at several moments (its decision, then later its
+    command, warnings or result), so other files' lines land in between.
+    Lines still appear as they happen.
 
     The check and the printing must happen as one step, or two files
     printing at the same moment could still mix. The filter runs before
@@ -236,10 +237,9 @@ class _FileHeaderFilter(logging.Filter):
         if header is None:
             return True
         with _print_lock:
-            message = record.getMessage()
-            if _last_header[0] != header and not message.startswith(f"\n{header}\n"):
-                record.msg, record.args = f"\n{header}\n{message}", None
-            _last_header[0] = header
+            if _last_header[0] != header:
+                record.msg, record.args = f"\n{header}\n{record.getMessage()}", None
+                _last_header[0] = header
             log.callHandlers(record)
         return False
 
@@ -807,7 +807,7 @@ def mkvmerge_audio_ids(path):
 
 
 def _announce(intro, line=None):
-    """Log a file's intro (its header and what's about to happen, from
+    """Log a file's intro (what's about to happen to it, from
     _process_file()) and line together, as one message. With --jobs > 1,
     nothing from another file can then land between the two, so the
     file's header isn't printed a second time for line (see
@@ -988,24 +988,21 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
     return check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, keep_dates)
 
 
-def process_file(path, args, position=0, header="", on_progress=None):
+def process_file(path, args, position=0, on_progress=None):
     """Check one file, fix it if needed, and return "changed", "unchanged",
     "skipped" or "error". An unexpected error is logged and returned as
-    "error" so one bad file doesn't stop the run.
-
-    header is the file's "[i/N] path" line. It's logged in the same call
-    as the outcome, so with --jobs > 1 another file's messages can't land
-    between the two. position is the progress bar's row (--jobs 1 only).
+    "error" so one bad file doesn't stop the run. position is the progress
+    bar's row (--jobs 1 only). Run it inside file_context(), which puts the
+    file's header above its lines.
     """
     try:
-        return _process_file(path, args, position, header, on_progress)
+        return _process_file(path, args, position, on_progress)
     except Exception as exc:
-        prefix = f"\n{header}\n" if header else ""
-        log.error(f"{prefix}  {path.name}: unexpected error, skipping rest of file ({exc})")
+        log.error(f"  {path.name}: unexpected error, skipping rest of file ({exc})")
         return "error"
 
 
-def _process_file(path, args, position=0, header="", on_progress=None):
+def _process_file(path, args, position=0, on_progress=None):
     """The work behind process_file(). For AVI files with --avi-reorder,
     "already correct" means the target is already the first audio track.
     --force remuxes even files that are already correct.
@@ -1014,12 +1011,11 @@ def _process_file(path, args, position=0, header="", on_progress=None):
     apply_mkv()/apply_remux() as intro. They log it with the dry-run
     command, or as the remux starts, so in a --jobs dry run each file's
     lines come out together under one header."""
-    prefix = f"\n{header}\n" if header else ""
     ext = path.suffix.lower()
     is_avi_reorder = ext in AVI_EXTS and args.avi_reorder
 
     if ext in AVI_EXTS and not args.avi_reorder:
-        log.info(f"{prefix}  {path.name}: SKIP (AVI has no reliable default-track flag; re-run "
+        log.info(f"  {path.name}: SKIP (AVI has no reliable default-track flag; re-run "
                  f"with --avi-reorder to reorder streams instead, or convert to mkv)")
         return "skipped"
 
@@ -1027,12 +1023,12 @@ def _process_file(path, args, position=0, header="", on_progress=None):
     if streams is None:
         return "error"
     if not streams:
-        log.info(f"{prefix}  {path.name}: no audio streams found, skipping")
+        log.info(f"  {path.name}: no audio streams found, skipping")
         return "skipped"
 
     target, note = choose_target(streams, args.prefer_lang)
     if target is None:
-        log.info(f"{prefix}  {path.name}: SKIP ({note})")
+        log.info(f"  {path.name}: SKIP ({note})")
         return "skipped"
 
     if is_avi_reorder:
@@ -1045,12 +1041,12 @@ def _process_file(path, args, position=0, header="", on_progress=None):
 
     if not changed:
         what = "is first audio stream" if is_avi_reorder else "is default"
-        log.info(f"{prefix}  {path.name}: already correct (stream#{target['index']} {what}), skipping")
+        log.info(f"  {path.name}: already correct (stream#{target['index']} {what}), skipping")
         return "unchanged"
 
     action = "moving" if is_avi_reorder else "setting"
     outcome = "to the first audio track" if is_avi_reorder else "as default audio"
-    intro = (f"{prefix}  {path.name}: {action} stream#{target['index']} "
+    intro = (f"  {path.name}: {action} stream#{target['index']} "
              f"({target['language'] or 'und'}, {target['codec']}) {outcome}")
 
     show_progress = HAVE_TQDM and not args.no_progress and args.jobs == 1
@@ -1399,10 +1395,8 @@ def main():
                 advance_overall(frac - last_reported)
                 last_reported = frac
 
-            header = f"[{i}/{len(files)}] {f}"
-            with file_context(header):
-                result = process_file(f, args, header=header,
-                                       on_progress=on_progress if overall else None)
+            with file_context(f"[{i}/{len(files)}] {f}"):
+                result = process_file(f, args, on_progress=on_progress if overall else None)
 
             if overall:
                 advance_overall(1.0 - last_reported)
