@@ -749,21 +749,33 @@ OLD_TIMES_NS = (1_577_880_000_000_000_000, 1_577_890_000_123_456_000)
 
 
 @pytest.mark.parametrize("keep_dates", [True, False])
-def test_swap_in_keeps_the_original_dates_only_when_asked(tmp_path, keep_dates):
+def test_swap_in_keeps_the_original_dates_only_when_asked(tmp_path, monkeypatch, keep_dates):
+    """Only the modification time is compared. The access time is copied
+    too, but the system updates it whenever anything (an indexer,
+    antivirus) reads the file, which can happen even before swap_in()
+    runs, so its exact value can't be relied on here."""
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")
     os.utime(video, ns=OLD_TIMES_NS)
     tmp = tmp_path / "v.mkv.tmp_remux.mkv"
     tmp.write_bytes(b"remuxed")
+    set_mtimes = []
+    real_utime = os.utime
+
+    def recording_utime(path, *args, ns=None, **kwargs):
+        set_mtimes.append(ns[1])
+        return real_utime(path, *args, ns=ns, **kwargs)
+    monkeypatch.setattr(ssd.os, "utime", recording_utime)
 
     ssd.swap_in(video, tmp, backup=False, keep_dates=keep_dates)
 
-    st = video.stat()
     assert video.read_bytes() == b"remuxed"
     if keep_dates:
-        assert (st.st_atime_ns, st.st_mtime_ns) == OLD_TIMES_NS
+        assert set_mtimes == [OLD_TIMES_NS[1]]
+        assert video.stat().st_mtime_ns == OLD_TIMES_NS[1]
     else:
-        assert st.st_mtime_ns > OLD_TIMES_NS[1]
+        assert set_mtimes == []
+        assert video.stat().st_mtime_ns > OLD_TIMES_NS[1]
 
 
 def test_keep_dates_leaves_the_backup_with_the_original_dates(tmp_path):
