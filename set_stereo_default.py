@@ -217,8 +217,14 @@ def _stop_reason(exc):
 
 def run(cmd, **kw):
     """Run a quick command (e.g. ffprobe) and capture its output. Remuxes use
-    run_with_progress() instead."""
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    run_with_progress() instead.
+
+    Output is read as UTF-8, which ffprobe, ffmpeg and mkvmerge (given
+    --output-charset UTF-8) all write, rather than in the system's own
+    encoding: on Windows that's usually cp1252, which garbles non-English
+    track names or fails on them outright. A byte that isn't valid UTF-8
+    is replaced rather than stopping the run."""
+    return subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", **kw)
 
 
 def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progress=None):
@@ -230,7 +236,7 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     else. With show_progress, a tqdm bar titled label shows this file's
     progress at the given row position. on_progress(pct), if given, is
     called on every increase and with 100 on success; main() uses it to
-    move the overall bar.
+    move the overall bar. Output is read as UTF-8, as in run().
 
     The process is listed in _active_procs while it runs and is killed if
     anything goes wrong, so it's never left running on its own. If a stop
@@ -242,7 +248,7 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
     last_pct = 0
     lines = deque(maxlen=50)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, bufsize=1)
+                             encoding="utf-8", errors="replace", bufsize=1)
     try:
         with _active_procs_lock:
             _active_procs.add(proc)
@@ -569,6 +575,9 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     - The flag is set with --default-track. mkvmerge 65 renamed it
       --default-track-flag but promises to keep accepting the old name,
       and older versions only know the old one.
+    - --output-charset UTF-8 makes its messages UTF-8 everywhere, as
+      run_with_progress() expects; otherwise it uses the system's
+      encoding, which isn't UTF-8 on Windows or with LANG=C in Docker.
     - Exit code 1 means it finished with warnings. They're logged, without
       mkvmerge's "#GUI#warning" and "Warning:" prefixes, and the file is
       still checked and used. A killed mkvmerge can also exit with 1 on
@@ -576,7 +585,7 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
     """
     tmp_path = path.with_name(path.name + TMP_MARKER + path.suffix)
 
-    args = ["mkvmerge", "--gui-mode", "-o", str(tmp_path)]
+    args = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "-o", str(tmp_path)]
     for s in streams:
         flag = "yes" if s["index"] == target_index else "no"
         args += ["--default-track", f"{s['index']}:{flag}"]

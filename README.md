@@ -181,7 +181,7 @@ Found 8 file(s) (dry run).
 
 [1/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
   Awesome Show (2026) - S04E01 - Episode 25.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
+    [dry-run] mkvmerge --gui-mode --output-charset UTF-8 -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
 
 ...
 
@@ -296,7 +296,7 @@ There are two sets of tests:
 - **Logic tests** ([tests/test_set_stereo_default.py](tests/test_set_stereo_default.py)) cover the script's own decisions: picking the track, finding files, backups, checking a remux, progress reporting and clean stopping. They stand in for ffmpeg and mkvmerge, so they run anywhere.
 - **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4 and AVI files for each case the script handles, run the script on them, and check the results. They need ffmpeg, ffprobe and mkvmerge on your `PATH`, and are skipped if those aren't installed.
 
-GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions, and the real-file tests run against every ffmpeg version listed under [Requirements](#-requirements).
+GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions, and on Windows too, and the real-file tests run against every ffmpeg version listed under [Requirements](#-requirements).
 
 ## 🤖 A note on how this was built
 

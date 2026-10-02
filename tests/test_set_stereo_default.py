@@ -269,7 +269,7 @@ def test_symlinked_files_are_found_as_the_file_they_point_to(linked, caplog):
 
     assert names(found, linked) == ["lib/own.mkv", "real/movie.mkv"]
     assert "Not searching symlinked folder (use --follow-symlinks)" in caplog.text
-    assert "lib/show" in caplog.text
+    assert str(Path("lib") / "show") in caplog.text
     assert "symlink to a file without a video extension" in caplog.text
 
 
@@ -907,6 +907,32 @@ def test_run_with_progress_leaves_progress_lines_out_of_the_output():
             "for p in range(1, 101): print(f'pct={p}')")
     _, output = ssd.run_with_progress(python_cmd(code), "x", False, parse_pct_line)
     assert output.splitlines() == ["Warning: early"]
+
+
+UTF8_OUTPUT_CMD = python_cmd(
+    "import sys\n"
+    "sys.stdout.buffer.write('Título: Été — 日本語\\n'.encode('utf-8') + b'bad \\xff byte\\n')")
+
+
+def test_run_reads_output_as_utf8_and_replaces_invalid_bytes():
+    """ffprobe writes UTF-8 whatever the system's encoding, so a track name
+    must come through intact even where the default is cp1252 (Windows),
+    and one bad byte mustn't stop the run."""
+    res = ssd.run(UTF8_OUTPUT_CMD)
+    assert res.stdout.splitlines() == ["Título: Été — 日本語", "bad \ufffd byte"]
+
+
+def test_run_with_progress_reads_output_as_utf8_and_replaces_invalid_bytes():
+    returncode, output = ssd.run_with_progress(UTF8_OUTPUT_CMD, "x", False, parse_pct_line)
+    assert returncode == 0
+    assert output.splitlines() == ["Título: Été — 日本語", "bad \ufffd byte"]
+
+
+def test_mkvmerge_is_told_to_write_utf8(tmp_path, caplog):
+    caplog.set_level("INFO")
+    ssd.apply_mkv(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2, dry_run=True, backup=False)
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    assert args[args.index("--output-charset") + 1] == "UTF-8"
 
 
 SLOW_CMD = python_cmd("import time\n"
