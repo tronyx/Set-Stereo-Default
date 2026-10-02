@@ -92,7 +92,7 @@ Folders are searched recursively. You can also pass individual files, or a mix o
 | `--dry-run` | Show what would change without touching any files |
 | `--backup` | Keep each original as `<name>.bak`. Each backup takes as much space as the original (see [Disk space](#-disk-space)) |
 | `--existing-backups MODE` | With `--backup`, what to do when `<name>.bak` already exists: `replace` it, or `number` the new one (`.bak.1`, `.bak.2`, ...). Without this you're asked once (see [Backups](#-backups)) |
-| `--prefer-lang LANG` | Language the stereo track must be in, e.g. `eng`. Also picks between several stereo tracks. Default: the language of the track that plays by default now |
+| `--prefer-lang LANG` | Language the stereo track must be in, as a 2- or 3-letter code (`en`, `eng`, `de`, `ger` and `deu` all work). Also picks between several stereo tracks. Default: the language of the track that plays by default now |
 | `--jobs N` | Work on up to `N` files at once (default: `1`) |
 | `--log-file PATH` | Write the details to a file. Warnings, errors, the progress bar and the summary still show on the console |
 | `--ext EXT1,EXT2` | Extensions to process (default: `mkv,webm,mp4,m4v,mov,avi`). This replaces the default list, so list every extension you want |
@@ -204,6 +204,8 @@ The script looks for the audio track with exactly 2 channels and makes it the de
 
 - **Commentary and audio description.** These are often stereo but shouldn't play by default. A track counts as one if the file flags it that way, or if its name contains "commentary", "audio description", "descriptive", "described" or "DVS".
 - **Other languages.** The stereo track has to be in the same language as the track that plays by default now, so an English 5.1 film with a Spanish stereo dub keeps playing in English. Use `--prefer-lang` to choose the language yourself. Tracks with no language tag (or `und`) match any language, but a track tagged with the right language wins over them.
+
+  Language tags are compared by meaning, not spelling. The same language can be tagged several ways (MKV files use `ger` for German, MP4 files often `deu`, and you might type `de`), so two- and three-letter codes are treated as equal, and region parts like the `-BR` in `pt-BR` are ignored.
 
 A file is **skipped** (and counted under `skipped` in the summary) when:
 

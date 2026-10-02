@@ -107,6 +107,43 @@ NAME_TAGS = ("title", "name", "handler_name")
 """Tags that can hold a track's name: MKV uses "title", and ffprobe reports
 MP4 names as "name" or "handler_name"."""
 
+LANGUAGE_ALIASES = {
+    "aa": "aar", "ab": "abk", "ae": "ave", "af": "afr", "ak": "aka", "alb": "sqi", "am": "amh",
+    "an": "arg", "ar": "ara", "arm": "hye", "as": "asm", "av": "ava", "ay": "aym", "az": "aze",
+    "ba": "bak", "baq": "eus", "be": "bel", "bg": "bul", "bi": "bis", "bm": "bam", "bn": "ben",
+    "bo": "bod", "br": "bre", "bs": "bos", "bur": "mya", "ca": "cat", "ce": "che", "ch": "cha",
+    "chi": "zho", "co": "cos", "cr": "cre", "cs": "ces", "cu": "chu", "cv": "chv", "cy": "cym",
+    "cze": "ces", "da": "dan", "de": "deu", "dut": "nld", "dv": "div", "dz": "dzo", "ee": "ewe",
+    "el": "ell", "en": "eng", "eo": "epo", "es": "spa", "et": "est", "eu": "eus", "fa": "fas",
+    "ff": "ful", "fi": "fin", "fj": "fij", "fo": "fao", "fr": "fra", "fre": "fra", "fy": "fry",
+    "ga": "gle", "gd": "gla", "geo": "kat", "ger": "deu", "gl": "glg", "gn": "grn", "gre": "ell",
+    "gu": "guj", "gv": "glv", "ha": "hau", "he": "heb", "hi": "hin", "ho": "hmo", "hr": "hrv",
+    "ht": "hat", "hu": "hun", "hy": "hye", "hz": "her", "ia": "ina", "ice": "isl", "id": "ind",
+    "ie": "ile", "ig": "ibo", "ii": "iii", "ik": "ipk", "io": "ido", "is": "isl", "it": "ita",
+    "iu": "iku", "ja": "jpn", "jv": "jav", "ka": "kat", "kg": "kon", "ki": "kik", "kj": "kua",
+    "kk": "kaz", "kl": "kal", "km": "khm", "kn": "kan", "ko": "kor", "kr": "kau", "ks": "kas",
+    "ku": "kur", "kv": "kom", "kw": "cor", "ky": "kir", "la": "lat", "lb": "ltz", "lg": "lug",
+    "li": "lim", "ln": "lin", "lo": "lao", "lt": "lit", "lu": "lub", "lv": "lav", "mac": "mkd",
+    "mao": "mri", "may": "msa", "mg": "mlg", "mh": "mah", "mi": "mri", "mk": "mkd", "ml": "mal",
+    "mn": "mon", "mr": "mar", "ms": "msa", "mt": "mlt", "my": "mya", "na": "nau", "nb": "nob",
+    "nd": "nde", "ne": "nep", "ng": "ndo", "nl": "nld", "nn": "nno", "no": "nor", "nr": "nbl",
+    "nv": "nav", "ny": "nya", "oc": "oci", "oj": "oji", "om": "orm", "or": "ori", "os": "oss",
+    "pa": "pan", "per": "fas", "pi": "pli", "pl": "pol", "ps": "pus", "pt": "por", "qu": "que",
+    "rm": "roh", "rn": "run", "ro": "ron", "ru": "rus", "rum": "ron", "rw": "kin", "sa": "san",
+    "sc": "srd", "sd": "snd", "se": "sme", "sg": "sag", "si": "sin", "sk": "slk", "sl": "slv",
+    "slo": "slk", "sm": "smo", "sn": "sna", "so": "som", "sq": "sqi", "sr": "srp", "ss": "ssw",
+    "st": "sot", "su": "sun", "sv": "swe", "sw": "swa", "ta": "tam", "te": "tel", "tg": "tgk",
+    "th": "tha", "ti": "tir", "tib": "bod", "tk": "tuk", "tl": "tgl", "tn": "tsn", "to": "ton",
+    "tr": "tur", "ts": "tso", "tt": "tat", "tw": "twi", "ty": "tah", "ug": "uig", "uk": "ukr",
+    "ur": "urd", "uz": "uzb", "ve": "ven", "vi": "vie", "vo": "vol", "wa": "wln", "wel": "cym",
+    "wo": "wol", "xh": "xho", "yi": "yid", "yo": "yor", "za": "zha", "zh": "zho", "zu": "zul",
+}
+"""Language codes mapped to the ISO 639-2/T code for the same language: every
+two-letter ISO 639-1 code ("de" -> "deu"), and the 20 ISO 639-2/B codes that
+differ from their /T code ("ger" -> "deu"). MKV files store /B codes and MP4
+files often /T codes, so the same language can be tagged either way.
+Generated from the ISO 639-2 code list (datasets/language-codes on GitHub)."""
+
 MAX_DURATION_LOSS = 0.01
 """How much shorter a remux may be than the original, as a fraction of the
 original's duration, before it's rejected. A normal remux changes the
@@ -353,6 +390,16 @@ def is_commentary(stream):
                 or any(COMMENTARY_NAME_RE.search(n) for n in stream.get("names", ())))
 
 
+def normalize_language(code):
+    """Return code in one standard form, so different tags for the same
+    language compare equal: lowercased, with any region or script part
+    dropped ("pt-BR" -> "pt"), then mapped to its ISO 639-2/T code through
+    LANGUAGE_ALIASES ("de" and "ger" -> "deu"). Codes that aren't in the
+    table come back lowercased; an empty tag stays empty."""
+    base = re.split(r"[-_]", (code or "").strip().lower(), maxsplit=1)[0]
+    return LANGUAGE_ALIASES.get(base, base)
+
+
 def choose_target(streams, prefer_lang):
     """Return (stream, note): the stereo track to make default, or None and a
     note saying why the file should be skipped.
@@ -362,7 +409,9 @@ def choose_target(streams, prefer_lang):
     language of the track players start on now (the default one, or the
     first if none is flagged). That way a stereo dub never replaces the
     original language. A track with no language tag (or "und") matches any
-    language, but a track tagged with the wanted one wins over it."""
+    language, but a track tagged with the wanted one wins over it. Codes
+    are compared after normalize_language(), so "de", "ger" and "deu" all
+    mean German."""
     def describe(ss):
         """List tracks for a skip note, e.g. "stream#2 (eng/aac), stream#3 (spa/ac3)"."""
         return ", ".join(f"stream#{s['index']} ({s['language'] or 'und'}/{s['codec']})" for s in ss)
@@ -375,13 +424,15 @@ def choose_target(streams, prefer_lang):
         return None, "no 2-channel audio track found"
 
     current = next((s for s in streams if s["default"]), streams[0])
-    wanted = (prefer_lang or current["language"]).lower()
+    shown = prefer_lang or current["language"]
+    wanted = normalize_language(shown)
     if wanted not in ("", "und"):
-        in_lang = [s for s in candidates if s["language"].lower() in ("", "und", wanted)]
+        in_lang = [s for s in candidates
+                   if normalize_language(s["language"]) in ("", "und", wanted)]
         if not in_lang:
-            return None, (f"no 2-channel track in '{wanted}' [found {describe(candidates)}] "
+            return None, (f"no 2-channel track in '{shown}' [found {describe(candidates)}] "
                           f"-- use --prefer-lang to pick another language")
-        exact = [s for s in in_lang if s["language"].lower() == wanted]
+        exact = [s for s in in_lang if normalize_language(s["language"]) == wanted]
         candidates = exact if len(exact) == 1 else in_lang
 
     if len(candidates) == 1:
@@ -933,9 +984,10 @@ def main():
                           "you're asked once before any file is changed; when there's no "
                           "one to ask (cron, Docker), new backups are numbered")
     ap.add_argument("--prefer-lang", default=None, metavar="LANG",
-                     help="Language the stereo track must be in, e.g. eng; also picks between "
-                          "several stereo tracks (default: the language of the track that "
-                          "plays by default now)")
+                     help="Language the stereo track must be in, as a 2- or 3-letter code "
+                          "(en, eng, de, ger and deu all work); also picks between several "
+                          "stereo tracks (default: the language of the track that plays by "
+                          "default now)")
     ap.add_argument("--avi-reorder", action="store_true",
                      help="For .avi files, which have no default flag, move the stereo track "
                           "to the front instead")
@@ -956,6 +1008,10 @@ def main():
 
     if args.jobs < 1:
         ap.error("--jobs must be >= 1")
+    if args.prefer_lang is not None and not re.fullmatch("[a-z]{3}",
+                                                         normalize_language(args.prefer_lang)):
+        ap.error(f"--prefer-lang {args.prefer_lang!r} isn't a language code; use a 2- or "
+                 f"3-letter code such as en or eng")
 
     setup_logging(args.log_file)
     signal.signal(signal.SIGINT, _stop_handler)

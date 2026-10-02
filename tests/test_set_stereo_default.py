@@ -145,6 +145,58 @@ def test_exact_language_match_wins_over_an_untagged_track():
     assert target["index"] == 3
 
 
+@pytest.mark.parametrize("code, expected", [
+    ("de", "deu"), ("ger", "deu"), ("deu", "deu"), ("GER", "deu"), ("de-DE", "deu"),
+    ("pt-BR", "por"), ("zh_Hant", "zho"), ("chi", "zho"), ("en", "eng"), ("eng", "eng"),
+    ("und", "und"), ("", ""), (None, ""), ("haw", "haw"), ("english", "english"),
+])
+def test_normalize_language(code, expected):
+    assert ssd.normalize_language(code) == expected
+
+
+def test_language_aliases_cover_every_two_letter_code_and_bibliographic_code():
+    """ISO 639-1 has 183 two-letter codes, and 20 languages have an ISO
+    639-2/B code that differs from the /T one."""
+    two_letter = [k for k in ssd.LANGUAGE_ALIASES if len(k) == 2]
+    bibliographic = [k for k in ssd.LANGUAGE_ALIASES if len(k) == 3]
+    assert len(two_letter) == 183
+    assert len(bibliographic) == 20
+    assert all(len(v) == 3 for v in ssd.LANGUAGE_ALIASES.values())
+    assert not set(bibliographic) & set(ssd.LANGUAGE_ALIASES.values())
+
+
+@pytest.mark.parametrize("prefer_lang", ["de", "ger", "deu", "DE", "de-AT"])
+def test_prefer_lang_matches_however_the_language_is_written(prefer_lang):
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="ger"),
+               audio(3, 2, language="eng")]
+    target, _ = ssd.choose_target(streams, prefer_lang)
+    assert target["index"] == 2
+
+
+def test_tracks_tagged_differently_in_one_language_arent_treated_as_a_dub():
+    streams = [audio(1, 6, language="ger", default=True), audio(2, 2, language="deu")]
+    target, note = ssd.choose_target(streams, None)
+    assert target["index"] == 2 and note is None
+
+
+def test_skip_note_shows_the_language_as_given():
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="spa")]
+    _, note = ssd.choose_target(streams, "de")
+    assert "no 2-channel track in 'de'" in note
+
+
+@pytest.mark.parametrize("value", ["english", "xx", "", "e"])
+def test_prefer_lang_rejects_something_that_isnt_a_language_code(tmp_path, monkeypatch, capsys,
+                                                                 value):
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--prefer-lang", value])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    assert exit_info.value.code == 2
+    assert "isn't a language code; use a 2- or 3-letter code such as en or eng" in capsys.readouterr().err
+
+
 def test_probe_audio_streams_reads_commentary_flags(monkeypatch):
     probe = {"streams": [
         {"index": 1, "channels": 2, "codec_name": "aac", "tags": {"language": "eng"},

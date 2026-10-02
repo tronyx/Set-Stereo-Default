@@ -166,6 +166,11 @@ CASES = {
     "mkv --prefer-lang picks between stereo tracks": Case(
         ".mkv", [Track(6, "eng", default=True), Track(2, "eng"), Track(2, "spa")], "changed", 2,
         ["--prefer-lang", "spa"]),
+    "mkv --prefer-lang with a two-letter code": Case(
+        ".mkv", [Track(6, "eng", default=True), Track(2, "ger")], "changed", 1,
+        ["--prefer-lang", "de"]),
+    "mp4 one language tagged two ways": Case(
+        ".mp4", [Track(6, "ger", default=True), Track(2, "deu")], "changed", 1),
     "mkv no stereo track": Case(".mkv", [Track(6, default=True)], "skipped"),
     "avi without --avi-reorder": Case(".avi", [Track(6), Track(2)], "skipped"),
     "avi --avi-reorder": Case(".avi", [Track(6), Track(2)], "changed", 1, ["--avi-reorder"]),
