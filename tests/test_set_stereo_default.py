@@ -756,6 +756,17 @@ def test_verify_remux_avi_reorder(fake_ffprobe):
     assert "didn't end up first" in ssd.verify_remux(plan_to_check(), reordered=True)
 
 
+@pytest.mark.parametrize("tagged, accepted", [("en", True), ("ENG", True), ("spa", False)])
+def test_verify_remux_avi_reorder_compares_languages_however_theyre_written(fake_ffprobe, tagged,
+                                                                            accepted):
+    """The target is tagged "eng"; the remux's first track may say the same
+    language another way."""
+    fake_ffprobe[REMUX] = [stream(0, "video", 0, "xvid"), stream(1, "audio", 0, "aac", 2, tagged),
+                           stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
+    problem = ssd.verify_remux(plan_to_check(), reordered=True)
+    assert (problem is None) is accepted
+
+
 REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6),
                   stream(2, "audio", 1, "aac", 2), stream(3, "subtitle")]
 

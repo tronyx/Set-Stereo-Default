@@ -586,7 +586,8 @@ def verify_remux(plan, reordered):
     remux keeps audio tracks in order, so the target is found by its
     position among them. After an AVI reorder (reordered=True) there's no
     flag to check, so the first audio track must instead match the
-    target's codec, channel count and language."""
+    target's codec, channel count and language (compared after
+    normalize_language(), as everywhere else)."""
     after, after_duration = probe_streams(plan.tmp_path, report=False)
     if after is None:
         return "ffprobe couldn't read the file"
@@ -607,7 +608,8 @@ def verify_remux(plan, reordered):
     if reordered:
         first = audio[0]
         if (first["codec"] != target["codec"] or first["channels"] != target["channels"]
-                or (target["language"] and first["language"] != target["language"])):
+                or (target["language"] and normalize_language(first["language"])
+                    != normalize_language(target["language"]))):
             return "target audio track didn't end up first"
         return None
 
