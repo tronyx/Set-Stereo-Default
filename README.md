@@ -267,10 +267,22 @@ Symlinked subfolders aren't searched unless you add `--follow-symlinks`; each on
 
 ### 🔐 Permissions and ownership
 
-A remux creates a brand-new file, so the script copies the original's permissions and owner onto it. That way tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it.
+A remux creates a brand-new file, so the script copies the original's permissions and owner onto it. That way tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it. If the new file already has the right owner, it's left as it is.
 
-> [!NOTE]
-> Changing a file's owner requires root. If the script can't do it, the new file belongs to whoever ran the script, and you'll see one warning per run (the permissions are still copied). This often happens on network shares, such as NFS, that map root to `nobody`. Run the script as the user that owns your media, or fix the owner afterwards with `chown`.
+Changing a file's owner requires root. If the script can't do it, you'll see one warning per run saying which owner the file should have and which it got (the permissions are still copied):
+
+```text
+Couldn't give remuxed files their original owner (Operation not permitted): Movie.mkv should belong to tronyx:users (1000:100) but belongs to nobody:nogroup (65534:65534). ...
+```
+
+> [!IMPORTANT]
+> **On an NFS share, run the script as the user that owns your media, not as root.** NFS servers usually turn root into `nobody` ("root squashing"), so files the script creates as root end up owned by `nobody`, and root can't change that from the client. The tools that manage your media may then be unable to rename or replace those files. Running as the media's owner avoids it, because NFS keeps that user's ID:
+>
+> ```bash
+> sudo -u tronyx python3 set_stereo_default.py /mnt/media
+> ```
+>
+> The warning suggests the right `sudo -u` for your files. To fix files that already ended up owned by `nobody`, run `chown` on the NFS server itself, where root isn't squashed.
 
 ### 📅 File dates
 
@@ -322,7 +334,7 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 **`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
 
-**`Couldn't give remuxed files their original owner`.** The new files work, but belong to whoever ran the script. See [Permissions and ownership](#-permissions-and-ownership).
+**`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command. See [Permissions and ownership](#-permissions-and-ownership).
 
 **`Skipping leftover temp file`.** An earlier run was killed mid-file. The temp file is safe to delete. See [Leftover temp files](#-leftover-temp-files).
 

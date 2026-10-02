@@ -848,35 +848,110 @@ def test_keep_dates_leaves_the_backup_with_the_original_dates(tmp_path):
     assert bak.stat().st_mtime_ns == video.stat().st_mtime_ns == OLD_TIMES_NS[1]
 
 
-def test_swap_in_gives_the_new_file_the_original_owner(tmp_path, monkeypatch):
+@pytest.fixture
+def nfs_owners(tmp_path, monkeypatch):
+    """Makes every original look owned by tronyx:users (1000:100) and every
+    new file by nobody:nogroup (65534:65534), as on an NFS share that turns
+    root into nobody. Returns make(name) -> (video, temp file); chown calls
+    are recorded in the list returned alongside."""
+    def owner(path):
+        return (65534, 65534) if ssd.TMP_MARKER in str(path) else (1000, 100)
+    users = {1000: "tronyx", 65534: "nobody"}
+    groups = {100: "users", 65534: "nogroup"}
+
+    def lookup(names, attr):
+        def get(i):
+            if i not in names:
+                raise KeyError(i)
+            return types.SimpleNamespace(**{attr: names[i]})
+        return get
+    monkeypatch.setattr(ssd, "_owner", owner)
+    monkeypatch.setattr(ssd, "pwd", types.SimpleNamespace(getpwuid=lookup(users, "pw_name")))
+    monkeypatch.setattr(ssd, "grp", types.SimpleNamespace(getgrgid=lookup(groups, "gr_name")))
+    calls = []
+    monkeypatch.setattr(ssd.os, "chown", lambda *args: calls.append(args), raising=False)
+
+    def make(name):
+        video = tmp_path / name
+        video.write_bytes(b"original")
+        tmp = tmp_path / (name + ssd.TMP_MARKER + ".mkv")
+        tmp.write_bytes(b"remuxed")
+        return video, tmp
+    return make, calls
+
+
+def test_swap_in_gives_the_new_file_the_original_owner(nfs_owners):
+    make, calls = nfs_owners
+    video, tmp = make("v.mkv")
+
+    ssd.swap_in(video, tmp, backup=False)
+
+    assert calls == [(tmp, 1000, 100)]
+
+
+def test_swap_in_leaves_the_owner_alone_when_it_already_matches(tmp_path, monkeypatch, caplog):
+    """e.g. an NFS share that maps every user to the media owner, where
+    changing the owner fails but isn't needed, so there's nothing to warn
+    about."""
+    def not_permitted(*args):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(ssd.os, "chown", not_permitted, raising=False)
+    monkeypatch.setattr(ssd, "_owner", lambda path: (1000, 100))
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")
     tmp = tmp_path / "v.mkv.tmp_remux.mkv"
     tmp.write_bytes(b"remuxed")
-    calls = []
-    monkeypatch.setattr(ssd.os, "chown", lambda *args: calls.append(args), raising=False)
 
     ssd.swap_in(video, tmp, backup=False)
 
-    st = video.stat()
-    assert calls == [(tmp, st.st_uid, st.st_gid)]
+    assert video.read_bytes() == b"remuxed"
+    assert "Couldn't give" not in caplog.text
 
 
-def test_swap_in_warns_once_when_the_owner_cant_be_changed(tmp_path, monkeypatch, caplog):
+def test_swap_in_warns_once_when_the_owner_cant_be_changed(nfs_owners, monkeypatch, caplog):
+    make, _ = nfs_owners
+
     def not_permitted(*args):
         raise PermissionError(1, "Operation not permitted")
     monkeypatch.setattr(ssd.os, "chown", not_permitted, raising=False)
 
     for name in ("a.mkv", "b.mkv"):
-        video = tmp_path / name
-        video.write_bytes(b"original")
-        tmp = tmp_path / (name + ".tmp_remux.mkv")
-        tmp.write_bytes(b"remuxed")
+        video, tmp = make(name)
         ssd.swap_in(video, tmp, backup=False)
         assert video.read_bytes() == b"remuxed"
 
     assert caplog.text.count("Couldn't give remuxed files their original owner") == 1
-    assert "Operation not permitted" in caplog.text
+    assert "(Operation not permitted)" in caplog.text
+    assert ("a.mkv should belong to tronyx:users (1000:100) but belongs to "
+            "nobody:nogroup (65534:65534)") in caplog.text
+    assert "sudo -u tronyx python3" in caplog.text
+
+
+@pytest.mark.parametrize("uid, gid, described", [
+    (1000, 100, "tronyx:users (1000:100)"),
+    (1000, 5, "1000:5"),
+    (7, 100, "7:100"),
+], ids=["both named", "group has no name", "user has no name"])
+def test_owner_name(nfs_owners, uid, gid, described):
+    assert ssd._owner_name(uid, gid) == described
+
+
+def test_sudo_hint_uses_the_user_id_when_the_owner_has_no_name(nfs_owners, monkeypatch, caplog):
+    """e.g. Unraid's 99:100 seen from a client with no user 99. sudo accepts
+    a numeric user as '#99'."""
+    make, _ = nfs_owners
+    monkeypatch.setattr(ssd, "_owner",
+                        lambda path: (65534, 65534) if ssd.TMP_MARKER in str(path) else (99, 100))
+
+    def not_permitted(*args):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(ssd.os, "chown", not_permitted, raising=False)
+    video, tmp = make("v.mkv")
+
+    ssd.swap_in(video, tmp, backup=False)
+
+    assert "should belong to 99:100 but belongs to nobody:nogroup (65534:65534)" in caplog.text
+    assert "sudo -u '#99' python3" in caplog.text
 
 
 def remux_with_mkvmerge(path):

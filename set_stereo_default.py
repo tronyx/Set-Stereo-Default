@@ -92,6 +92,12 @@ try:
 except ImportError:
     HAVE_TQDM = False
 
+try:
+    import grp
+    import pwd
+except ImportError:
+    grp = pwd = None
+
 DEFAULT_EXTS = {".mkv", ".webm", ".mp4", ".m4v", ".mov", ".avi"}
 """Extensions processed when --ext isn't given."""
 
@@ -617,27 +623,68 @@ def make_backup(path, replace=False):
     return bak_path
 
 
+def _owner(path):
+    """Return path's owner as (user ID, group ID)."""
+    st = os.stat(path)
+    return st.st_uid, st.st_gid
+
+
+def _user_name(uid):
+    """The name of user ID uid, or None if it has none here (or on Windows)."""
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except (AttributeError, KeyError):
+        return None
+
+
+def _group_name(gid):
+    """The name of group ID gid, or None if it has none here (or on Windows)."""
+    try:
+        return grp.getgrgid(gid).gr_name
+    except (AttributeError, KeyError):
+        return None
+
+
+def _owner_name(uid, gid):
+    """Describe an owner as "tronyx:users (1000:100)", or as just "1000:100"
+    if either ID has no name on this system."""
+    user, group = _user_name(uid), _group_name(gid)
+    return f"{user}:{group} ({uid}:{gid})" if user and group else f"{uid}:{gid}"
+
+
 def copy_ownership(src, dst):
     """Give dst the same permissions and owner as src. A remux creates a new
     file owned by whoever ran the script, which could lock out tools that
     share your media through a group (Sonarr, Radarr, Plex, containers).
 
-    Changing the owner needs root, and network shares often map root to
-    "nobody", so that part can fail. If it does, a warning is logged once
-    per run; the permissions are copied either way."""
+    The owner is only changed if it differs. On storage where owners can't
+    be changed but every file gets the right one anyway (e.g. an NFS share
+    that maps every user to the media owner), trying would fail and warn
+    for nothing.
+
+    Changing the owner needs root, and NFS shares usually turn root into
+    "nobody", so it can fail. If it does, a warning is logged once per run,
+    naming the owner the file should have, the one it got, and the command
+    to run the script as the right user; the permissions are copied either
+    way."""
     shutil.copymode(src, dst)
     if not hasattr(os, "chown"):
         return
-    st = os.stat(src)
+    wanted, got = _owner(src), _owner(dst)
+    if wanted == got:
+        return
     try:
-        os.chown(dst, st.st_uid, st.st_gid)
+        os.chown(dst, *wanted)
     except OSError as exc:
         if not _chown_warned.is_set():
             _chown_warned.set()
-            log.warning(f"    Couldn't give remuxed files their original owner ({exc.strerror}); "
-                        f"they'll belong to the user running this script. Their permissions "
-                        f"still match the originals. Changing a file's owner needs root, and "
-                        f"network shares often map root to 'nobody'.")
+            user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
+            log.warning(f"    Couldn't give remuxed files their original owner ({exc.strerror}): "
+                        f"{Path(src).name} should belong to {_owner_name(*wanted)} but belongs "
+                        f"to {_owner_name(*got)}. Its permissions still match the original. "
+                        f"Changing a file's owner needs root, and NFS shares usually turn "
+                        f"root into 'nobody'. Run the script as the files' owner instead "
+                        f"(sudo -u {user} python3 ...). Shown once per run.")
 
 
 def swap_in(path, tmp_path, backup, keep_dates=False):
