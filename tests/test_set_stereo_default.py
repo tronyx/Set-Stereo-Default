@@ -903,6 +903,31 @@ def test_signal_mid_run_prints_a_partial_summary(tmp_path, monkeypatch, capsys,
     assert len(calls) == 3
 
 
+@pytest.mark.parametrize("signum, code, message", [
+    (signal.SIGINT, 130, "Interrupted by user (Ctrl+C) while looking for files"),
+    (signal.SIGTERM, 143, "Stopped by SIGTERM while looking for files"),
+], ids=["SIGINT", "SIGTERM"])
+def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, capsys,
+                                                      signum, code, message):
+    def interrupted_scan(paths, exts, recursive):
+        yield tmp_path / "a.mkv"
+        signal.raise_signal(signum)
+
+    processed = []
+    monkeypatch.setattr(ssd, "iter_files", interrupted_scan)
+    monkeypatch.setattr(ssd, "process_file", lambda *a, **k: processed.append(a))
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    out = capsys.readouterr().out
+    assert exit_info.value.code == code
+    assert message in out
+    assert "No files were changed" in out
+    assert "Summary" not in out
+    assert processed == []
+
 @pytest.mark.filterwarnings("error")
 def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     """Two files reporting 1% at a time used to add up to

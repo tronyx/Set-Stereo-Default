@@ -191,6 +191,15 @@ def _stop_handler(signum, frame):
     raise Stopped(signum)
 
 
+def _stop_reason(exc):
+    """Return (signal number, message) for a stop: a Stopped from
+    _stop_handler(), or a plain KeyboardInterrupt, which counts as Ctrl+C."""
+    signum = getattr(exc, "signum", signal.SIGINT)
+    if signum == signal.SIGINT:
+        return signum, "Interrupted by user (Ctrl+C)"
+    return signum, f"Stopped by {signal.Signals(signum).name}"
+
+
 def run(cmd, **kw):
     """Run a quick command (e.g. ffprobe) and capture its output. Remuxes use
     run_with_progress() instead."""
@@ -762,7 +771,8 @@ def main():
     close the bars, print a partial summary that counts unfinished files as
     cancelled, and exit with 128 + the signal number (130 for Ctrl+C, 143
     for SIGTERM). With --jobs > 1, files still waiting in the queue return
-    straight away once a stop is requested.
+    straight away once a stop is requested. A stop while still looking for
+    files exits the same way, with no summary, since nothing has changed.
     """
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -806,7 +816,12 @@ def main():
     signal.signal(signal.SIGTERM, _stop_handler)
 
     exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")} if args.ext else DEFAULT_EXTS
-    files = sorted(set(iter_files(args.paths, exts, not args.no_recursive)))
+    try:
+        files = sorted(set(iter_files(args.paths, exts, not args.no_recursive)))
+    except KeyboardInterrupt as exc:
+        signum, reason = _stop_reason(exc)
+        log.error(f"{reason} while looking for files. No files were changed.")
+        sys.exit(128 + signum)
 
     if not files:
         log.error("No matching files found.")
@@ -902,15 +917,13 @@ def main():
         if show_fallback_counter:
             print()
     except KeyboardInterrupt as exc:
-        signum = getattr(exc, "signum", signal.SIGINT)
+        signum, reason = _stop_reason(exc)
         for bar in active_bars:
             try:
                 bar.close()
             except Exception:
                 pass
         print()
-        reason = ("Interrupted by user (Ctrl+C)" if signum == signal.SIGINT
-                  else f"Stopped by {signal.Signals(signum).name}")
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         print_summary("Summary (partial -- interrupted)",
