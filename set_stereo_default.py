@@ -407,8 +407,9 @@ def run_with_progress(cmd, label, show_progress, parse_pct, position=0, on_progr
 
 
 def check_tools(need_mkvmerge):
-    """Exit with install links if ffmpeg or ffprobe isn't on PATH, or
-    mkvmerge isn't when there are .mkv/.webm files to process."""
+    """True if ffmpeg and ffprobe are on PATH, and mkvmerge too when there are
+    .mkv/.webm files to process. Otherwise logs what's missing, with
+    install links, and returns False."""
     missing = []
     for tool in ("ffmpeg", "ffprobe"):
         if shutil.which(tool) is None:
@@ -419,7 +420,7 @@ def check_tools(need_mkvmerge):
         log.error("Missing required tool(s): " + ", ".join(missing))
         log.error("Install ffmpeg (https://ffmpeg.org) and, for .mkv/.webm files, "
                   "MKVToolNix (https://mkvtoolnix.download), then re-run.")
-        sys.exit(1)
+    return not missing
 
 
 def probe_audio_streams(path):
@@ -1207,91 +1208,60 @@ def ask_about_existing_backups(count):
             return choices[answer]
 
 
-def main():
-    """Run the command line: find the files, process each one, and print a
-    summary. Exits 1 if no files were found, a tool is missing or any file
-    had an error.
-
-    How a run is shown:
-    - --jobs 1 handles one file at a time, with a progress bar for the
-      current file above the overall one. --jobs N > 1 handles N at once in
-      threads (the work waits on disk, not CPU) and shows only the overall
-      bar.
-    - The overall bar counts fractions of files, so it keeps moving during
-      a long remux. Its count is rounded and capped at the total, because
-      adding up many small steps can drift just past it, which makes tqdm
-      warn and show a negative time remaining.
-    - The blank line between the bars is an empty tqdm bar, not a print():
-      tqdm can't account for output it didn't write, and would draw the
-      bars in the wrong place.
-    - With --jobs > 1, lines from different files print as they happen, and
-      a file's header is repeated when another file printed in between
-      (_FileHeaderFilter), so no line lands under the wrong header.
-    - With --log-file, the "Found N file(s)" line and the summary are also
-      printed, so they stay on the console.
-    - Files that couldn't be given their original owner are reported in one
-      warning just before the summary (report_ownership_failures()), with
-      the full list saved next to --log-file, or in the current folder.
-
-    When stopped (Ctrl+C or SIGTERM), the stop handler has already killed
-    every remux and each one has removed its temp file. What's left is to
-    close the bars, print a partial summary that counts unfinished files as
-    cancelled, and exit with 128 + the signal number (130 for Ctrl+C, 143
-    for SIGTERM). With --jobs > 1, files still waiting in the queue return
-    straight away once a stop is requested. A stop while still looking for
-    files exits the same way, with no summary, since nothing has changed.
-    """
+def parse_args(argv=None):
+    """Parse and check the command line (sys.argv's, unless argv is given).
+    Invalid options exit with argparse's usage message and code 2."""
     ap = argparse.ArgumentParser(description=__doc__,
-                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="+", help="Video files and folders to process")
     ap.add_argument("--ext", default=None,
-                     help="Comma-separated extensions to process, replacing the default list "
-                          "(default: mkv,webm,mp4,m4v,mov,avi)")
+                    help="Comma-separated extensions to process, replacing the default list "
+                         "(default: mkv,webm,mp4,m4v,mov,avi)")
     ap.add_argument("--no-recursive", action="store_true", help="Don't look inside subfolders")
     ap.add_argument("--skip-symlinks", action="store_true",
-                     help="Skip symlinked files (default: fix the file the link points to, "
-                          "leaving the link as it is)")
+                    help="Skip symlinked files (default: fix the file the link points to, "
+                         "leaving the link as it is)")
     ap.add_argument("--follow-symlinks", action="store_true",
-                     help="Also look inside symlinked subfolders (default: skip them; folders "
-                          "you name on the command line are always searched)")
+                    help="Also look inside symlinked subfolders (default: skip them; folders "
+                         "you name on the command line are always searched)")
     ap.add_argument("--dry-run", action="store_true",
-                     help="Show what would change, and the exact commands, without touching "
-                          "any files")
+                    help="Show what would change, and the exact commands, without touching "
+                         "any files")
     ap.add_argument("--backup", action="store_true",
-                     help="Keep each original as <name>.bak. Each backup takes as much space "
-                          "as the original until you delete it")
+                    help="Keep each original as <name>.bak. Each backup takes as much space "
+                         "as the original until you delete it")
     ap.add_argument("--existing-backups", choices=("replace", "number"), default=None,
-                     help="With --backup, what to do when <name>.bak already exists: replace "
-                          "it, or number the new one (.bak.1, .bak.2, ...). Without this, "
-                          "you're asked once before any file is changed; when there's no "
-                          "one to ask (cron, Docker), new backups are numbered")
+                    help="With --backup, what to do when <name>.bak already exists: replace "
+                         "it, or number the new one (.bak.1, .bak.2, ...). Without this, "
+                         "you're asked once before any file is changed; when there's no "
+                         "one to ask (cron, Docker), new backups are numbered")
     ap.add_argument("--prefer-lang", default=None, metavar="LANG",
-                     help="Language the stereo track must be in, as a 2- or 3-letter code "
-                          "(en, eng, de, ger and deu all work); also picks between several "
-                          "stereo tracks (default: the language of the track that plays by "
-                          "default now)")
+                    help="Language the stereo track must be in, as a 2- or 3-letter code "
+                         "(en, eng, de, ger and deu all work); also picks between several "
+                         "stereo tracks (default: the language of the track that plays by "
+                         "default now)")
     ap.add_argument("--avi-reorder", action="store_true",
-                     help="For .avi files, which have no default flag, move the stereo track "
-                          "to the front instead")
+                    help="For .avi files, which have no default flag, move the stereo track "
+                         "to the front instead")
     ap.add_argument("--keep-dates", action="store_true",
-                     help="Give each changed file the original's modification and access "
-                          "times, so it doesn't look newly changed to media servers. Off by "
-                          "default: backup tools that compare size and date (e.g. rsync) "
-                          "could then miss the change")
+                    help="Give each changed file the original's modification and access "
+                         "times, so it doesn't look newly changed to media servers. Off by "
+                         "default: backup tools that compare size and date (e.g. rsync) "
+                         "could then miss the change")
     ap.add_argument("--force", action="store_true",
-                     help="Remux even files that are already correct, e.g. to restore Windows "
-                          "thumbnails after another tool edited a file in place")
+                    help="Remux even files that are already correct, e.g. to restore Windows "
+                         "thumbnails after another tool edited a file in place")
     ap.add_argument("--log-file", default=None, metavar="PATH",
-                     help="Write the details to this file instead of the console; warnings, "
-                          "errors, the progress bar and the summary still show on the console")
+                    help="Write the details to this file instead of the console; warnings, "
+                         "errors, the progress bar and the summary still show on the console")
     ap.add_argument("--no-progress", action="store_true",
-                     help="Hide the progress bars (useful for logs from cron or CI)")
+                    help="Hide the progress bars (useful for logs from cron or CI)")
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
-                     help="Remux up to N files at once (default: 1). The work is limited by "
-                          "disk speed, not CPU, so choose N for what your storage can handle. "
-                          "Above 1, only the overall progress bar is shown, and a file's "
-                          "[i/N] header is repeated when its lines follow another file's")
-    args = ap.parse_args()
+                    help="Remux up to N files at once (default: 1). The work is limited by "
+                         "disk speed, not CPU, so choose N for what your storage can handle. "
+                         "Above 1, only the overall progress bar is shown, and a file's "
+                         "[i/N] header is repeated when its lines follow another file's")
+    args = ap.parse_args(argv)
 
     if args.jobs < 1:
         ap.error("--jobs must be >= 1")
@@ -1301,166 +1271,215 @@ def main():
                                                          normalize_language(args.prefer_lang)):
         ap.error(f"--prefer-lang {args.prefer_lang!r} isn't a language code; use a 2- or "
                  f"3-letter code such as en or eng")
+    return args
 
+
+def _tell(args, line):
+    """Log line, and with --log-file print it too, so it stays on the console
+    (where a log file only sends warnings and errors)."""
+    log.info(line)
+    if args.log_file:
+        print(line)
+
+
+def find_files(args):
+    """Every file to process, sorted: the ones under args.paths with an
+    extension from --ext (or DEFAULT_EXTS). See iter_files()."""
+    if args.ext:
+        exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")}
+    else:
+        exts = DEFAULT_EXTS
+    return sorted(set(iter_files(args.paths, exts, not args.no_recursive,
+                                 args.skip_symlinks, args.follow_symlinks)))
+
+
+def choose_backup_mode(args, files):
+    """What to do with backups when <name>.bak already exists: "replace",
+    "number" or "quit". --existing-backups decides if given. Otherwise,
+    if any of files has one, the user is asked (see
+    ask_about_existing_backups()), or new backups are numbered when no one
+    can answer, since that never deletes anything."""
+    if args.existing_backups:
+        return args.existing_backups
+    with_backup = sum(1 for f in files if f.with_name(f.name + ".bak").exists())
+    if not with_backup:
+        return "number"
+    if _can_ask():
+        return ask_about_existing_backups(with_backup)
+    log.info(f"{with_backup} file(s) already have a backup; new backups will be "
+             f"numbered (.bak.1, .bak.2, ...). Use --existing-backups to choose.")
+    return "number"
+
+
+def process_all(files, args, stats):
+    """Process every file, adding each outcome to stats ("changed": 3, ...).
+    A stop (Ctrl+C, SIGTERM) comes out as KeyboardInterrupt, with the
+    progress bars closed and stats holding the files that finished.
+
+    How a run is shown:
+    - --jobs 1 handles one file at a time, with a progress bar for the
+      current file above the overall one. --jobs N > 1 handles N at once in
+      threads (the work waits on disk, not CPU) and shows only the overall
+      bar. With --log-file and no bars, a "Processing i/N..." counter takes
+      their place.
+    - The overall bar counts fractions of files, so it keeps moving during
+      a long remux. Its count is rounded and capped at the total, because
+      adding up many small steps can drift just past it, which makes tqdm
+      warn and show a negative time remaining.
+    - The blank line between the bars is an empty tqdm bar, not a print():
+      tqdm can't account for output it didn't write, and would draw the
+      bars in the wrong place.
+    - Each file runs inside file_context(), so its lines are kept under its
+      header, repeated if another file printed in between
+      (_FileHeaderFilter).
+    - Once a stop is requested, files still waiting their turn return
+      "cancelled" straight away instead of starting."""
+    use_bar = HAVE_TQDM and not args.no_progress
+    counter = args.log_file and not use_bar
+    bars, overall = [], None
+    if use_bar:
+        first_row = 1 if args.jobs == 1 else 0
+        bars.append(tqdm(total=1, position=first_row, bar_format="{desc}", desc="", leave=False))
+        overall = tqdm(total=len(files), unit="file", desc="Processing", position=first_row + 1,
+                       bar_format="{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                       leave=False)
+        bars.append(overall)
+    overall_lock = threading.Lock()
+
+    def advance_overall(delta):
+        """Move the overall bar by delta files. Several threads report at once
+        with --jobs > 1, so updates go through a lock."""
+        with overall_lock:
+            overall.n = min(round(overall.n + delta, 6), overall.total)
+            overall.refresh()
+
+    def run_one(i, f):
+        """Process file number i, keeping the overall bar in step."""
+        if _cancelled.is_set():
+            return "cancelled"
+        last_reported = 0.0
+
+        def on_progress(pct):
+            """Move the overall bar by however much this file has progressed
+            since its last report."""
+            nonlocal last_reported
+            advance_overall(pct / 100.0 - last_reported)
+            last_reported = pct / 100.0
+
+        with file_context(f"[{i}/{len(files)}] {f}"):
+            result = process_file(f, args, on_progress=on_progress if overall else None)
+        if overall:
+            advance_overall(1.0 - last_reported)
+        return result
+
+    def show_counter(n):
+        """Show "Processing n/N..." in place, when it stands in for the bars."""
+        if counter:
+            print(f"\rProcessing {n}/{len(files)}...", end="", flush=True)
+
+    try:
+        if args.jobs == 1:
+            for i, f in enumerate(files, 1):
+                show_counter(i)
+                result = run_one(i, f)
+                stats[result] = stats.get(result, 0) + 1
+        else:
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                futures = [pool.submit(run_one, i, f) for i, f in enumerate(files, 1)]
+                for done, fut in enumerate(as_completed(futures), 1):
+                    show_counter(done)
+                    result = fut.result()
+                    stats[result] = stats.get(result, 0) + 1
+    finally:
+        for bar in reversed(bars):
+            with contextlib.suppress(Exception):
+                bar.close()
+    if overall or counter:
+        print()
+
+
+def print_summary(stats, args, partial=False, cancelled=0):
+    """Log the counts, printing them too with --log-file (see _tell()). In a
+    dry run nothing was changed, so the heading says so and "Changed" reads
+    "Would change". partial marks a run that was stopped, where cancelled
+    files didn't finish. Each line, and the heading's note, starts with a
+    capital letter."""
+    notes = (["partial -- interrupted"] if partial else []) + (
+        ["dry run, nothing was changed"] if args.dry_run else [])
+    note = "; ".join(notes)
+    heading = "Summary" + (f" ({note[:1].upper()}{note[1:]})" if note else "")
+    _tell(args, "")
+    _tell(args, f"----- {heading} -----")
+    for k in ("changed", "unchanged", "skipped", "error"):
+        name = "would change" if k == "changed" and args.dry_run else k
+        _tell(args, f"{name.capitalize()}: {stats[k]}")
+    if cancelled:
+        _tell(args, f"Cancelled: {cancelled}")
+
+
+def main(argv=None):
+    """Run the command line: find the files, process each one, and print a
+    summary. Returns the exit code: 0 when done, 1 if no files were found,
+    a tool is missing or any file had an error, or 128 + the signal number
+    when stopped (130 for Ctrl+C, 143 for SIGTERM). Invalid options exit
+    with 2 straight from parse_args().
+
+    When stopped while files are being processed, the stop handler has
+    already killed every remux and each one has removed its temp file.
+    What's left is a partial summary that counts unfinished files as
+    cancelled. A stop while looking for files, or at the backup question,
+    ends the run with no summary, since nothing has changed. Files that
+    couldn't be given their original owner are reported in one warning
+    just before the summary (report_ownership_failures()), with the full
+    list saved next to --log-file, or in the current folder.
+    """
+    args = parse_args(argv)
     setup_logging(args.log_file)
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
-    exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")} if args.ext else DEFAULT_EXTS
     try:
-        files = sorted(set(iter_files(args.paths, exts, not args.no_recursive,
-                                      args.skip_symlinks, args.follow_symlinks)))
+        files = find_files(args)
     except KeyboardInterrupt as exc:
         signum, reason = _stop_reason(exc)
         log.error(f"{reason} while looking for files. No files were changed.")
-        sys.exit(128 + signum)
-
+        return 128 + signum
     if not files:
         log.error("No matching files found.")
-        sys.exit(1)
-
-    need_mkv = any(f.suffix.lower() in MKV_EXTS for f in files)
-    check_tools(need_mkv)
-
-    header = f"Found {len(files)} file(s){' (dry run)' if args.dry_run else ''}."
-    log.info(header)
-    if args.log_file:
-        print(header)
+        return 1
+    if not check_tools(need_mkvmerge=any(f.suffix.lower() in MKV_EXTS for f in files)):
+        return 1
+    _tell(args, f"Found {len(files)} file(s){' (dry run)' if args.dry_run else ''}.")
 
     if args.backup and not args.dry_run:
-        with_backup = sum(1 for f in files if f.with_name(f.name + ".bak").exists())
-        mode = args.existing_backups or "number"
-        if with_backup and not args.existing_backups:
-            if _can_ask():
-                try:
-                    mode = ask_about_existing_backups(with_backup)
-                except KeyboardInterrupt as exc:
-                    signum, reason = _stop_reason(exc)
-                    print()
-                    log.error(f"{reason}. No files were changed.")
-                    sys.exit(128 + signum)
-            else:
-                log.info(f"{with_backup} file(s) already have a backup; new backups will be "
-                         f"numbered (.bak.1, .bak.2, ...). Use --existing-backups to choose.")
-        if mode == "quit":
-            log.info("Quit before changing any files.")
-            if args.log_file:
-                print("Quit before changing any files.")
-            sys.exit(0)
-        args.backup = mode
+        try:
+            args.backup = choose_backup_mode(args, files)
+        except KeyboardInterrupt as exc:
+            signum, reason = _stop_reason(exc)
+            print()
+            log.error(f"{reason}. No files were changed.")
+            return 128 + signum
+        if args.backup == "quit":
+            _tell(args, "Quit before changing any files.")
+            return 0
 
     stats = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
     list_folder = Path(args.log_file).parent if args.log_file else Path.cwd()
-    use_bar = HAVE_TQDM and not args.no_progress
-    show_fallback_counter = args.log_file and not use_bar
-
-    def print_summary(partial=False, cancelled=0):
-        """Log the counts, and print them too when the log goes to a file. In a
-        dry run nothing was changed, so the heading says so and "Changed"
-        reads "Would change". Each line, and the heading's note, starts with
-        a capital letter."""
-        notes = (["partial -- interrupted"] if partial else []) + (
-            ["dry run, nothing was changed"] if args.dry_run else [])
-        note = "; ".join(notes)
-        heading = "Summary" + (f" ({note[:1].upper()}{note[1:]})" if note else "")
-        lines = ["", f"----- {heading} -----"]
-        for k in ("changed", "unchanged", "skipped", "error"):
-            name = "would change" if k == "changed" and args.dry_run else k
-            lines.append(f"{name.capitalize()}: {stats[k]}")
-        if cancelled:
-            lines.append(f"Cancelled: {cancelled}")
-        for line in lines:
-            log.info(line)
-        if args.log_file:
-            for line in lines:
-                print(line)
-
-    active_bars = []
-
     try:
-        first_row = 1 if args.jobs == 1 else 0
-        spacer = tqdm(total=1, position=first_row, bar_format="{desc}", desc="", leave=False) if use_bar else None
-        overall = tqdm(total=len(files), unit="file", desc="Processing", position=first_row + 1,
-                        bar_format="{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
-                        leave=False) if use_bar else None
-        if use_bar:
-            active_bars += [spacer, overall]
-        overall_lock = threading.Lock()
-
-        def advance_overall(delta):
-            """Move the overall bar by delta files. Several threads report at
-            once with --jobs > 1, so updates go through a lock."""
-            with overall_lock:
-                overall.n = min(round(overall.n + delta, 6), overall.total)
-                overall.refresh()
-
-        def run_one(i, f):
-            """Process file number i, keeping the overall bar in step. Returns
-            "cancelled" without starting if a stop was already requested.
-            The file's lines are kept under its header, which is repeated
-            if another file printed in between (see _FileHeaderFilter)."""
-            if _cancelled.is_set():
-                return "cancelled"
-            last_reported = 0.0
-
-            def on_progress(pct):
-                """Move the overall bar by however much this file has
-                progressed since its last report."""
-                nonlocal last_reported
-                frac = pct / 100.0
-                advance_overall(frac - last_reported)
-                last_reported = frac
-
-            with file_context(f"[{i}/{len(files)}] {f}"):
-                result = process_file(f, args, on_progress=on_progress if overall else None)
-
-            if overall:
-                advance_overall(1.0 - last_reported)
-            return result
-
-        if args.jobs == 1:
-            for i, f in enumerate(files, 1):
-                if show_fallback_counter:
-                    print(f"\rProcessing {i}/{len(files)}...", end="", flush=True)
-                result = run_one(i, f)
-                stats[result] = stats.get(result, 0) + 1
-        else:
-            completed = 0
-            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-                futures = {pool.submit(run_one, i, f): f for i, f in enumerate(files, 1)}
-                for fut in as_completed(futures):
-                    completed += 1
-                    if show_fallback_counter:
-                        print(f"\rProcessing {completed}/{len(files)}...", end="", flush=True)
-                    result = fut.result()
-                    stats[result] = stats.get(result, 0) + 1
-
-        if overall:
-            overall.close()
-            spacer.close()
-            print()
-        if show_fallback_counter:
-            print()
+        process_all(files, args, stats)
     except KeyboardInterrupt as exc:
         signum, reason = _stop_reason(exc)
-        for bar in active_bars:
-            try:
-                bar.close()
-            except Exception:
-                pass
         print()
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
-        print_summary(partial=True, cancelled=len(files) - sum(stats.values()))
-        sys.exit(128 + signum)
+        print_summary(stats, args, partial=True, cancelled=len(files) - sum(stats.values()))
+        return 128 + signum
 
     report_ownership_failures(list_folder)
-    print_summary()
-
-    if stats["error"]:
-        sys.exit(1)
+    print_summary(stats, args)
+    return 1 if stats["error"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -258,12 +258,10 @@ def test_check_tools(monkeypatch, caplog, missing, need_mkvmerge, reported):
                         lambda tool: None if tool in missing else f"/usr/bin/{tool}")
 
     if reported is None:
-        ssd.check_tools(need_mkvmerge)
+        assert ssd.check_tools(need_mkvmerge) is True
         assert not caplog.records
     else:
-        with pytest.raises(SystemExit) as exit_info:
-            ssd.check_tools(need_mkvmerge)
-        assert exit_info.value.code == 1
+        assert ssd.check_tools(need_mkvmerge) is False
         assert f"Missing required tool(s): {reported}" in caplog.text
         assert "MKVToolNix (https://mkvtoolnix.download)" in caplog.text
 
@@ -412,7 +410,7 @@ def test_a_mistyped_path_is_reported_on_the_console_and_the_rest_still_run(tmp_p
         processed.append(path.name)
         return "changed"
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(typo), str(videos),
                                       "--no-progress", "--log-file", str(tmp_path / "run.log")])
@@ -593,18 +591,13 @@ def backed_up(tmp_path, monkeypatch):
                 raise answer
             return answer
 
-        monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+        monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
         monkeypatch.setattr(ssd, "process_file", fake_process_file)
         monkeypatch.setattr(ssd, "_can_ask", lambda: tty)
         monkeypatch.setattr("builtins.input", fake_input)
         monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
                                           "--no-progress", *options])
-        code = None
-        try:
-            ssd.main()
-        except SystemExit as exc:
-            code = exc.code
-        return code, seen, questions
+        return ssd.main(), seen, questions
     return tmp_path, run
 
 
@@ -613,7 +606,7 @@ def test_existing_backups_are_asked_about_once(backed_up, answer, mode):
     _, run = backed_up
     code, seen, questions = run("--backup", answer=answer)
 
-    assert code is None
+    assert code == 0
     assert len(questions) == 1 and questions[0].startswith("1 file(s) already have a backup")
     assert seen == [mode, mode]
 
@@ -645,7 +638,7 @@ def test_existing_backups_are_numbered_when_no_one_can_answer(backed_up, capsys)
     _, run = backed_up
     code, seen, questions = run("--backup", tty=False)
 
-    assert code is None
+    assert code == 0
     assert questions == []
     assert seen == ["number", "number"]
     assert "Use --existing-backups to choose" in capsys.readouterr().out
@@ -1038,7 +1031,7 @@ def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, 
                                             "Operation not permitted"))
         return "changed"
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(videos),
                                       "--no-progress", "--jobs", "2"])
@@ -1639,7 +1632,7 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
                 shown.append(round(self.n, 2))
             return super().refresh(*args, **kwargs)
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--jobs", jobs])
@@ -1732,7 +1725,7 @@ def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys
         barrier.wait()
         return [1, 2]
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "probe_audio_streams",
                         lambda path: ([dict(s) for s in ORIGINAL_AUDIO], 100.0))
     monkeypatch.setattr(ssd, "mkvmerge_audio_ids", slow_ids)
@@ -1764,7 +1757,7 @@ def test_jobs_keeps_each_files_lines_under_its_own_header(tmp_path, monkeypatch,
         ssd.log.info(f"    {path.name} command")
         return "changed"
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
                                       "--no-progress", "--jobs", "2"])
@@ -1788,7 +1781,7 @@ def test_ctrl_c_with_jobs_skips_files_that_havent_started(tmp_path, monkeypatch)
         time.sleep(0.1)
         return "changed"
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--jobs", "2", "--no-progress"])
 
@@ -1807,15 +1800,14 @@ def test_partial_summary_counts_unfinished_files_as_cancelled(tmp_path, monkeypa
             raise KeyboardInterrupt
         return "changed"
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
 
-    with pytest.raises(SystemExit) as exit_info:
-        ssd.main()
+    code = ssd.main()
 
     out = capsys.readouterr().out
-    assert exit_info.value.code == 130
+    assert code == 130
     assert "Summary (Partial -- interrupted)" in out
     assert "Changed: 2" in out
     assert "Cancelled: 3" in out
@@ -1839,15 +1831,12 @@ def test_summary_says_what_kind_of_run_it_was(tmp_path, monkeypatch, capsys, dry
             raise KeyboardInterrupt
         return "changed"
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
                                       *(["--dry-run"] if dry_run else [])])
 
-    try:
-        ssd.main()
-    except SystemExit:
-        pass
+    ssd.main()
 
     lines = capsys.readouterr().out.splitlines()
     start = lines.index(heading)
@@ -1881,15 +1870,14 @@ def test_signal_mid_run_prints_a_partial_summary(tmp_path, monkeypatch, capsys,
             signal.raise_signal(signum)
         return "changed"
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
 
-    with pytest.raises(SystemExit) as exit_info:
-        ssd.main()
+    exit_code = ssd.main()
 
     out = capsys.readouterr().out
-    assert exit_info.value.code == code
+    assert exit_code == code
     assert message in out
     assert "Changed: 2" in out
     assert "Cancelled: 3" in out
@@ -1911,11 +1899,10 @@ def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, cap
     monkeypatch.setattr(ssd, "process_file", lambda *a, **k: processed.append(a))
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
 
-    with pytest.raises(SystemExit) as exit_info:
-        ssd.main()
+    exit_code = ssd.main()
 
     out = capsys.readouterr().out
-    assert exit_info.value.code == code
+    assert exit_code == code
     assert message in out
     assert "No files were changed" in out
     assert "Summary" not in out
@@ -1942,7 +1929,7 @@ def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
                 finals.append(self.n)
             return super().close()
 
-    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path)])
@@ -1981,9 +1968,6 @@ def test_fatal_errors_reach_the_console_with_a_log_file(tmp_path, monkeypatch, c
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(videos),
                                       "--log-file", str(tmp_path / "run.log")])
 
-    with pytest.raises(SystemExit) as exit_info:
-        ssd.main()
-
-    assert exit_info.value.code == 1
+    assert ssd.main() == 1
     assert expected in capsys.readouterr().out
     assert expected in (tmp_path / "run.log").read_text()
