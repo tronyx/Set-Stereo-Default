@@ -7,11 +7,13 @@ thin or quiet on TV speakers, soundbars and laptops. This script finds the
 2-channel (stereo) track in each file and makes it the default instead,
 clearing the flag from every other audio track. Nothing is re-encoded.
 
-Requirements (on your PATH):
+Requirements:
+  - Python 3.10 or newer
   - ffmpeg and ffprobe 4.4 or newer    https://ffmpeg.org
   - mkvmerge, part of MKVToolNix       https://mkvtoolnix.download
     (only needed for .mkv/.webm files)
   - tqdm, optional (pip install tqdm) for progress bars
+  ffmpeg, ffprobe and mkvmerge must be on your PATH.
 
 Which track it picks:
   The stereo track in the same language as the track that plays by default
@@ -45,18 +47,26 @@ Safe by default:
     instead, and --follow-symlinks also searches symlinked subfolders.
 
 Examples:
-  python3 set_stereo_default.py /path/to/videos
-  python3 set_stereo_default.py /path/to/videos --dry-run
-  python3 set_stereo_default.py file1.mkv file2.mp4
-  python3 set_stereo_default.py /path/to/videos --ext mkv,mp4 --no-recursive
-  python3 set_stereo_default.py /path/to/videos --follow-symlinks
-  python3 set_stereo_default.py /path/to/videos --prefer-lang eng
-  python3 set_stereo_default.py /path/to/videos --avi-reorder
-  python3 set_stereo_default.py /path/to/videos --backup
-  python3 set_stereo_default.py /path/to/videos --force
-  python3 set_stereo_default.py /path/to/videos --no-progress
-  python3 set_stereo_default.py /path/to/videos --log-file run.log
-  python3 set_stereo_default.py /path/to/videos --jobs 4
+  Preview every change without touching anything:
+    python3 set_stereo_default.py /path/to/videos --dry-run
+
+  Fix one folder, keeping each original as <name>.bak:
+    python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
+
+  Fix a whole library, 4 files at a time, with the details in a log file:
+    python3 set_stereo_default.py /path/to/videos --jobs 4 --log-file run.log
+
+  Use the English stereo track, whatever language plays by default now:
+    python3 set_stereo_default.py /path/to/videos --prefer-lang en
+
+  Just these files, or only .mkv files and not in subfolders:
+    python3 set_stereo_default.py file1.mkv file2.mp4
+    python3 set_stereo_default.py /path/to/videos --ext mkv --no-recursive
+
+Exit codes: 0 all done, 1 a file had an error, no files matched or a tool is
+missing, 2 invalid options, 130 stopped by Ctrl+C, 143 stopped by SIGTERM.
+
+Full guide: https://github.com/tronyx/Set-Stereo-Default
 """
 
 import argparse
@@ -1003,7 +1013,7 @@ def main():
     """
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("paths", nargs="+", help="Video files and/or folders to process")
+    ap.add_argument("paths", nargs="+", help="Video files and folders to process")
     ap.add_argument("--ext", default=None,
                      help="Comma-separated extensions to process, replacing the default list "
                           "(default: mkv,webm,mp4,m4v,mov,avi)")
@@ -1015,7 +1025,8 @@ def main():
                      help="Also look inside symlinked subfolders (default: skip them; folders "
                           "you name on the command line are always searched)")
     ap.add_argument("--dry-run", action="store_true",
-                     help="Show what would change without touching any files")
+                     help="Show what would change, and the exact commands, without touching "
+                          "any files")
     ap.add_argument("--backup", action="store_true",
                      help="Keep each original as <name>.bak. Each backup takes as much space "
                           "as the original until you delete it")
@@ -1038,8 +1049,8 @@ def main():
                           "default: backup tools that compare size and date (e.g. rsync) "
                           "could then miss the change")
     ap.add_argument("--force", action="store_true",
-                     help="Remux even files that are already correct, e.g. to fix thumbnails "
-                          "on files an older version of this script edited in place")
+                     help="Remux even files that are already correct, e.g. to restore Windows "
+                          "thumbnails after another tool edited a file in place")
     ap.add_argument("--log-file", default=None, metavar="PATH",
                      help="Write the details to this file instead of the console; warnings, "
                           "errors, the progress bar and the summary still show on the console")
@@ -1049,7 +1060,7 @@ def main():
                      help="Remux up to N files at once (default: 1). The work is limited by "
                           "disk speed, not CPU, so choose N for what your storage can handle. "
                           "Above 1, only the overall progress bar is shown and log lines from "
-                          "different files may interleave.")
+                          "different files may interleave")
     args = ap.parse_args()
 
     if args.jobs < 1:
