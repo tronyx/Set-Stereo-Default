@@ -310,6 +310,15 @@ There are two sets of tests:
 
 GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions, and on Windows too, and the real-file tests run against every ffmpeg version listed under [Requirements](#-requirements).
 
+To see which lines of the script the logic tests reach, run them under coverage. GitHub does the same on every run and shows the result on the run's summary page; it's for information only and never fails a build:
+
+```bash
+python -m coverage run -m pytest
+python -m coverage report
+```
+
+The real-file tests run the script as a separate program, so the lines only they reach (the actual ffmpeg and mkvmerge runs, for example) show as missing in that report.
+
 ## 🤖 A note on how this was built
 
 This script was largely written with [Claude](https://claude.ai), Anthropic's AI coding assistant. I described what I needed, directed the design, and asked for changes across many iterations rather than writing most of the code by hand. Every feature went through real testing before landing here, and the safety measures (dry-run mode, temp-file-first remuxing, checking every remux before it replaces the original) are exactly the kind of thing I insisted on, because this touches a media library I actually care about. Today the test suite covers both the script's logic and real video files across several ffmpeg and mkvmerge versions.

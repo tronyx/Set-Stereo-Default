@@ -31,7 +31,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt
-      - run: python -m pytest
+      # Coverage is for information only: a lower number never fails the job.
+      - run: python -m coverage run -m pytest
+      - run: python -m coverage report
+      - name: Add the coverage report to the run's summary page
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        run: |
+          echo "### Coverage of set_stereo_default.py (logic tests)" >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
 
   # Runs the script on real files generated with ffmpeg (tests/test_real_files.py),
   # once per ffmpeg version that common distros ship, plus the newest release.

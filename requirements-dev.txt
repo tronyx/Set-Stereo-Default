@@ -1,3 +1,4 @@
 # For running the tests (python -m pytest). Not needed to use the script.
 -r requirements.txt
 pytest>=7
+coverage>=7
