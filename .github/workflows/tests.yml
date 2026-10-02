@@ -154,3 +154,53 @@ jobs:
           mkvmerge --version
           python3 --version
       - run: python3 -m pytest tests/test_real_files.py -v
+
+  # The real-file tests on Windows, which differs from Linux in ways the logic
+  # tests can't show (e.g. it counts the NUL device as a terminal). Uses the
+  # newest ffmpeg and MKVToolNix releases, both looked up at run time.
+  real-files-windows:
+    name: Real files, newest ffmpeg (Windows)
+    runs-on: windows-latest
+    env:
+      # Fail, rather than skip, if a tool is missing.
+      REQUIRE_MEDIA_TOOLS: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Install ffmpeg and MKVToolNix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tools="$(cygpath -u "$RUNNER_TEMP")/tools"
+          mkdir -p "$tools" && cd "$tools"
+          build=$(curl -sSLf -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
+            | grep -o 'ffmpeg-n[0-9.]*-latest-win64-gpl-[0-9.]*\.zip' | sort -uV | tail -n 1)
+          test -n "$build" || { echo "No ffmpeg release build found"; exit 1; }
+          echo "Using $build"
+          curl -sSLf -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$build"
+          unzip -q ffmpeg.zip
+          cygpath -w "$tools/${build%.zip}/bin" >> "$GITHUB_PATH"
+          # Windows' own tar can unpack the .7z (Git Bash's tar can't).
+          version=$(curl -sSLf https://mkvtoolnix.download/latest-release.xml \
+            | grep -o '<latest-source>.*</latest-source>' | grep -o '<version>[^<]*' | cut -d'>' -f2)
+          test -n "$version" || { echo "No MKVToolNix release found"; exit 1; }
+          echo "Using MKVToolNix $version"
+          curl -sSLf -o mkvtoolnix.7z \
+            "https://mkvtoolnix.download/windows/releases/$version/mkvtoolnix-64-bit-$version.7z"
+          /c/Windows/System32/tar.exe -xf mkvtoolnix.7z
+          cygpath -w "$tools/mkvtoolnix" >> "$GITHUB_PATH"
+      - name: Tool versions
+        run: |
+          ffmpeg -version | head -n 1
+          mkvmerge --version
+          python --version
+      - run: python -m pytest tests/test_real_files.py -v
