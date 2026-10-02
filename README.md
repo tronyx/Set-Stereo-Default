@@ -2,7 +2,7 @@
 
 [![tests: master](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=master&label=tests%3A%20master)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Amaster)
 [![tests: develop](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=develop&label=tests%3A%20develop)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Adevelop)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)](#-requirements)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](#-requirements)
 [![License: MIT](https://img.shields.io/github/license/tronyx/Set-Stereo-Default)](LICENSE.md)
 
 **Make the stereo track play by default, across your whole video library.**
@@ -26,7 +26,7 @@ Plenty of ripped and downloaded videos flag a 5.1 or 7.1 surround track as the d
 
 | What | Version | Needed for |
 | --- | --- | --- |
-| [Python](https://www.python.org) | 3.8 or newer | Everything |
+| [Python](https://www.python.org) | 3.10 or newer | Everything |
 | [ffmpeg and ffprobe](https://ffmpeg.org) | 4.4 or newer | Everything |
 | [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any | `.mkv` and `.webm` files |
 | [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
