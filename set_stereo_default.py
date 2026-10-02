@@ -36,7 +36,8 @@ Safe by default:
   - --dry-run shows what would change without touching anything.
   - Each new file is checked (no lost streams, no shorter than the
     original, the right track is default) before it replaces the
-    original. --backup also keeps the original as <name>.bak.
+    original. --backup also keeps the original as <name>.bak, never
+    deleting an existing backup unless you say so.
   - Ctrl+C or SIGTERM (docker stop, kill) stops cleanly and removes any
     half-written temp files.
   - A symlinked file is fixed through its link: the file it points to is
@@ -463,17 +464,32 @@ def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
     return None
 
 
-def make_backup(path):
-    """Keep the original as <name>.bak. A hard link is instant and takes no
-    extra space: once the new file replaces the original, the old data is
-    still reachable through the .bak link. Where hard links aren't
-    supported, a full copy is made instead."""
+def backup_path(path, replace):
+    """Where to keep path's original: <name>.bak, unless that already exists
+    and replace is false, in which case the first free <name>.bak.1,
+    <name>.bak.2, ... so an earlier backup is never lost."""
     bak_path = path.with_name(path.name + ".bak")
+    if replace or not bak_path.exists():
+        return bak_path
+    n = 1
+    while path.with_name(f"{path.name}.bak.{n}").exists():
+        n += 1
+    return path.with_name(f"{path.name}.bak.{n}")
+
+
+def make_backup(path, replace=False):
+    """Keep the original at backup_path() and return that path. A hard link
+    is instant and needs no room while the remux runs; once the new file
+    replaces the original, the backup holds the original's data on its
+    own, so it takes the original's full size until it's deleted. Where
+    hard links aren't supported, a full copy is made instead."""
+    bak_path = backup_path(path, replace)
     bak_path.unlink(missing_ok=True)
     try:
         os.link(path, bak_path)
     except OSError:
         shutil.copy2(path, bak_path)
+    return bak_path
 
 
 def copy_ownership(src, dst):
@@ -501,11 +517,17 @@ def copy_ownership(src, dst):
 
 def swap_in(path, tmp_path, backup):
     """Replace path with the checked remux at tmp_path. Copies the original's
-    permissions and owner, keeps the original as .bak if backup is set,
-    then swaps the new file in with a single atomic rename."""
+    permissions and owner, keeps the original as a backup if backup is
+    set, then swaps the new file in with a single atomic rename.
+
+    backup is falsy for no backup, "replace" to overwrite an existing
+    <name>.bak, or anything else to number the new one if <name>.bak
+    exists (see backup_path())."""
     copy_ownership(path, tmp_path)
     if backup:
-        make_backup(path)
+        bak_path = make_backup(path, replace=(backup == "replace"))
+        if bak_path.suffix != ".bak":
+            log.info(f"    {path.name}: kept the original as {bak_path.name}")
     os.replace(tmp_path, path)
 
 
@@ -833,6 +855,23 @@ def iter_files(paths, exts, recursive, skip_symlinks=False, follow_symlinks=Fals
             yield f
 
 
+def ask_about_existing_backups(count):
+    """Ask once what to do about files that already have a <name>.bak.
+    Returns "replace", "number" or "quit". Asks again on any other answer;
+    end of input (Ctrl+D) counts as quit."""
+    question = (f"{count} file(s) already have a backup: [d]elete and replace them, "
+                f"[n]umber new ones (.bak.1, .bak.2...), or [q]uit? ")
+    choices = {"d": "replace", "n": "number", "q": "quit"}
+    while True:
+        try:
+            answer = input(question).strip().lower()
+        except EOFError:
+            print()
+            return "quit"
+        if answer in choices:
+            return choices[answer]
+
+
 def main():
     """Run the command line: find the files, process each one, and print a
     summary. Exits 1 if no files were found, a tool is missing or any file
@@ -877,8 +916,13 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                      help="Show what would change without touching any files")
     ap.add_argument("--backup", action="store_true",
-                     help="Keep each original as <name>.bak (a hard link where possible, "
-                          "so it takes no extra space)")
+                     help="Keep each original as <name>.bak. Each backup takes as much space "
+                          "as the original until you delete it")
+    ap.add_argument("--existing-backups", choices=("replace", "number"), default=None,
+                     help="With --backup, what to do when <name>.bak already exists: replace "
+                          "it, or number the new one (.bak.1, .bak.2, ...). Without this, "
+                          "you're asked once before any file is changed; when there's no "
+                          "one to ask (cron, Docker), new backups are numbered")
     ap.add_argument("--prefer-lang", default=None, metavar="LANG",
                      help="Language the stereo track must be in, e.g. eng; also picks between "
                           "several stereo tracks (default: the language of the track that "
@@ -928,6 +972,28 @@ def main():
     log.info(header)
     if args.log_file:
         print(header)
+
+    if args.backup and not args.dry_run:
+        with_backup = sum(1 for f in files if f.with_name(f.name + ".bak").exists())
+        mode = args.existing_backups or "number"
+        if with_backup and not args.existing_backups:
+            if sys.stdin.isatty():
+                try:
+                    mode = ask_about_existing_backups(with_backup)
+                except KeyboardInterrupt as exc:
+                    signum, reason = _stop_reason(exc)
+                    print()
+                    log.error(f"{reason}. No files were changed.")
+                    sys.exit(128 + signum)
+            else:
+                log.info(f"{with_backup} file(s) already have a backup; new backups will be "
+                         f"numbered (.bak.1, .bak.2, ...). Use --existing-backups to choose.")
+        if mode == "quit":
+            log.info("Quit before changing any files.")
+            if args.log_file:
+                print("Quit before changing any files.")
+            sys.exit(0)
+        args.backup = mode
 
     stats = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
     use_bar = HAVE_TQDM and not args.no_progress

@@ -38,7 +38,9 @@ The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, a
 
 ### 💾 Disk space
 
-Each file is rewritten to a temporary copy next to the original before it's swapped in, so you need free space about the size of your largest file. `--backup` doesn't add to that, because the backup is a hard link to the original rather than a copy (except on filesystems that don't support hard links).
+Each file is rewritten to a temporary copy next to the original before it's swapped in, so you need free space about the size of your largest file while the script runs.
+
+`--backup` doesn't add to that during the run, because each backup starts as a hard link to the original rather than a copy. But once the new file replaces the original, the backup holds the original's data on its own, so **every backup takes as much space as the file it backs up** until you delete it. Running `--backup` over a whole library needs about as much free space as the files that get changed.
 
 ## 📦 Installation
 
@@ -88,7 +90,8 @@ Folders are searched recursively. You can also pass individual files, or a mix o
 | Option | What it does |
 | --- | --- |
 | `--dry-run` | Show what would change without touching any files |
-| `--backup` | Keep each original as `<name>.bak` (a hard link where possible, so it takes no extra space) |
+| `--backup` | Keep each original as `<name>.bak`. Each backup takes as much space as the original (see [Disk space](#-disk-space)) |
+| `--existing-backups MODE` | With `--backup`, what to do when `<name>.bak` already exists: `replace` it, or `number` the new one (`.bak.1`, `.bak.2`, ...). Without this you're asked once (see [Backups](#-backups)) |
 | `--prefer-lang LANG` | Language the stereo track must be in, e.g. `eng`. Also picks between several stereo tracks. Default: the language of the track that plays by default now |
 | `--jobs N` | Work on up to `N` files at once (default: `1`) |
 | `--log-file PATH` | Write the details to a file. Warnings, errors, the progress bar and the summary still show on the console |
@@ -222,6 +225,20 @@ Every change is a **remux**: the audio and video are copied as-is into a new fil
 | `.mkv` `.webm` | Remuxed with `mkvmerge`. The script doesn't edit the file in place, because in-place edits can move the track list to the end of the file, which breaks Windows Explorer thumbnails even though the video plays fine. |
 | `.mp4` `.m4v` `.mov` | Remuxed with `ffmpeg`, with the file's index kept at the front where thumbnailers expect it (`-movflags +faststart`). |
 | `.avi` | AVI has no "default track" flag. With `--avi-reorder`, the stereo track is moved to the front instead, which most players treat the same way. Without it, AVI files are skipped. |
+
+### � Backups
+
+With `--backup`, each original is kept next to the new file as `<name>.bak`. If some files already have a `.bak` (from an earlier run, say), you're asked once, before any file is changed:
+
+```text
+3 file(s) already have a backup: [d]elete and replace them, [n]umber new ones (.bak.1, .bak.2...), or [q]uit?
+```
+
+- **d** replaces each existing `<name>.bak` with the new backup.
+- **n** keeps every existing backup and saves the new one as the first free `<name>.bak.1`, `<name>.bak.2`, ...
+- **q** stops without changing anything.
+
+To skip the question, pass `--existing-backups replace` or `--existing-backups number`. When there's no one to ask (cron, Docker, output piped to another program), new backups are numbered, since that never deletes anything.
 
 ### 🪢 Symlinks
 

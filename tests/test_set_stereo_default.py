@@ -313,10 +313,30 @@ def test_make_backup_hard_links_and_replaces_a_stale_backup(tmp_path):
     bak = tmp_path / "v.mkv.bak"
     bak.write_bytes(b"stale")
 
-    ssd.make_backup(video)
+    assert ssd.make_backup(video, replace=True) == bak
 
     assert bak.read_bytes() == b"original"
     assert os.stat(bak).st_ino == os.stat(video).st_ino
+
+
+def test_make_backup_numbers_the_new_backup_instead_of_replacing(tmp_path):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    for name, data in [("v.mkv.bak", b"first"), ("v.mkv.bak.1", b"second")]:
+        (tmp_path / name).write_bytes(data)
+
+    assert ssd.make_backup(video) == tmp_path / "v.mkv.bak.2"
+
+    assert (tmp_path / "v.mkv.bak").read_bytes() == b"first"
+    assert (tmp_path / "v.mkv.bak.1").read_bytes() == b"second"
+    assert (tmp_path / "v.mkv.bak.2").read_bytes() == b"original"
+
+
+def test_make_backup_uses_plain_bak_when_its_free(tmp_path):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.make_backup(video) == tmp_path / "v.mkv.bak"
 
 
 def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypatch):
@@ -331,6 +351,121 @@ def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypat
     bak = tmp_path / "v.mkv.bak"
     assert bak.read_bytes() == b"original"
     assert os.stat(bak).st_ino != os.stat(video).st_ino
+
+
+@pytest.mark.parametrize("answers, expected", [
+    (["d"], "replace"),
+    (["N"], "number"),
+    (["q"], "quit"),
+    (["", "maybe", " n "], "number"),
+    ([EOFError], "quit"),
+], ids=["delete", "number", "quit", "asks again until it understands", "ctrl+d"])
+def test_ask_about_existing_backups(monkeypatch, answers, expected):
+    questions = []
+
+    def fake_input(prompt):
+        questions.append(prompt)
+        answer = answers[len(questions) - 1]
+        if answer is EOFError:
+            raise EOFError
+        return answer
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    assert ssd.ask_about_existing_backups(3) == expected
+    assert questions[0] == ("3 file(s) already have a backup: [d]elete and replace them, "
+                            "[n]umber new ones (.bak.1, .bak.2...), or [q]uit? ")
+    assert len(questions) == len(answers)
+
+
+@pytest.fixture
+def backed_up(tmp_path, monkeypatch):
+    """Two videos, one of which already has a .bak, with process_file()
+    replaced by a stand-in. Returns (folder, run), where run(*options,
+    tty=..., answer=...) runs main() and returns (exit code or None, the
+    backup setting each file was processed with, questions asked)."""
+    make_videos(tmp_path, 2)
+    (tmp_path / "e00.mkv.bak").write_text("old")
+
+    def run(*options, tty=True, answer="n"):
+        seen, questions = [], []
+
+        def fake_process_file(path, args, position=0, header="", on_progress=None):
+            seen.append(args.backup)
+            return "changed"
+
+        def fake_input(prompt):
+            questions.append(prompt)
+            return answer
+
+        monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+        monkeypatch.setattr(ssd, "process_file", fake_process_file)
+        monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(isatty=lambda: tty))
+        monkeypatch.setattr("builtins.input", fake_input)
+        monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
+                                          "--no-progress", *options])
+        code = None
+        try:
+            ssd.main()
+        except SystemExit as exc:
+            code = exc.code
+        return code, seen, questions
+    return tmp_path, run
+
+
+@pytest.mark.parametrize("answer, mode", [("d", "replace"), ("n", "number")])
+def test_existing_backups_are_asked_about_once(backed_up, answer, mode):
+    _, run = backed_up
+    code, seen, questions = run("--backup", answer=answer)
+
+    assert code is None
+    assert len(questions) == 1 and questions[0].startswith("1 file(s) already have a backup")
+    assert seen == [mode, mode]
+
+
+def test_quitting_at_the_backup_question_changes_nothing(backed_up, capsys):
+    _, run = backed_up
+    code, seen, _ = run("--backup", answer="q")
+
+    assert code == 0
+    assert seen == []
+    assert "Quit before changing any files." in capsys.readouterr().out
+
+
+def test_existing_backups_are_numbered_when_no_one_can_answer(backed_up, capsys):
+    _, run = backed_up
+    code, seen, questions = run("--backup", tty=False)
+
+    assert code is None
+    assert questions == []
+    assert seen == ["number", "number"]
+    assert "Use --existing-backups to choose" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", ["replace", "number"])
+def test_existing_backups_option_skips_the_question(backed_up, mode):
+    _, run = backed_up
+    code, seen, questions = run("--backup", "--existing-backups", mode)
+
+    assert questions == []
+    assert seen == [mode, mode]
+
+
+@pytest.mark.parametrize("options", [["--backup", "--dry-run"], []], ids=["dry run", "no --backup"])
+def test_no_backup_question_when_no_backup_will_be_made(backed_up, options):
+    _, run = backed_up
+    code, seen, questions = run(*options)
+
+    assert questions == []
+    assert len(seen) == 2
+
+
+def test_no_backup_question_without_existing_backups(backed_up):
+    folder, run = backed_up
+    (folder / "e00.mkv.bak").unlink()
+    code, seen, questions = run("--backup")
+
+    assert questions == []
+    assert seen == ["number", "number"]
 
 
 

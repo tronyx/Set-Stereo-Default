@@ -234,6 +234,32 @@ def test_backup_keeps_the_original(tmp_path):
     assert audio_defaults(video) == [(6, False), (2, True)]
 
 
+@pytest.mark.parametrize("option, kept", [
+    ([], ["video.mp4.bak", "video.mp4.bak.1"]),
+    (["--existing-backups", "replace"], ["video.mp4.bak"]),
+], ids=["numbered without a terminal", "--existing-backups replace"])
+def test_a_second_backup_never_loses_the_first_unless_asked(tmp_path, option, kept):
+    """A second --backup --force run on the same file finds the first run's
+    .bak. With no terminal to ask (as here, and in cron or Docker) the new
+    backup is numbered; with --existing-backups replace it overwrites."""
+    need("ffmpeg", "ffprobe")
+    video = make_video(tmp_path / "video.mp4", [Track(6, default=True), Track(2)])
+    original = digest(video)
+    assert run_script(video, "--backup")[0] == 0
+    first_result = digest(video)
+
+    code, output = run_script(video, "--backup", "--force", *option)
+
+    assert code == 0, output
+    assert sorted(p.name for p in tmp_path.glob("video.mp4.bak*")) == kept
+    if len(kept) == 2:
+        assert digest(tmp_path / "video.mp4.bak") == original
+        assert digest(tmp_path / "video.mp4.bak.1") == first_result
+        assert "kept the original as video.mp4.bak.1" in output
+    else:
+        assert digest(tmp_path / "video.mp4.bak") == first_result
+
+
 def test_unreadable_file_is_an_error_and_left_alone(tmp_path):
     need("ffmpeg", "ffprobe", "mkvmerge")
     video = tmp_path / "broken.mkv"
