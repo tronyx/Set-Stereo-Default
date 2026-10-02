@@ -268,8 +268,13 @@ main thread, which may be the thread it interrupted while holding it."""
 _cancelled = threading.Event()
 """Set once Ctrl+C or SIGTERM arrives, so files that haven't started are skipped."""
 
-_chown_warned = threading.Event()
-"""Set once the "couldn't keep the owner" warning is shown, so it's shown once per run."""
+_ownership_failures = []
+"""Remuxed files that couldn't be given their original owner, as (file name,
+wanted owner, actual owner, reason). Reported once, at the end of the run,
+by report_ownership_failures()."""
+
+_ownership_lock = threading.Lock()
+"""Guards _ownership_failures, which several --jobs threads add to at once."""
 
 
 def _terminate_active_procs():
@@ -663,10 +668,9 @@ def copy_ownership(src, dst):
     for nothing.
 
     Changing the owner needs root, and NFS shares usually turn root into
-    "nobody", so it can fail. If it does, a warning is logged once per run,
-    naming the owner the file should have, the one it got, and the command
-    to run the script as the right user; the permissions are copied either
-    way."""
+    "nobody", so it can fail. If it does, the file is noted for
+    report_ownership_failures() and the run carries on; the permissions
+    are copied either way."""
     shutil.copymode(src, dst)
     if not hasattr(os, "chown"):
         return
@@ -676,15 +680,33 @@ def copy_ownership(src, dst):
     try:
         os.chown(dst, *wanted)
     except OSError as exc:
-        if not _chown_warned.is_set():
-            _chown_warned.set()
-            user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
-            log.warning(f"    Couldn't give remuxed files their original owner ({exc.strerror}): "
-                        f"{Path(src).name} should belong to {_owner_name(*wanted)} but belongs "
-                        f"to {_owner_name(*got)}. Its permissions still match the original. "
-                        f"Changing a file's owner needs root, and NFS shares usually turn "
-                        f"root into 'nobody'. Run the script as the files' owner instead "
-                        f"(sudo -u {user} python3 ...). Shown once per run.")
+        with _ownership_lock:
+            _ownership_failures.append((Path(src).name, wanted, got, exc.strerror))
+
+
+def report_ownership_failures():
+    """Warn once about every remuxed file that couldn't be given its original
+    owner: how many, one example with the owner it should have and the one
+    it got, and the command to run the script as the right user.
+
+    It's one warning at the end of the run, just before the summary, because
+    the cause (usually running as root on an NFS share) affects the whole
+    run, not one file. Shown under whichever file happened to fail first,
+    it looked like that file's problem."""
+    if not _ownership_failures:
+        return
+    name, wanted, got, reason = _ownership_failures[0]
+    count = len(_ownership_failures)
+    user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
+    if count == 1:
+        what = f"Couldn't give {name} its original owner ({reason}): it should belong to"
+    else:
+        what = (f"Couldn't give {count} remuxed files their original owner ({reason}). "
+                f"For example, {name} should belong to")
+    log.warning(f"\n{what} {_owner_name(*wanted)} but belongs to {_owner_name(*got)}. "
+                f"Permissions were still copied. Changing a file's owner needs root, and NFS "
+                f"shares usually turn root into 'nobody'. Run the script as the files' owner "
+                f"instead (sudo -u {user} python3 ...).")
 
 
 def swap_in(path, tmp_path, backup, keep_dates=False):
@@ -1134,6 +1156,8 @@ def main():
       (_FileHeaderFilter), so no line lands under the wrong header.
     - With --log-file, the "Found N file(s)" line and the summary are also
       printed, so they stay on the console.
+    - Files that couldn't be given their original owner are reported in one
+      warning just before the summary (report_ownership_failures()).
 
     When stopped (Ctrl+C or SIGTERM), the stop handler has already killed
     every remux and each one has removed its temp file. What's left is to
@@ -1354,9 +1378,11 @@ def main():
         print()
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
+        report_ownership_failures()
         print_summary(partial=True, cancelled=len(files) - sum(stats.values()))
         sys.exit(128 + signum)
 
+    report_ownership_failures()
     print_summary()
 
     if stats["error"]:

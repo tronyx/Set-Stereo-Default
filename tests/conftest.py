@@ -19,7 +19,7 @@ def _reset():
     added by main()."""
     ssd._active_procs.clear()
     ssd._cancelled.clear()
-    ssd._chown_warned.clear()
+    ssd._ownership_failures.clear()
     ssd._last_header[0] = None
     ssd._file_context.header = None
     for handler in ssd.log.handlers:

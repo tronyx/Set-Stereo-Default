@@ -269,10 +269,10 @@ Symlinked subfolders aren't searched unless you add `--follow-symlinks`; each on
 
 A remux creates a brand-new file, so the script copies the original's permissions and owner onto it. That way tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it. If the new file already has the right owner, it's left as it is.
 
-Changing a file's owner requires root. If the script can't do it, you'll see one warning per run saying which owner the file should have and which it got (the permissions are still copied):
+Changing a file's owner requires root. If the script can't do it, the permissions are still copied, and one warning at the end of the run, just before the summary, says how many files are affected and which owner they should have:
 
 ```text
-Couldn't give remuxed files their original owner (Operation not permitted): Movie.mkv should belong to tronyx:users (1000:100) but belongs to nobody:nogroup (65534:65534). ...
+Couldn't give 5 remuxed files their original owner (Operation not permitted). For example, Movie.mkv should belong to tronyx:users (1000:100) but belongs to nobody:nogroup (65534:65534). ...
 ```
 
 > [!IMPORTANT]

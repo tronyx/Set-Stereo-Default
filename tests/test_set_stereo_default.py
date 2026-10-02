@@ -908,7 +908,9 @@ def test_swap_in_leaves_the_owner_alone_when_it_already_matches(tmp_path, monkey
     assert "Couldn't give" not in caplog.text
 
 
-def test_swap_in_warns_once_when_the_owner_cant_be_changed(nfs_owners, monkeypatch, caplog):
+def test_owner_failures_are_reported_once_at_the_end(nfs_owners, monkeypatch, caplog):
+    """Swapping a file in doesn't warn by itself: the cause affects the
+    whole run, so report_ownership_failures() warns once, with a count."""
     make, _ = nfs_owners
 
     def not_permitted(*args):
@@ -919,12 +921,23 @@ def test_swap_in_warns_once_when_the_owner_cant_be_changed(nfs_owners, monkeypat
         video, tmp = make(name)
         ssd.swap_in(video, tmp, backup=False)
         assert video.read_bytes() == b"remuxed"
+    assert "Couldn't give" not in caplog.text
 
-    assert caplog.text.count("Couldn't give remuxed files their original owner") == 1
-    assert "(Operation not permitted)" in caplog.text
-    assert ("a.mkv should belong to tronyx:users (1000:100) but belongs to "
-            "nobody:nogroup (65534:65534)") in caplog.text
-    assert "sudo -u tronyx python3" in caplog.text
+    ssd.report_ownership_failures()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith(
+        "\nCouldn't give 2 remuxed files their original owner (Operation not permitted). "
+        "For example, a.mkv should belong to tronyx:users (1000:100) but belongs to "
+        "nobody:nogroup (65534:65534).")
+    assert "sudo -u tronyx python3" in warnings[0]
+    assert "once per run" not in warnings[0]
+
+
+def test_nothing_is_reported_when_every_owner_was_kept(caplog):
+    ssd.report_ownership_failures()
+    assert caplog.records == []
 
 
 @pytest.mark.parametrize("uid, gid, described", [
@@ -949,9 +962,37 @@ def test_sudo_hint_uses_the_user_id_when_the_owner_has_no_name(nfs_owners, monke
     video, tmp = make("v.mkv")
 
     ssd.swap_in(video, tmp, backup=False)
+    ssd.report_ownership_failures()
 
-    assert "should belong to 99:100 but belongs to nobody:nogroup (65534:65534)" in caplog.text
+    assert ("Couldn't give v.mkv its original owner (Operation not permitted): it should "
+            "belong to 99:100 but belongs to nobody:nogroup (65534:65534)") in caplog.text
     assert "sudo -u '#99' python3" in caplog.text
+
+
+def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, monkeypatch,
+                                                                        capsys):
+    """The run from the bug report: with --jobs, the warning used to appear
+    under whichever file failed first."""
+    make_videos(tmp_path, 3)
+
+    def fake_process_file(path, args, position=0, header="", on_progress=None):
+        ssd.log.info(f"\n{header}\n  {path.name}: setting stream#1 (eng, aac) as default audio")
+        with ssd._ownership_lock:
+            ssd._ownership_failures.append((path.name, (1000, 100), (65534, 65534),
+                                            "Operation not permitted"))
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
+                                      "--no-progress", "--jobs", "2"])
+    ssd.main()
+
+    lines = capsys.readouterr().out.splitlines()
+    warning = next(i for i, line in enumerate(lines) if line.startswith("Couldn't give"))
+    assert lines[warning].startswith("Couldn't give 3 remuxed files their original owner")
+    assert max(i for i, line in enumerate(lines) if "setting stream#1" in line) < warning
+    assert lines[warning + 1:warning + 3] == ["", "----- Summary -----"]
 
 
 def remux_with_mkvmerge(path):
