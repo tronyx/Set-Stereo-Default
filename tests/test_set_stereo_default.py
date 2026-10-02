@@ -233,6 +233,19 @@ def test_jobs_must_be_at_least_1(tmp_path, monkeypatch, capsys):
     assert "--jobs must be >= 1" in capsys.readouterr().err
 
 
+def test_existing_backups_needs_backup(tmp_path, monkeypatch, capsys):
+    """Without --backup no backup is made, so --existing-backups would be
+    silently ignored; most likely --backup was forgotten."""
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
+                                      "--existing-backups", "replace"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    assert exit_info.value.code == 2
+    assert "--existing-backups only applies with --backup" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("missing, need_mkvmerge, reported", [
     ([], True, None),
     (["mkvmerge"], False, None),
@@ -362,6 +375,27 @@ def test_iter_files_warns_about_a_path_that_isnt_a_file_or_folder(tmp_path, capl
 
     assert list(ssd.iter_files([pipe], ssd.DEFAULT_EXTS, recursive=True)) == []
     assert f"Skipping {pipe}: not a file or directory" in caplog.text
+
+
+def test_iter_files_warns_about_a_folder_it_cant_open(library, monkeypatch, caplog):
+    """os.walk() skips a folder it can't open without a word, so its files
+    would quietly be missing from the run. The folder is made unreadable by
+    failing os.scandir() for it, which works the same on every platform
+    and when run as root."""
+    real_scandir = os.scandir
+    locked = library / "Season 01"
+
+    def scandir(path="."):
+        if os.path.abspath(path) == str(locked):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_scandir(path)
+    monkeypatch.setattr(os, "scandir", scandir)
+
+    found = names(ssd.iter_files([library], ssd.DEFAULT_EXTS, recursive=True), library)
+
+    assert found == ["a.mkv", "b.MP4"]
+    assert f"Couldn't search {locked}: Permission denied" in caplog.text
+    assert [r.levelname for r in caplog.records if "Couldn't search" in r.message] == ["WARNING"]
 
 
 def test_a_mistyped_path_is_reported_on_the_console_and_the_rest_still_run(tmp_path, monkeypatch,
@@ -512,9 +546,13 @@ def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypat
     (["N"], "number"),
     (["q"], "quit"),
     (["", "maybe", " n "], "number"),
-    ([EOFError], "quit"),
+    ([EOFError], "number"),
 ], ids=["delete", "number", "quit", "asks again until it understands", "ctrl+d"])
 def test_ask_about_existing_backups(monkeypatch, answers, expected):
+    """End of input numbers new backups, as when no one can be asked, rather
+    than quitting: on Windows a run started with input from NUL gets end of
+    input straight away, and quitting would end every such run doing
+    nothing while reporting success."""
     questions = []
 
     def fake_input(prompt):
@@ -526,8 +564,9 @@ def test_ask_about_existing_backups(monkeypatch, answers, expected):
     monkeypatch.setattr("builtins.input", fake_input)
 
     assert ssd.ask_about_existing_backups(3) == expected
-    assert questions[0] == ("3 file(s) already have a backup: [d]elete and replace them, "
-                            "[n]umber new ones (.bak.1, .bak.2...), or [q]uit? ")
+    assert questions[0] == ("3 file(s) already have a backup. If they're changed: [d]elete and "
+                            "replace the old backup, [n]umber the new one (.bak.1, .bak.2...), "
+                            "or [q]uit? ")
     assert len(questions) == len(answers)
 
 
@@ -556,7 +595,7 @@ def backed_up(tmp_path, monkeypatch):
 
         monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: None)
         monkeypatch.setattr(ssd, "process_file", fake_process_file)
-        monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(isatty=lambda: tty))
+        monkeypatch.setattr(ssd, "_can_ask", lambda: tty)
         monkeypatch.setattr("builtins.input", fake_input)
         monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path),
                                           "--no-progress", *options])
@@ -610,6 +649,21 @@ def test_existing_backups_are_numbered_when_no_one_can_answer(backed_up, capsys)
     assert questions == []
     assert seen == ["number", "number"]
     assert "Use --existing-backups to choose" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("stdin_tty, stdout_tty, expected", [
+    (True, True, True),
+    (True, False, False),
+    (False, True, False),
+], ids=["both terminals", "output piped", "input redirected"])
+def test_can_ask_only_with_a_terminal_for_input_and_output(monkeypatch, stdin_tty, stdout_tty,
+                                                          expected):
+    """Input alone isn't enough: Windows reports NUL as a terminal, so a run
+    started with input from NUL would otherwise be asked a question no one
+    can answer."""
+    monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(isatty=lambda: stdin_tty))
+    monkeypatch.setattr(ssd.sys, "stdout", types.SimpleNamespace(isatty=lambda: stdout_tty))
+    assert ssd._can_ask() is expected
 
 
 @pytest.mark.parametrize("mode", ["replace", "number"])
