@@ -34,9 +34,9 @@ How it changes each file:
 Safe by default:
   - Files that are already right are left alone.
   - --dry-run shows what would change without touching anything.
-  - Each new file is checked (no lost streams, the right track is default)
-    before it replaces the original. --backup also keeps the original as
-    <name>.bak.
+  - Each new file is checked (no lost streams, no shorter than the
+    original, the right track is default) before it replaces the
+    original. --backup also keeps the original as <name>.bak.
   - Ctrl+C or SIGTERM (docker stop, kill) stops cleanly and removes any
     half-written temp files.
 
@@ -101,6 +101,16 @@ to count."""
 NAME_TAGS = ("title", "name", "handler_name")
 """Tags that can hold a track's name: MKV uses "title", and ffprobe reports
 MP4 names as "name" or "handler_name"."""
+
+MAX_DURATION_LOSS = 0.01
+"""How much shorter a remux may be than the original, as a fraction of the
+original's duration, before it's rejected. A normal remux changes the
+duration by milliseconds; a file whose header claims more than it contains
+(e.g. an incomplete download) comes out much shorter."""
+
+MIN_DURATION_LOSS = 1.0
+"""The least duration loss, in seconds, that rejects a remux, so short clips
+aren't rejected over a few milliseconds of normal drift."""
 
 log = logging.getLogger("set_stereo_default")
 
@@ -376,19 +386,27 @@ def needs_change(streams, target_index):
 
 
 def probe_layout(path):
-    """Return every stream in path (type, codec, channels, language and
-    default flag), or None if ffprobe can't read it. Used to check a remux."""
+    """Return (streams, duration) for path: every stream (type, codec,
+    channels, language and default flag) and the duration in seconds, or
+    None if unknown. Returns (None, None) if ffprobe can't read the file.
+    Used to check a remux."""
     res = run([
         "ffprobe", "-v", "error", "-print_format", "json", "-show_entries",
-        "stream=index,codec_type,codec_name,channels:stream_disposition=default:stream_tags=language",
+        "stream=index,codec_type,codec_name,channels:stream_disposition=default:stream_tags=language"
+        ":format=duration",
         str(path),
     ])
     if res.returncode != 0:
-        return None
+        return None, None
     try:
-        return json.loads(res.stdout).get("streams", [])
+        data = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return None
+        return None, None
+    try:
+        duration = float(data.get("format", {}).get("duration"))
+    except (TypeError, ValueError):
+        duration = None
+    return data.get("streams", []), duration
 
 
 def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
@@ -396,17 +414,29 @@ def verify_remux(orig_path, tmp_path, streams, target_index, reordered):
     it looks right, otherwise a short reason why not.
 
     The new file must have as many streams as the original, so nothing was
-    lost. Then the target must be the only audio track flagged default. A
+    lost, and must not be shorter than the original by more than
+    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds). A much
+    shorter result means the original contains less than its header
+    claims, e.g. an incomplete download, so it's left alone for a person
+    to look at. A longer one is fine: the original's header just
+    understated it. The check is skipped if either duration is unknown.
+
+    Then the target must be the only audio track flagged default. A
     remux keeps audio tracks in order, so the target is found by its
     position among them. After an AVI reorder (reordered=True) there's no
     flag to check, so the first audio track must instead match the
     target's codec, channel count and language."""
-    before = probe_layout(orig_path)
-    after = probe_layout(tmp_path)
+    before, before_duration = probe_layout(orig_path)
+    after, after_duration = probe_layout(tmp_path)
     if before is None or after is None:
         return "ffprobe couldn't read the file"
     if len(after) != len(before):
         return f"stream count changed from {len(before)} to {len(after)}"
+    if before_duration and after_duration is not None:
+        allowed = max(before_duration * MAX_DURATION_LOSS, MIN_DURATION_LOSS)
+        if after_duration < before_duration - allowed:
+            return (f"duration dropped from {before_duration:.1f}s to {after_duration:.1f}s; "
+                    f"the original may be incomplete")
 
     audio = [s for s in after if s.get("codec_type") == "audio"]
     if len(audio) != len(streams):

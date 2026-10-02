@@ -43,15 +43,17 @@ class Track:
     visual_impaired: bool = False
 
 
-def make_video(path, tracks):
-    """Write a 1-second video at path with one audio stream per Track.
-    Video and audio use encoders built into every ffmpeg (mpeg4, ac3), and
-    the audio is silence, so each file is a few KB. A track's title is set
-    both as "title" (what MKV uses for a track name) and "handler_name"
-    (what MP4 uses)."""
-    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1"]
+def make_video(path, tracks, seconds=1):
+    """Write a video of the given length at path with one audio stream per
+    Track. Video and audio use encoders built into every ffmpeg (mpeg4,
+    ac3), and the audio is silence, so each file is a few KB per second. A
+    track's title is set both as "title" (what MKV uses for a track name)
+    and "handler_name" (what MP4 uses). MP4 files get their index at the
+    front, so a truncated copy can still be read."""
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+           f"testsrc=size=64x48:rate=5:duration={seconds}"]
     for t in tracks:
-        cmd += ["-t", "1", "-f", "lavfi", "-i",
+        cmd += ["-t", str(seconds), "-f", "lavfi", "-i",
                 f"anullsrc=channel_layout={LAYOUTS[t.channels]}:sample_rate=48000"]
     cmd += ["-map", "0:v"]
     for i in range(len(tracks)):
@@ -66,6 +68,8 @@ def make_video(path, tracks):
         if t.title:
             cmd += [f"-metadata:s:a:{i}", f"title={t.title}",
                     f"-metadata:s:a:{i}", f"handler_name={t.title}"]
+    if path.suffix == ".mp4":
+        cmd += ["-movflags", "+faststart"]
     subprocess.run(cmd + [str(path)], check=True, capture_output=True, text=True)
     return path
 
@@ -241,6 +245,26 @@ def test_unreadable_file_is_an_error_and_left_alone(tmp_path):
     assert code == 1, output
     assert summary(output)["error"] == 1, output
     assert digest(video) == before
+
+
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
+    """An incomplete download still claims its full length in its header,
+    but a remux only contains what's really there, so it comes out much
+    shorter. The script must reject it rather than hide the problem."""
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
+    full = make_video(tmp_path / f"full{ext}", [Track(6, default=True), Track(2)], seconds=20)
+    video = tmp_path / f"video{ext}"
+    video.write_bytes(full.read_bytes()[:full.stat().st_size // 2])
+    before = digest(video)
+
+    code, output = run_script(video)
+
+    assert code == 1, output
+    assert summary(output)["error"] == 1, output
+    assert "duration dropped from" in output, output
+    assert digest(video) == before
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
 
 
 def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path):

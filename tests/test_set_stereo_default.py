@@ -265,14 +265,19 @@ def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypat
 @pytest.fixture
 def fake_ffprobe(monkeypatch):
     """Replace run() with a stand-in ffprobe. Set layouts[path] to the
-    streams it should report for that file, or None to make it fail."""
+    streams it should report for that file, to (streams, duration in
+    seconds) to report a duration too, or to None to make it fail."""
     layouts = {}
 
     def fake_run(cmd, **kw):
-        streams = layouts[cmd[-1]]
-        if streams is None:
+        layout = layouts[cmd[-1]]
+        if layout is None:
             return types.SimpleNamespace(returncode=1, stdout="", stderr="unreadable")
-        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"streams": streams}), stderr="")
+        streams, duration = layout if isinstance(layout, tuple) else (layout, None)
+        data = {"streams": streams}
+        if duration is not None:
+            data["format"] = {"duration": f"{duration:.6f}"}
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
     monkeypatch.setattr(ssd, "run", fake_run)
     return layouts
 
@@ -311,6 +316,38 @@ def test_verify_remux_avi_reorder(fake_ffprobe):
 
     fake_ffprobe["tmp"] = ORIGINAL_LAYOUT
     assert "didn't end up first" in ssd.verify_remux("orig", "tmp", ORIGINAL_AUDIO, 2, reordered=True)
+
+
+REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6),
+                  stream(2, "audio", 1, "aac", 2), stream(3, "subtitle")]
+
+
+@pytest.mark.parametrize("before, after, rejected", [
+    (2400.0, 2400.02, False),
+    (2400.0, 2377.0, False),
+    (2400.0, 2375.0, True),
+    (2400.0, 1200.0, True),
+    (30.0, 29.1, False),
+    (30.0, 28.9, True),
+    (1.0, 0.5, False),
+    (2400.0, 2500.0, False),
+    (None, 1200.0, False),
+    (2400.0, None, False),
+], ids=["normal drift", "just under 1%", "just over 1%", "half missing",
+        "short clip within 1s", "short clip over 1s", "1s clip", "longer",
+        "original duration unknown", "remux duration unknown"])
+def test_verify_remux_rejects_a_remux_much_shorter_than_the_original(fake_ffprobe, before, after,
+                                                                     rejected):
+    fake_ffprobe["orig"] = (ORIGINAL_LAYOUT, before)
+    fake_ffprobe["tmp"] = (REMUXED_LAYOUT, after)
+
+    problem = ssd.verify_remux("orig", "tmp", ORIGINAL_AUDIO, 2, reordered=False)
+
+    if rejected:
+        assert problem == (f"duration dropped from {before:.1f}s to {after:.1f}s; "
+                           f"the original may be incomplete")
+    else:
+        assert problem is None
 
 
 

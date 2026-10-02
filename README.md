@@ -210,7 +210,10 @@ A file is **skipped** (and counted under `skipped` in the summary) when:
 
 ### 🧩 Changing the file
 
-Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged) before it replaces the original. If the check fails, the original is kept and the file is counted as an `error`.
+Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged, and not noticeably shorter than the original) before it replaces the original. If the check fails, the original is kept and the file is counted as an `error`.
+
+> [!NOTE]
+> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `error` on every run until it's replaced.
 
 | Format | How it's changed |
 | --- | --- |
