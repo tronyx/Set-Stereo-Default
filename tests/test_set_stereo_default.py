@@ -625,6 +625,41 @@ def test_swap_in_keeps_the_original_permissions(tmp_path):
     assert video.stat().st_mode & 0o777 == 0o764
 
 
+OLD_TIMES_NS = (1_577_880_000_000_000_000, 1_577_890_000_123_456_000)
+
+
+@pytest.mark.parametrize("keep_dates", [True, False])
+def test_swap_in_keeps_the_original_dates_only_when_asked(tmp_path, keep_dates):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    os.utime(video, ns=OLD_TIMES_NS)
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+
+    ssd.swap_in(video, tmp, backup=False, keep_dates=keep_dates)
+
+    st = video.stat()
+    assert video.read_bytes() == b"remuxed"
+    if keep_dates:
+        assert (st.st_atime_ns, st.st_mtime_ns) == OLD_TIMES_NS
+    else:
+        assert st.st_mtime_ns > OLD_TIMES_NS[1]
+
+
+def test_keep_dates_leaves_the_backup_with_the_original_dates(tmp_path):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    os.utime(video, ns=OLD_TIMES_NS)
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+
+    ssd.swap_in(video, tmp, backup="number", keep_dates=True)
+
+    bak = tmp_path / "v.mkv.bak"
+    assert bak.read_bytes() == b"original"
+    assert bak.stat().st_mtime_ns == video.stat().st_mtime_ns == OLD_TIMES_NS[1]
+
+
 def test_swap_in_gives_the_new_file_the_original_owner(tmp_path, monkeypatch):
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")
@@ -830,7 +865,7 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
 def file_args(**overrides):
     """process_file()'s args, as a --dry-run with no progress bar."""
     values = dict(prefer_lang=None, avi_reorder=False, force=False, dry_run=True,
-                  backup=False, no_progress=True, jobs=1)
+                  backup=False, keep_dates=False, no_progress=True, jobs=1)
     values.update(overrides)
     return types.SimpleNamespace(**values)
 

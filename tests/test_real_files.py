@@ -230,6 +230,24 @@ def test_dry_run_changes_nothing(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["video.mkv"]
 
 
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+@pytest.mark.parametrize("keep", [True, False], ids=["--keep-dates", "default"])
+def test_keep_dates_keeps_the_original_modification_time(tmp_path, ext, keep):
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
+    video = make_video(tmp_path / f"video{ext}", [Track(6, default=True), Track(2)])
+    old_mtime_ns = 1_577_890_000_000_000_000
+    os.utime(video, ns=(old_mtime_ns, old_mtime_ns))
+
+    code, output = run_script(video, *(["--keep-dates"] if keep else []))
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    if keep:
+        assert video.stat().st_mtime_ns == old_mtime_ns
+    else:
+        assert video.stat().st_mtime_ns > old_mtime_ns
+
+
 def test_backup_keeps_the_original(tmp_path):
     need("ffmpeg", "ffprobe")
     video = make_video(tmp_path / "video.mp4", [Track(6, default=True), Track(2)])

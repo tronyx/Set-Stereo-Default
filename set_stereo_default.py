@@ -572,15 +572,23 @@ def copy_ownership(src, dst):
                         f"network shares often map root to 'nobody'.")
 
 
-def swap_in(path, tmp_path, backup):
+def swap_in(path, tmp_path, backup, keep_dates=False):
     """Replace path with the checked remux at tmp_path. Copies the original's
-    permissions and owner, keeps the original as a backup if backup is
-    set, then swaps the new file in with a single atomic rename.
+    permissions and owner (and with keep_dates, its access and modification
+    times), keeps the original as a backup if backup is set, then swaps the
+    new file in with a single atomic rename.
 
     backup is falsy for no backup, "replace" to overwrite an existing
     <name>.bak, or anything else to number the new one if <name>.bak
-    exists (see backup_path())."""
+    exists (see backup_path()).
+
+    keep_dates is off by default because tools that spot changed files by
+    size and modification time (rsync's default, some backup software)
+    could skip a remux that kept both, leaving a stale copy."""
     copy_ownership(path, tmp_path)
+    if keep_dates:
+        st = os.stat(path)
+        os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
     if backup:
         bak_path = make_backup(path, replace=(backup == "replace"))
         if bak_path.suffix != ".bak":
@@ -588,7 +596,7 @@ def swap_in(path, tmp_path, backup):
     os.replace(tmp_path, path)
 
 
-def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup):
+def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, keep_dates=False):
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged).
@@ -602,7 +610,7 @@ def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup):
             log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        swap_in(path, tmp_path, backup)
+        swap_in(path, tmp_path, backup, keep_dates)
         return True
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -610,7 +618,7 @@ def check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup):
 
 
 def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False, position=0,
-              on_progress=None):
+              on_progress=None, keep_dates=False):
     """Remux an MKV/WebM file with mkvmerge so only target_index is flagged
     default. Returns True on success, False on failure (already logged).
     With dry_run, just logs the command.
@@ -675,11 +683,12 @@ def apply_mkv(path, streams, target_index, dry_run, backup, show_progress=False,
         log.warning(f"    {path.name}: mkvmerge finished with warnings: "
                     + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
-    return check_and_swap_in(path, tmp_path, streams, target_index, False, backup)
+    return check_and_swap_in(path, tmp_path, streams, target_index, False, backup, keep_dates)
 
 
 def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
-                 duration=None, show_progress=False, position=0, on_progress=None):
+                 duration=None, show_progress=False, position=0, on_progress=None,
+                 keep_dates=False):
     """Remux any non-MKV file with ffmpeg (-c copy, so nothing is re-encoded)
     so only target_index is flagged default. Returns True on success, False
     on failure (already logged). With dry_run, just logs the command.
@@ -759,7 +768,7 @@ def apply_remux(path, streams, target_index, dry_run, backup, reorder_for_avi,
             tmp_path.unlink(missing_ok=True)
         return False
 
-    return check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup)
+    return check_and_swap_in(path, tmp_path, streams, target_index, reordered, backup, keep_dates)
 
 
 def process_file(path, args, position=0, header="", on_progress=None):
@@ -826,11 +835,11 @@ def _process_file(path, args, position=0, header="", on_progress=None):
 
     if ext in MKV_EXTS:
         ok = apply_mkv(path, streams, target["index"], args.dry_run, args.backup,
-                        show_progress, position, on_progress)
+                        show_progress, position, on_progress, args.keep_dates)
     else:
         ok = apply_remux(path, streams, target["index"], args.dry_run,
                           args.backup, is_avi_reorder,
-                          duration, show_progress, position, on_progress)
+                          duration, show_progress, position, on_progress, args.keep_dates)
 
     return "changed" if ok else "error"
 
@@ -991,6 +1000,11 @@ def main():
     ap.add_argument("--avi-reorder", action="store_true",
                      help="For .avi files, which have no default flag, move the stereo track "
                           "to the front instead")
+    ap.add_argument("--keep-dates", action="store_true",
+                     help="Give each changed file the original's modification and access "
+                          "times, so it doesn't look newly changed to media servers. Off by "
+                          "default: backup tools that compare size and date (e.g. rsync) "
+                          "could then miss the change")
     ap.add_argument("--force", action="store_true",
                      help="Remux even files that are already correct, e.g. to fix thumbnails "
                           "on files an older version of this script edited in place")

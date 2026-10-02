@@ -101,6 +101,7 @@ Folders are searched recursively. You can also pass individual files, or a mix o
 | `--follow-symlinks` | Also look inside symlinked subfolders. By default they're skipped (folders you name on the command line are always searched) |
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](#-changing-the-file)) |
 | `--force` | Remux even files that are already correct |
+| `--keep-dates` | Give each changed file the original's modification date, so it doesn't look newly changed (see [File dates](#-file-dates)) |
 | `--no-progress` | Hide the progress bars, e.g. for cron or CI logs |
 
 > [!TIP]
@@ -254,6 +255,15 @@ A remux creates a brand-new file, so the script copies the original's permission
 
 > [!NOTE]
 > Changing a file's owner requires root. If the script can't do it, the new file belongs to whoever ran the script, and you'll see one warning per run (the permissions are still copied). This often happens on network shares, such as NFS, that map root to `nobody`. Run the script as the user that owns your media, or fix the owner afterwards with `chown`.
+
+### 📅 File dates
+
+By default, a changed file gets the time of the run as its modification date, like any newly written file. Some media servers and players sort "recently added" or "recently modified" by that date, so fixed files can jump to the top of those lists.
+
+With `--keep-dates`, each changed file gets the original's modification and access dates instead. It's off by default for a reason: tools that decide whether a file changed by comparing its size and date (rsync's default, and some backup software) could skip a fixed file whose size happens to come out the same, leaving your backup copy with the old version. If you use one, keep the default or make it compare file contents (`rsync --checksum`).
+
+> [!NOTE]
+> Some dates can't be kept either way: the "changed" time (ctime) on Linux and macOS always updates, and on Windows a file's "Date created" becomes the time of the run.
 
 ### 🧹 Leftover temp files
 
