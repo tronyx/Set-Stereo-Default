@@ -19,8 +19,9 @@ Which track it picks:
   The stereo track in the same language as the track that plays by default
   now, so a stereo dub never replaces the original language. Commentary and
   audio-description tracks are never picked. If no track fits, or several
-  do, the file is skipped. --prefer-lang sets the language yourself and
-  breaks ties.
+  do, the file is skipped. --prefer-lang picks a language to use whenever
+  there's a stereo track in it, and breaks ties; files without one are
+  handled as usual.
 
 How it changes each file:
   - .mkv/.webm       remuxed with mkvmerge
@@ -56,7 +57,8 @@ Examples:
   Fix a whole library, 4 files at a time, with the details in a log file:
     python3 set_stereo_default.py /path/to/videos --jobs 4 --log-file run.log
 
-  Use the English stereo track, whatever language plays by default now:
+  Use the English stereo track wherever there is one, whatever language
+  plays by default now:
     python3 set_stereo_default.py /path/to/videos --prefer-lang en
 
   Just these files, or only .mkv files and not in subfolders:
@@ -553,19 +555,35 @@ def normalize_language(code: str | None) -> str:
 def choose_target(streams: list[Stream],
                   prefer_lang: str | None) -> tuple[Stream | None, str | None]:
     """Return (stream, note): the stereo track to make default, or None and a
-    note saying why the file should be skipped.
+    note saying why the file should be skipped. When a track is returned,
+    note is None, unless prefer_lang matched nothing and the track was
+    picked the usual way instead; then note says so.
 
     Commentary and audio-description tracks are never picked. The track
-    must be in the wanted language: prefer_lang if given, otherwise the
-    language of the track players start on now (the default one, or the
-    first if none is flagged). That way a stereo dub never replaces the
-    original language. A track with no language tag (or "und") matches any
-    language, but a track tagged with the wanted one wins over it. Codes
-    are compared after normalize_language(), so "de", "ger" and "deu" all
-    mean German."""
+    must be in the language of the track players start on now (the
+    default one, or the first if none is flagged), so a stereo dub never
+    replaces the original language. prefer_lang is tried before that: a
+    stereo track in it wins, but if there's none the usual rule still
+    applies, so the option never leaves a file alone that a run without it
+    would fix. It does skip a file with several stereo tracks in that
+    language, rather than falling back to another language. A track with no
+    language tag (or "und") matches any language, but a track tagged with
+    the wanted one wins over it. Codes are compared after
+    normalize_language(), so "de", "ger" and "deu" all mean German."""
     def describe(ss: list[Stream]) -> str:
         """List tracks for a skip note, e.g. "stream#2 (eng/aac), stream#3 (spa/ac3)"."""
         return ", ".join(f"stream#{s.index} ({s.language or 'und'}/{s.codec})" for s in ss)
+
+    def in_language(lang: str | None) -> list[Stream]:
+        """The candidates in lang or with no language tag, narrowed to the
+        one tagged with lang when there's exactly one; every candidate when
+        lang itself is unset."""
+        wanted = normalize_language(lang)
+        if wanted in ("", "und"):
+            return candidates
+        matches = [s for s in candidates if normalize_language(s.language) in ("", "und", wanted)]
+        exact = [s for s in matches if normalize_language(s.language) == wanted]
+        return exact if len(exact) == 1 else matches
 
     stereo = [s for s in streams if s.channels == 2]
     candidates = [s for s in stereo if not is_commentary(s)]
@@ -575,21 +593,24 @@ def choose_target(streams: list[Stream],
         return None, "no 2-channel audio track found"
 
     current = next((s for s in streams if s.default), streams[0])
-    shown = prefer_lang or current.language
-    wanted = normalize_language(shown)
-    if wanted not in ("", "und"):
-        in_lang = [s for s in candidates
-                   if normalize_language(s.language) in ("", "und", wanted)]
-        if not in_lang:
-            return None, (f"no 2-channel track in '{shown}' [found {describe(candidates)}] "
-                          f"-- use --prefer-lang to pick another language")
-        exact = [s for s in in_lang if normalize_language(s.language) == wanted]
-        candidates = exact if len(exact) == 1 else in_lang
+    tried = [prefer_lang or current.language]
+    picks = in_language(tried[0])
+    fell_back = (not picks and prefer_lang is not None
+                 and normalize_language(prefer_lang) != normalize_language(current.language))
+    if fell_back:
+        picks = in_language(current.language)
+        if normalize_language(current.language) not in ("", "und"):
+            tried.append(current.language)
+    missing = f"no 2-channel track in '{prefer_lang}', " if fell_back else ""
 
-    if len(candidates) == 1:
-        return candidates[0], None
+    if not picks:
+        languages = " or ".join(f"'{t}'" for t in tried)
+        return None, (f"no 2-channel track in {languages} [found {describe(candidates)}] "
+                      f"-- use --prefer-lang to pick another language")
+    if len(picks) == 1:
+        return picks[0], (f"{missing}so picked as if --prefer-lang wasn't given" if fell_back else None)
     return None, (
-        f"multiple 2-channel tracks found [{describe(candidates)}] -- use --prefer-lang to disambiguate"
+        f"{missing}multiple 2-channel tracks found [{describe(picks)}] -- use --prefer-lang to disambiguate"
     )
 
 
@@ -1093,7 +1114,9 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
                   on_progress: Callable[[int], None] | None = None) -> str:
     """The work behind process_file(). For AVI files with --avi-reorder,
     "already correct" means the target is already the first audio track.
-    --force remuxes even files that are already correct.
+    --force remuxes even files that are already correct. When --prefer-lang
+    matched no track, choose_target()'s note is added to the file's line,
+    so it's clear why the track is in another language.
 
     The "setting stream#N ..." line isn't logged here but goes into the
     Plan as its intro. apply_mkv()/apply_remux() log it with the dry-run
@@ -1119,6 +1142,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
     if target is None:
         log.info(f"  {path.name}: SKIP ({note})")
         return "skipped"
+    fallback = f" ({note})" if note else ""
 
     if is_avi_reorder:
         changed = streams[0].index != target.index
@@ -1127,14 +1151,14 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
 
     if not changed and not args.force:
         what = "is first audio stream" if is_avi_reorder else "is default"
-        log.info(f"  {path.name}: already correct (stream#{target.index} {what}), skipping")
+        log.info(f"  {path.name}: already correct (stream#{target.index} {what}), skipping{fallback}")
         return "unchanged"
 
     action = "moving" if is_avi_reorder else "setting"
     outcome = "to the first audio track" if is_avi_reorder else "as default audio"
     plan = Plan(path, streams, target.index, duration,
                 intro=f"  {path.name}: {action} stream#{target.index} "
-                      f"({target.language or 'und'}, {target.codec}) {outcome}",
+                      f"({target.language or 'und'}, {target.codec}) {outcome}{fallback}",
                 layout=layout)
     progress = Progress(show=HAVE_TQDM and not args.no_progress and args.jobs == 1,
                         position=position, on_progress=on_progress)
@@ -1316,10 +1340,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "you're asked once before any file is changed; when there's no "
                          "one to ask (cron, Docker), new backups are numbered")
     ap.add_argument("--prefer-lang", default=None, metavar="LANG",
-                    help="Language the stereo track must be in, as a 2- or 3-letter code "
-                         "(en, eng, de, ger and deu all work); also picks between several "
-                         "stereo tracks (default: the language of the track that plays by "
-                         "default now)")
+                    help="Language to use when there's a stereo track in it, as a 2- or "
+                         "3-letter code (en, eng, de, ger and deu all work); also picks "
+                         "between several stereo tracks. Files without one get a stereo "
+                         "track in the language that plays by default now, as without "
+                         "this option")
     ap.add_argument("--avi-reorder", action="store_true",
                     help="For .avi files, which have no default flag, move the stereo track "
                          "to the front instead")
