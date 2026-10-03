@@ -6,9 +6,9 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 
 [Open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) and include:
 
-- the command you ran and what it printed (`--dry-run` output is ideal)
-- your operating system, and your Python, ffmpeg and mkvmerge versions (`python3 --version`, `ffmpeg -version`, `mkvmerge --version`)
-- if a file was handled wrongly, its track list from `ffprobe -v error -show_streams -select_streams a -of json "<file>"`
+- The command you ran and what it printed (`--dry-run` output is ideal).
+- Your operating system, and your Python, ffmpeg and mkvmerge versions (`python3 --version`, `ffmpeg -version`, `mkvmerge --version`).
+- If a file was handled wrongly, its track list from `ffprobe -v error -show_streams -select_streams a -of json "<file>"`.
 
 ## 💡 Suggesting a feature
 
