@@ -62,3 +62,4 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 - **Type hints on every function.** `mypy` checks them, so they stay accurate. If it objects to something, fix the code rather than silencing it: a `# type: ignore` is a comment, which the rule above rules out.
 - **Add or update tests** for any change in behavior. Logic tests go in `tests/test_set_stereo_default.py`. Anything that depends on how ffmpeg or mkvmerge really behave goes in `tests/test_real_files.py`.
 - **Update the README** if you add an option or change what the script does.
+- **Add a line to the changelog** under **Unreleased** in `CHANGELOG.md`, saying what changes for someone using the script.

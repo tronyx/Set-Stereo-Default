@@ -82,6 +82,8 @@ Each file is rewritten to a temporary copy next to the original before it's swap
 > [!TIP]
 > On Windows, if `mkvmerge` isn't found after installing, add the MKVToolNix folder (usually `C:\Program Files\MKVToolNix`) to your `PATH` and open a new terminal.
 
+To update later, run `git pull` in the `Set-Stereo-Default` folder. The [changelog](CHANGELOG.md) lists what's changed.
+
 ## 🚀 Quick start
 
 ```bash
