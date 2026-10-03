@@ -4,7 +4,7 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 
 ## 🐛 Reporting a bug
 
-[Open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) and include:
+[Open a bug report](https://github.com/tronyx/Set-Stereo-Default/issues/new?template=bug_report.yml). The form asks for:
 
 - The command you ran and what it printed (`--dry-run` output is ideal).
 - Your operating system, and your Python, ffmpeg and mkvmerge versions (`python3 --version`, `ffmpeg -version`, `mkvmerge --version`).
@@ -12,7 +12,7 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 
 ## 💡 Suggesting a feature
 
-[Open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) describing what you'd like to do and why. For anything bigger than a small fix, please do this before writing code, so we can agree on the approach and your time isn't wasted.
+[Open a feature request](https://github.com/tronyx/Set-Stereo-Default/issues/new?template=feature_request.yml) describing what you'd like to do and why. For anything bigger than a small fix, please do this before writing code, so we can agree on the approach and your time isn't wasted.
 
 ## 🛠️ Making a change
 
@@ -62,3 +62,4 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 - **Type hints on every function.** `mypy` checks them, so they stay accurate. If it objects to something, fix the code rather than silencing it: a `# type: ignore` is a comment, which the rule above rules out.
 - **Add or update tests** for any change in behavior. Logic tests go in `tests/test_set_stereo_default.py`. Anything that depends on how ffmpeg or mkvmerge really behave goes in `tests/test_real_files.py`.
 - **Update the README** if you add an option or change what the script does.
+- **Add a line to the changelog** under **Unreleased** in `CHANGELOG.md`, saying what changes for someone using the script.

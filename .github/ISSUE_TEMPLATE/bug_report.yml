@@ -1,0 +1,75 @@
+name: 🐛 Bug report
+description: Something went wrong, or a file was handled in a way you didn't expect.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this! Many surprises, such as a file being skipped, are explained in the [Troubleshooting](https://github.com/tronyx/Set-Stereo-Default#-troubleshooting) section of the README, so please check there first.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you start
+      options:
+        - label: I've searched the existing issues and this hasn't been reported yet.
+          required: true
+        - label: I'm using the latest `set_stereo_default.py` from the `master` branch.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected to happen, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command-output
+    attributes:
+      label: Command and output
+      description: The command you ran and everything it printed. `--dry-run` output is ideal. Feel free to shorten long folder paths.
+      placeholder: |
+        python3 set_stereo_default.py "/path/to/videos" --dry-run
+        ...
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g. Ubuntu 24.04, macOS 15, Windows 11, or a Docker image and its tag
+    validations:
+      required: true
+
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: |
+        The output of `python3 --version`, the first line of `ffmpeg -version`, and `mkvmerge --version` (if the file is .mkv or .webm).
+      placeholder: |
+        Python 3.12.3
+        ffmpeg version 7.1 ...
+        mkvmerge v88.0 ...
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: tracks
+    attributes:
+      label: Track list
+      description: |
+        If a file was handled wrongly, its audio tracks from:
+        `ffprobe -v error -show_streams -select_streams a -of json "<file>"`
+      render: json
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else?
+      description: Network share, Docker, symlinks, `--jobs`, or anything else that might matter.
