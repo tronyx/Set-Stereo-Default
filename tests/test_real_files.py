@@ -177,6 +177,9 @@ CASES = {
     "mkv --prefer-lang with a two-letter code": Case(
         ".mkv", [Track(6, "eng", default=True), Track(2, "ger")], "changed", 1,
         ["--prefer-lang", "de"]),
+    "mp4 --prefer-lang with no track in it falls back": Case(
+        ".mp4", [Track(6, "fre", default=True), Track(2, "spa"), Track(2, "fre")], "changed", 2,
+        ["--prefer-lang", "en"]),
     "mp4 one language tagged two ways": Case(
         ".mp4", [Track(6, "ger", default=True), Track(2, "deu")], "changed", 1),
     "mkv no stereo track": Case(".mkv", [Track(6, default=True)], "skipped"),

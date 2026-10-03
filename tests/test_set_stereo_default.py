@@ -82,10 +82,48 @@ def test_prefer_lang_breaks_the_tie_case_insensitively():
     assert target.index == 2
 
 
-def test_prefer_lang_that_matches_nothing_still_skips():
-    streams = [audio(1, 2, language="spa"), audio(2, 2, language="fre")]
-    target, _ = ssd.choose_target(streams, "eng")
+def test_prefer_lang_that_matches_nothing_falls_back_to_the_current_language():
+    streams = [audio(1, 6, language="fre", default=True), audio(2, 2, language="spa"),
+               audio(3, 2, language="fre")]
+    target, note = ssd.choose_target(streams, "eng")
+    assert target.index == 3
+    assert note == "no 2-channel track in 'eng', so picked as if --prefer-lang wasn't given"
+
+
+def test_prefer_lang_fallback_picks_what_a_run_without_it_would():
+    streams = [audio(1, 6, language="", default=True), audio(2, 2, language="spa")]
+    target, note = ssd.choose_target(streams, "eng")
+    assert target.index == 2 and "--prefer-lang wasn't given" in note
+    assert ssd.choose_target(streams, None) == (target, None)
+
+
+def test_prefer_lang_fallback_that_also_matches_nothing_names_both_languages():
+    streams = [audio(1, 6, language="fre", default=True), audio(2, 2, language="spa")]
+    target, note = ssd.choose_target(streams, "eng")
     assert target is None
+    assert note.startswith("no 2-channel track in 'eng' or 'fre' [found stream#2 (spa/aac)]")
+
+
+def test_prefer_lang_fallback_with_several_tracks_still_skips():
+    streams = [audio(1, 6, language="", default=True), audio(2, 2, language="spa"),
+               audio(3, 2, language="fre")]
+    target, note = ssd.choose_target(streams, "eng")
+    assert target is None
+    assert note.startswith("no 2-channel track in 'eng', multiple 2-channel tracks found")
+
+
+def test_prefer_lang_in_the_current_language_doesnt_fall_back():
+    streams = [audio(1, 6, language="eng", default=True), audio(2, 2, language="spa")]
+    target, note = ssd.choose_target(streams, "en")
+    assert target is None and note.startswith("no 2-channel track in 'en' [")
+
+
+def test_several_tracks_in_the_prefer_lang_language_skip_instead_of_falling_back():
+    streams = [audio(1, 6, language="fre", default=True), audio(2, 2, language="eng"),
+               audio(3, 2, language="eng"), audio(4, 2, language="fre")]
+    target, note = ssd.choose_target(streams, "eng")
+    assert target is None
+    assert note.startswith("multiple 2-channel tracks found [stream#2 (eng/aac), stream#3 (eng/aac)]")
 
 
 @pytest.mark.parametrize("commentary", [
@@ -1351,6 +1389,23 @@ def test_other_containers_set_the_default_flag(tmp_path, probed, caplog, name):
 
     assert result == "changed"
     assert "setting stream#2 (eng, aac) as default audio" in caplog.text
+
+
+@pytest.mark.parametrize("default, line", [
+    (1, "setting stream#2 (fre, aac) as default audio"),
+    (2, "already correct (stream#2 is default), skipping"),
+], ids=["changed", "already correct"])
+def test_a_prefer_lang_fallback_is_noted_on_the_files_line(tmp_path, monkeypatch, caplog,
+                                                           default, line):
+    caplog.set_level("INFO")
+    streams = [audio(1, 6, language="fre", default=default == 1),
+               audio(2, 2, language="fre", default=default == 2)]
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: (streams, 100.0))
+
+    ssd.process_file(tmp_path / "v.mkv", file_args(prefer_lang="en"))
+
+    note = "(no 2-channel track in 'en', so picked as if --prefer-lang wasn't given)"
+    assert f"  v.mkv: {line} {note}" in caplog.text
 
 
 def test_file_without_audio_is_skipped(tmp_path, monkeypatch, caplog):

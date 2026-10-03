@@ -106,7 +106,7 @@ On Windows, type `py` instead of `python3`.
 | `--dry-run` | Show what would change without touching any files |
 | `--backup` | Keep each original as `<name>.bak`. Each backup takes as much space as the original (see [Disk space](#-disk-space)) |
 | `--existing-backups MODE` | With `--backup`, what to do when `<name>.bak` already exists: `replace` it, or `number` the new one (`.bak.1`, `.bak.2`, ...). Without this you're asked once (see [Backups](#-backups)) |
-| `--prefer-lang LANG` | Language the stereo track must be in, as a 2- or 3-letter code (`en`, `eng`, `de`, `ger` and `deu` all work). Also picks between several stereo tracks. Default: the language of the track that plays by default now |
+| `--prefer-lang LANG` | Language to use whenever a file has a stereo track in it, as a 2- or 3-letter code (`en`, `eng`, `de`, `ger` and `deu` all work). Also picks between several stereo tracks. Files without one are handled as usual, in the language of the track that plays by default now |
 | `--jobs N` | Work on up to `N` files at once (default: `1`) |
 | `--log-file PATH` | Write the details to a file. Warnings, errors, the progress bar and the summary still show on the console |
 | `--ext EXT1,EXT2` | Extensions to process (default: `mkv,webm,mp4,m4v,mov,avi`). This replaces the default list, so list every extension you want |
@@ -218,17 +218,23 @@ Each `[dry-run]` line is the exact command the script would run, quoted so you c
 The script looks for the audio track with exactly 2 channels and makes it the default, clearing the default flag from every other audio track. Two kinds of stereo track are passed over:
 
 - **Commentary and audio description.** These are often stereo but shouldn't play by default. A track counts as one if the file flags it that way, or if its name contains "commentary", "audio description", "descriptive", "described" or "DVS".
-- **Other languages.** The stereo track has to be in the same language as the track that plays by default now, so an English 5.1 film with a Spanish stereo dub keeps playing in English. Use `--prefer-lang` to choose the language yourself. Tracks with no language tag (or `und`) match any language, but a track tagged with the right language wins over them.
+- **Other languages.** The stereo track has to be in the same language as the track that plays by default now, so an English 5.1 film with a Spanish stereo dub keeps playing in English. Tracks with no language tag (or `und`) match any language, but a track tagged with the right language wins over them.
+
+  `--prefer-lang` picks a language to use whenever a file has a stereo track in it. Files without one are handled as if you hadn't given it, so you can run it over a whole mixed library: with `--prefer-lang en`, an anime with an English stereo dub switches to English, while a French film with only a French stereo track still gets its French stereo track. The file's line says when that happened:
+
+  ```text
+  Le Film (2024).mkv: setting stream#2 (fre, aac) as default audio (no 2-channel track in 'en', so picked as if --prefer-lang wasn't given)
+  ```
 
   Language tags are compared by meaning, not spelling. The same language can be tagged several ways (MKV files use `ger` for German, MP4 files often `deu`, and you might type `de`), so two- and three-letter codes are treated as equal, and region parts like the `-BR` in `pt-BR` are ignored.
 
 A file is **skipped** (and counted under `Skipped` in the summary) when:
 
-- it has no audio at all
-- it has no stereo track, or only commentary/audio-description ones
-- none of its stereo tracks is in the wanted language
-- several stereo tracks qualify and `--prefer-lang` doesn't settle it
-- it's an `.avi` file and `--avi-reorder` wasn't given
+- It has no audio at all.
+- It has no stereo track, or only commentary/audio-description ones.
+- None of its stereo tracks is in the `--prefer-lang` language or the current one.
+- Several stereo tracks qualify and `--prefer-lang` doesn't settle it (several in the `--prefer-lang` language skip the file, rather than falling back to another language).
+- It's an `.avi` file and `--avi-reorder` wasn't given.
 
 ### 🧩 Changing the file
 
