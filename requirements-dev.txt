@@ -4,6 +4,7 @@
 pytest>=7
 coverage>=7
 # Pinned, so a new release with new rules can't suddenly fail the checks.
-# Bump them on purpose, and fix anything new they find in the same change.
+# Dependabot proposes new versions once a month (.github/dependabot.yml);
+# fix anything new they find in that same pull request.
 ruff==0.16.10
 mypy==2.4.0
