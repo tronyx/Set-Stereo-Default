@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-03 · [#8](https://github.com/tronyx/Set-Stereo-Default/pull/8)
+
 ### Project
 
 - Issue forms for bug reports and feature requests. Blank issues are turned off, so every report asks for the details needed to look into it.
