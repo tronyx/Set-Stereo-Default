@@ -125,7 +125,7 @@ The folders are processed in the list's order, after any paths on the command li
 
 - a plain path, spaces and all;
 - a path quoted the way a shell or `ls` shows it, in single or double quotes (with `'\''` for an apostrophe) or with backslash-escaped spaces, so you can paste a listing straight from your terminal;
-- relative to the list file's folder, like `TV Shows/Billions` above, or starting with `~` for your home folder.
+- relative to the list file's folder, like `TV Shows/Cartoons` above, or starting with `~` for your home folder.
 
 Blank lines and lines starting with `#` are skipped. A path that doesn't exist is reported and skipped, and the rest still run.
 
