@@ -23,9 +23,12 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.10", "3.14"]
-        # Windows decodes subprocess output differently, so run the logic tests there too.
+        # Windows decodes subprocess output differently, and macOS has its own
+        # file system (APFS) and temp folder layout, so run the logic tests on both.
         include:
           - os: windows-latest
+            python-version: "3.14"
+          - os: macos-latest
             python-version: "3.14"
     steps:
       - uses: actions/checkout@v7
@@ -222,6 +225,32 @@ jobs:
           python --version
       - run: python -m pytest tests/test_real_files.py -v
 
+  # The real-file tests on macOS, with Homebrew's ffmpeg and MKVToolNix: the
+  # newest releases, built the way most Mac users get them.
+  real-files-macos:
+    name: Real files, newest ffmpeg (macOS)
+    runs-on: macos-latest
+    env:
+      # Fail, rather than skip, if a tool is missing.
+      REQUIRE_MEDIA_TOOLS: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Install ffmpeg and MKVToolNix
+        run: brew install ffmpeg mkvtoolnix
+      - name: Tool versions
+        run: |
+          ffmpeg -version | head -n 1
+          mkvmerge --version
+          python --version
+      - run: python -m pytest tests/test_real_files.py -v
+
   # Builds the Docker image, runs every test inside it with the image's own
   # Python, ffmpeg and MKVToolNix, then runs the image the way people will.
   docker:
@@ -273,7 +302,7 @@ jobs:
   # Docker Hub personal access token with Read & Write access.
   publish:
     name: Publish the Docker image
-    needs: [test, lint, real-files, real-files-windows, docker]
+    needs: [test, lint, real-files, real-files-windows, real-files-macos, docker]
     if: >-
       github.repository == 'tronyx/Set-Stereo-Default'
       && github.event_name != 'pull_request'

@@ -20,6 +20,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ### Project
 
+- CI runs the logic and real-file tests on macOS too, with Homebrew's ffmpeg and MKVToolNix.
 - The real-file tests check that subtitles, chapters, track names and languages, font attachments and cover art all come through a remux unchanged.
 - CI builds the Docker image on every push, runs all the tests inside it, and runs it as a regular user to check its output.
 
