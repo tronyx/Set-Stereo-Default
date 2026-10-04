@@ -1,8 +1,9 @@
 """End-to-end tests: generate small real videos with ffmpeg, run the script
 on them as a user would, and check the results with ffprobe and mkvmerge.
 
-Unlike test_set_stereo_default.py, these need ffmpeg/ffprobe on PATH (and
-mkvmerge for the .mkv cases). Without them the tests are skipped, unless
+Unlike test_set_stereo_default.py, these need ffmpeg and ffprobe on PATH,
+mkvmerge for the .mkv and .webm cases, and for a few cases an ffmpeg that
+can encode Opus and VP8. Without them the tests are skipped, unless
 REQUIRE_MEDIA_TOOLS is set -- as it is in CI -- in which case a missing tool
 fails the run instead of quietly skipping everything."""
 
@@ -64,13 +65,14 @@ class Track:
 
 def make_video(path, tracks, seconds=1, audio_codec=("ac3",)):
     """Write a video of the given length at path with one audio stream per
-    Track. Video and audio use encoders built into every ffmpeg (mpeg4,
-    ac3), except that WebM needs VP8 video, and the audio is silence, so
-    each file is a few KB per second. audio_codec is the ffmpeg arguments
-    after -c:a, for another audio codec (see AUDIO_CODECS). A
-    track's title is set both as "title" (what MKV uses for a track name)
-    and "handler_name" (what MP4 uses). MP4 files get their index at the
-    front, so a truncated copy can still be read."""
+    Track. The audio is silence and the picture tiny, so each file is a few
+    KB per second. By default the video is mpeg4 and the audio AC3, which
+    every ffmpeg can encode; WebM files get VP8 video instead, since WebM
+    allows nothing else, and audio_codec (the ffmpeg arguments after -c:a,
+    see AUDIO_CODECS) picks another audio codec. A track's title is set both
+    as "title" (what MKV uses for a track name) and "handler_name" (what MP4
+    uses). MP4 files get their index at the front, so a truncated copy can
+    still be read."""
     cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
            f"testsrc=size=64x48:rate=5:duration={seconds}"]
     for t in tracks:
@@ -315,11 +317,11 @@ def make_rich_video(folder, ext, font_type="application/x-truetype-font"):
 
 def contents(path):
     """Everything about path a remux must keep, as plain data: the file's
-    title, its chapters, and for each stream its type, codec, shape,
-    language, name and every disposition flag, except the audio default
-    flag, which is the one thing the script changes. Timings are rounded to
-    the millisecond, since containers store them with different
-    precision."""
+    title, its chapters, and for each stream its type, codec, channel count
+    or picture size, language, name, attachment file name and MIME type,
+    and every disposition flag except the audio default flag, which is the
+    one thing the script changes. Chapter times are rounded to the
+    millisecond, since containers store them with different precision."""
     res = subprocess.run(["ffprobe", "-v", "error", "-of", "json", "-show_streams",
                           "-show_chapters", "-show_format", str(path)],
                          check=True, capture_output=True, text=True)
@@ -348,10 +350,12 @@ def contents(path):
     (".mp4", None),
 ], ids=["mkv, older font type", "mkv, newer font type", "mp4"])
 def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type):
-    """The test file is checked first, so a missing feature in the test's
-    own ffmpeg can't make the comparison pass by having nothing to compare.
-    Both font types must come through as they were: newer mkvmerge versions
-    rewrite the older one unless told not to.
+    """A remux may change the audio default flags and nothing else: all of
+    make_rich_video()'s file must come through as it was. The test file is
+    checked first, so a missing feature in the test's own ffmpeg can't make
+    the comparison pass by having nothing to compare. Both font types must
+    come through as they were: newer mkvmerge versions rewrite the older
+    one unless told not to.
 
     mkvmerge 52 and older drop the hearing-impaired flag, so with one of
     those, the script must reject the remux and leave the file alone."""
@@ -400,7 +404,8 @@ CODEC_CASES = [(".mkv", codec) for codec in AUDIO_CODECS] + [
 @pytest.mark.parametrize("ext, codec", CODEC_CASES, ids=[f"{e[1:]} {c}" for e, c in CODEC_CASES])
 def test_every_common_audio_codec_is_remuxed_untouched(tmp_path, ext, codec):
     """Both audio tracks use the codec. The remux must flip the default
-    flags and nothing else, so the audio is copied, never re-encoded."""
+    flags and nothing else: every stream, including the audio's codec and
+    channel count, must come through as it was."""
     encoder_args, probed_as = AUDIO_CODECS[codec]
     need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext in (".mkv", ".webm") else []))
     need_encoders(encoder_args[0], *(["libvpx"] if ext == ".webm" else []))
@@ -469,8 +474,9 @@ def test_backup_keeps_the_original(tmp_path):
 ], ids=["numbered without a terminal", "--existing-backups replace"])
 def test_a_second_backup_never_loses_the_first_unless_asked(tmp_path, option, kept):
     """A second --backup --force run on the same file finds the first run's
-    .bak. With no terminal to ask (as here, and in cron or Docker) the new
-    backup is numbered; with --existing-backups replace it overwrites."""
+    .bak. With no terminal to ask (as here, and in cron or Docker without
+    -it) the new backup is numbered; with --existing-backups replace it
+    overwrites."""
     need("ffmpeg", "ffprobe")
     video = make_video(tmp_path / "video.mp4", [Track(6, default=True), Track(2)])
     original = digest(video)

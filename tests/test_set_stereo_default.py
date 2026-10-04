@@ -418,10 +418,10 @@ def test_iter_files_warns_about_a_path_that_isnt_a_file_or_folder(tmp_path, capl
 
 
 def test_iter_files_warns_about_a_folder_it_cant_open(library, monkeypatch, caplog):
-    """os.walk() skips a folder it can't open without a word, so its files
-    would quietly be missing from the run. The folder is made unreadable by
-    failing os.scandir() for it, which works the same on every platform
-    and when run as root."""
+    """A folder that can't be opened (no permission, a network share that
+    dropped) must be reported, or its files would quietly be missing from
+    the run. The folder is made unreadable by failing os.scandir() for it,
+    which works the same on every platform and when run as root."""
     real_scandir = os.scandir
     locked = library / "Season 01"
 
@@ -817,10 +817,11 @@ def described(index, codec_type, codec, default=0, channels=None, language="eng"
 
 
 def rich_layout(**changes):
-    """A file with a 5.1 default and a stereo track, a commentary track,
-    and a forced English subtitle, as ffprobe reports it; after the remux
-    the stereo track is default. changes replaces streams by index, e.g.
-    rich_layout(stream3=...)."""
+    """How ffprobe reports a correctly remuxed file: a video, a 5.1 track, a
+    stereo track (now the default), a commentary track and a forced
+    subtitle, with names and languages. rich_plan() describes the same file
+    before the remux. changes replaces streams by index, e.g.
+    rich_layout(stream3=...), to make the remux lose or change something."""
     streams = [described(0, "video", "h264", 1),
                described(1, "audio", "eac3", 0, 6, title="Surround"),
                described(2, "audio", "aac", 1, 2, title="Stereo"),
@@ -1194,9 +1195,9 @@ def test_hint_in_the_docker_image_is_a_docker_run_user(nfs_owners, monkeypatch, 
 
 def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, monkeypatch,
                                                                         capsys):
-    """The run from the bug report: with --jobs, the warning used to appear
-    under whichever file failed first. The list of files is saved in the
-    folder the script was run from."""
+    """With --jobs, the warning must still come once, after every file's
+    lines, not under whichever file happened to fail first. The list of
+    files is saved in the folder the script was run from."""
     videos, run_from = tmp_path / "videos", tmp_path / "run from here"
     videos.mkdir()
     run_from.mkdir()
@@ -2047,11 +2048,11 @@ def test_lines_outside_a_file_pass_straight_through(caplog):
 
 
 def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys):
-    """The run from the bug report: in a --jobs dry run, each file printed
-    its "setting ..." line after ffprobe, then its command after the
-    mkvmerge lookup, by which time other files had printed, so its header
-    was repeated. Both files are held at the lookup until both get there;
-    the "setting ..." line now waits for the command and prints with it."""
+    """In a --jobs dry run, each file's "setting ..." line must print
+    together with its command, so the file's header appears only once. Both
+    files are held at the mkvmerge lookup, between the two lines, until
+    both get there, so if the "setting ..." line printed on its own, the
+    other file's lines would come between it and the command."""
     make_videos(tmp_path, 2)
     barrier = threading.Barrier(2, timeout=5)
 
@@ -2078,10 +2079,11 @@ def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys
 
 
 def test_jobs_keeps_each_files_lines_under_its_own_header(tmp_path, monkeypatch, capsys):
-    """The run from the bug report: with --jobs, each file logs its header,
-    then later its command. Both files are made to log their header before
-    either logs its command, which used to put both commands under the
-    second header. Lines must still print as they happen, not at the end."""
+    """With --jobs, each file's lines must print under that file's header.
+    Both files log their first line before either logs its second, so the
+    second lines follow the other file's; each must get its own header
+    again rather than appearing under the other's. Lines must still print
+    as they happen, not at the end."""
     make_videos(tmp_path, 2)
     barrier = threading.Barrier(2, timeout=5)
 
@@ -2104,8 +2106,9 @@ def test_jobs_keeps_each_files_lines_under_its_own_header(tmp_path, monkeypatch,
 
 
 def test_ctrl_c_with_jobs_skips_files_that_havent_started(tmp_path, monkeypatch):
-    """Leaving the thread pool waits for its workers, which kept taking
-    queued files after Ctrl+C until the whole queue had been remuxed."""
+    """Files still waiting their turn when Ctrl+C arrives must not start.
+    Leaving the thread pool waits for its workers, which would otherwise
+    keep taking queued files until the whole queue had been remuxed."""
     make_videos(tmp_path, 8)
     started = []
 
