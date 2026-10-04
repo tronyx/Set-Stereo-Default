@@ -271,6 +271,25 @@ def test_skip_note_shows_the_language_as_given():
     assert "no 2-channel track in 'de'" in note
 
 
+@pytest.mark.parametrize("argv, paths", [
+    (["--dry-run"], ["/videos"]),
+    (["/videos/Some Show", "--dry-run"], ["/videos/Some Show"]),
+], ids=["no path", "a path given"])
+def test_paths_default_to_videos_in_the_docker_image(monkeypatch, argv, paths):
+    monkeypatch.setenv(ssd.IN_DOCKER_VAR, "1")
+    assert ssd.parse_args(argv).paths == paths
+
+
+def test_a_path_is_required_outside_the_docker_image(capsys):
+    """Outside the image there's no folder to assume, so a forgotten path
+    is an error rather than a search of somewhere unexpected."""
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.parse_args(["--dry-run"])
+
+    assert exit_info.value.code == 2
+    assert "the following arguments are required: paths" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("value", ["english", "xx", "", "e"])
 def test_prefer_lang_rejects_something_that_isnt_a_language_code(tmp_path, monkeypatch, capsys,
                                                                  value):
@@ -447,6 +466,30 @@ def test_iter_files_warns_about_leftover_temp_files(library, caplog):
     list(ssd.iter_files([library], ssd.DEFAULT_EXTS, recursive=True))
     assert "a.mkv.tmp_remux.mkv" in caplog.text
     assert "safe to delete" in caplog.text
+
+
+@pytest.mark.parametrize("in_docker, mounted, hinted", [
+    (True, False, True),
+    (True, True, False),
+    (False, False, False),
+], ids=["docker, nothing mounted", "docker, mounted but no such subfolder", "not docker"])
+def test_a_forgotten_docker_mount_gets_the_fix(tmp_path, monkeypatch, caplog, in_docker, mounted,
+                                               hinted):
+    """A missing path under /videos in the image usually means the -v was
+    forgotten, so the warning says how to mount it. If something is
+    mounted there, it's just a mistyped path."""
+    videos = tmp_path / "videos"
+    if mounted:
+        videos.mkdir()
+    monkeypatch.setattr(ssd, "DOCKER_VIDEOS", str(videos))
+    if in_docker:
+        monkeypatch.setenv(ssd.IN_DOCKER_VAR, "1")
+
+    assert list(ssd.iter_files([videos / "Some Show"], ssd.DEFAULT_EXTS, recursive=True)) == []
+
+    assert f"Skipping {videos / 'Some Show'}: no such file or directory" in caplog.text
+    assert (f"Nothing is mounted at {videos}: add -v \"/path/to/videos:{videos}\" to docker run"
+            in caplog.text) is hinted
 
 
 def test_iter_files_warns_about_a_path_that_doesnt_exist(library, caplog):

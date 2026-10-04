@@ -32,7 +32,7 @@ body:
       description: The command you ran and everything it printed. `--dry-run` output is ideal. Feel free to shorten long folder paths.
       placeholder: |
         python3 set_stereo_default.py "/path/to/videos" --dry-run
-        (or: docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --dry-run)
+        (or: docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default --dry-run)
         ...
       render: text
     validations:

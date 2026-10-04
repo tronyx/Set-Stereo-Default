@@ -66,9 +66,10 @@ Examples:
     python3 set_stereo_default.py file1.mkv file2.mp4
     python3 set_stereo_default.py /path/to/videos --ext mkv --no-recursive
 
-In the Docker image, mount your videos at /videos and put the options after
-the image name, e.g. to preview every change:
-    docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --dry-run
+In the Docker image, mount your videos at /videos, which is searched unless
+you name other paths, and put the options after the image name, e.g. to
+preview every change:
+    docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default --dry-run
 
 Exit codes: 0 all done, 1 a file had an error, no files matched or a tool is
 missing, 2 invalid options, 130 stopped by Ctrl+C, 143 stopped by SIGTERM.
@@ -109,6 +110,13 @@ except ImportError:
     HAVE_TQDM = False
 
 
+def _in_docker() -> bool:
+    """True inside the project's Docker image. There, paths default to
+    DOCKER_VIDEOS, and advice shows docker commands instead of ones for
+    running the script directly."""
+    return os.environ.get(IN_DOCKER_VAR) == "1"
+
+
 def _optional_module(name: str) -> ModuleType | None:
     """Import a module that only some systems have, or return None."""
     try:
@@ -136,8 +144,11 @@ MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
 """Remuxed with -movflags +faststart, keeping the index at the front of the file."""
 
 IN_DOCKER_VAR = "SET_STEREO_DEFAULT_IN_DOCKER"
-"""Set to "1" by the project's Docker image, so advice can show docker
-commands instead of ones for running the script directly."""
+"""Set to "1" by the project's Docker image (see _in_docker())."""
+
+DOCKER_VIDEOS = "/videos"
+"""Where the Docker image expects your videos to be mounted, and what it
+searches when no path is given."""
 
 TMP_MARKER = ".tmp_remux"
 """Marks a file's temp copy while it's remuxed, e.g. "movie.mkv.tmp_remux.mkv"."""
@@ -874,14 +885,14 @@ def report_ownership_failures(folder: Path | str = ".") -> None:
     run, not one file. Shown under whichever file happened to fail first,
     it looked like that file's problem.
 
-    In the Docker image (see IN_DOCKER_VAR), the fix is a docker run
+    In the Docker image (see _in_docker()), the fix is a docker run
     --user with the owner's IDs instead of sudo: sudo isn't there, and the
     owner's name usually isn't either."""
     if not _ownership_failures:
         return
     path, wanted, got, reason = _ownership_failures[0]
     count = len(_ownership_failures)
-    if os.environ.get(IN_DOCKER_VAR) == "1":
+    if _in_docker():
         how = f"the container as the files' owner instead (docker run --user {wanted[0]}:{wanted[1]} ...)"
     else:
         user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
@@ -1340,8 +1351,11 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
     with a warning instead of being treated as videos.
 
     A path that doesn't exist (a typo, an unmounted share) is skipped with a
-    warning, so a mistake in one of several paths doesn't go unnoticed."""
+    warning, so a mistake in one of several paths doesn't go unnoticed. In
+    the Docker image, a path in DOCKER_VIDEOS when nothing is mounted there
+    (a forgotten -v) also gets the fix."""
     seen = set()
+    videos = Path(DOCKER_VIDEOS)
     for p in map(Path, paths):
         candidates: Iterable[tuple[Path, os.DirEntry[str] | None, str | None]]
         if p.is_file():
@@ -1349,7 +1363,11 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
         elif p.is_dir():
             candidates = _walk(p, recursive, follow_symlinks)
         elif not p.exists():
-            log.warning(f"Skipping {p}: no such file or directory")
+            hint = ""
+            if _in_docker() and (p == videos or videos in p.parents) and not videos.exists():
+                hint = (f". Nothing is mounted at {DOCKER_VIDEOS}: add "
+                        f"-v \"/path/to/videos:{DOCKER_VIDEOS}\" to docker run")
+            log.warning(f"Skipping {p}: no such file or directory{hint}")
             continue
         else:
             log.warning(f"Skipping {p}: not a file or directory")
@@ -1422,10 +1440,19 @@ def ask_about_existing_backups(count: int) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse and check the command line (sys.argv's, unless argv is given).
-    Invalid options exit with argparse's usage message and code 2."""
+    Invalid options exit with argparse's usage message and code 2.
+
+    At least one path is required, except in the Docker image, where it
+    defaults to DOCKER_VIDEOS, the folder the image documents mounting your
+    videos at. The image itself runs --help when given no arguments at all,
+    so a bare docker run never starts changing files."""
+    in_docker = _in_docker()
+    paths_help = "Video files and folders to process"
+    if in_docker:
+        paths_help += f" (default: {DOCKER_VIDEOS})"
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("paths", nargs="+", help="Video files and folders to process")
+    ap.add_argument("paths", nargs="*" if in_docker else "+", help=paths_help)
     ap.add_argument("--ext", default=None,
                     help="Comma-separated extensions to process, replacing the default list "
                          "(default: mkv,webm,mp4,m4v,mov,avi)")
@@ -1476,6 +1503,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "Above 1, only the overall progress bar is shown, and a file's "
                          "[i/N] header is repeated when its lines follow another file's")
     args = ap.parse_args(argv)
+    if not args.paths:
+        args.paths = [DOCKER_VIDEOS]
 
     if args.jobs < 1:
         ap.error("--jobs must be >= 1")
