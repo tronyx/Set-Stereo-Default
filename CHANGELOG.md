@@ -22,6 +22,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ### Project
 
+- CI lints the workflow (actionlint, with shellcheck), the `Dockerfile` (hadolint) and the Markdown files (markdownlint).
 - CI tests mkvmerge 45, the oldest the README lists, from MKVToolNix's AppImage archive.
 - The logic tests cover the last untested paths, including running without tqdm, an unreadable ffprobe result, an unexpected error in one file, and `--ext` written with spaces, dots or capitals. Coverage is up from 96% to 99%.
 - CI runs the logic and real-file tests on macOS too, with Homebrew's ffmpeg and MKVToolNix.

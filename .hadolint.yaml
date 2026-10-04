@@ -1,0 +1,7 @@
+# Settings for hadolint, which CI runs on the Dockerfile.
+ignored:
+  # "Pin versions in apk add": left unpinned on purpose. Alpine removes a
+  # package's old version from its repositories when it releases a fix, so
+  # pinned versions would break the build at the next update, and unpinned
+  # ones are how the weekly rebuild picks up security fixes.
+  - DL3018

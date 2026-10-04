@@ -58,6 +58,7 @@ jobs:
 
   # Lint (ruff) and type checks (mypy), set up in pyproject.toml. mypy runs
   # twice: the script imports different modules on Linux and on Windows.
+  # Then lints this workflow, the Dockerfile and the Markdown files.
   lint:
     name: Lint and type check
     runs-on: ubuntu-latest
@@ -72,6 +73,23 @@ jobs:
       - run: python -m ruff check .
       - run: python -m mypy --platform linux
       - run: python -m mypy --platform win32
+      # This workflow, including shellcheck on its scripts. Pinned, so a new
+      # release with new checks can't suddenly fail the job.
+      - name: Lint the workflow
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+      - name: Lint the Dockerfile
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+      # The README, the changelog and everything in .github, with the
+      # settings in .markdownlint.json.
+      - name: Lint the Markdown files
+        uses: DavidAnson/markdownlint-cli2-action@v24
+        with:
+          globs: "**/*.md"
 
   # Writes the coverage total to coverage-<branch>.json on the badges branch,
   # which the README's coverage badges read through shields.io. Only runs

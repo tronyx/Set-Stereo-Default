@@ -44,6 +44,14 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 
    `ruff` is a linter and `mypy` checks the type hints; both are set up in `pyproject.toml`, and GitHub runs them on every push too.
 
+   GitHub also lints the workflow ([actionlint](https://github.com/rhysd/actionlint)), the `Dockerfile` ([hadolint](https://github.com/hadolint/hadolint), set up in `.hadolint.yaml`) and the Markdown files ([markdownlint](https://github.com/DavidAnson/markdownlint-cli2), set up in `.markdownlint.json`). If you change any of those and have Docker, you can run the same checks locally:
+
+   ```bash
+   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
+   docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint hadolint --config .hadolint.yaml Dockerfile
+   docker run --rm -v "$PWD:/workdir" davidanson/markdownlint-cli2 "**/*.md"
+   ```
+
 5. Commit, push, and open a pull request against `develop`:
 
    ```bash
