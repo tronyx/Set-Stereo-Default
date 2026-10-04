@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-04 · [#10](https://github.com/tronyx/Set-Stereo-Default/pull/10)
+
 ### Changed
 
 - **In the Docker image, the path defaults to `/videos`**, where the image expects your videos to be mounted, so `docker run -v "/path/to/videos:/videos" tronyx/set-stereo-default --dry-run` is enough. Naming paths still works as before. With nothing at all after the image name, the image still shows the help, so a bare `docker run` never changes files. Outside Docker, a path is still required.
