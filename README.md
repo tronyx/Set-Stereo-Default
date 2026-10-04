@@ -33,6 +33,7 @@ The commentary is stereo too, but it's never picked (see [Picking the track](#-p
 - ⚡ **Parallel.** `--jobs N` works on several files at once.
 - 📝 **Quiet logging.** `--log-file` keeps the details in a file and the console tidy.
 - 🛑 **Stops cleanly.** Ctrl+C or `docker stop` halts mid-run without leaving half-written files.
+- 🐳 **Docker image.** Everything it needs in one image, for amd64 and arm64 (see [Docker](#-docker)).
 
 ## 📋 Requirements
 
@@ -44,6 +45,8 @@ The commentary is stereo too, but it's never picked (see [Picking the track](#-p
 | [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
 
 The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45 through 102.
+
+Using Docker? The image has all of these built in, so you only need Docker itself (see [Docker](#-docker)).
 
 > [!NOTE]
 > ffmpeg versions older than 4.4 can't read the commentary and audio-description flags in MKV files, so they might make a commentary track the default.
@@ -100,6 +103,62 @@ python3 set_stereo_default.py "/path/to/videos"
 Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
 
 On Windows, type `py` instead of `python3`.
+
+## 🐳 Docker
+
+The image has the script, Python, ffmpeg, MKVToolNix and tqdm, so there's nothing else to install. It runs on `amd64` and `arm64` (e.g. a Raspberry Pi 4 or 5, or an ARM-based NAS), and is published in two places:
+
+| Registry | Image |
+| --- | --- |
+| Docker Hub | `tronyx/set-stereo-default` |
+| GitHub | `ghcr.io/tronyx/set-stereo-default` |
+
+`latest` is built from `master`, and rebuilt every week for Alpine's security fixes. `develop` is built from the `develop` branch.
+
+```bash
+# 1. See what would change, without touching anything
+docker run --rm -it -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos" --dry-run
+
+# 2. Try it for real on one folder, keeping backups
+docker run --rm -it -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos/Some Show" --backup
+
+# 3. Happy? Run it on everything, 3 files at a time
+docker run --rm -it -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos" --jobs 3
+```
+
+Everything after the image name is passed to the script, so every [option](#%EF%B8%8F-options) works the same way. With no options, it shows the built-in help.
+
+**What the `docker run` options do:**
+
+- **`-v "/path/to/videos:/path/to/videos"`** lets the container see your videos. It can only see folders you mount. Mounting each one at the same path inside the container means every path in the output matches your real one. Add one `-v` per folder, and don't mount them read-only (`:ro`), since the script has to replace the files.
+- **`-it`** gives the script a terminal, which shows the progress bars and lets it ask the [backup question](#-backups). Leave it out for cron and other scheduled runs: the bars are hidden and new backups are numbered.
+- **`--rm`** removes the container once the run finishes.
+
+**Running as the files' owner.** The container runs as root by default, which lets it give every remuxed file its original owner on a local disk. On an NFS share, root usually becomes `nobody` and can't change owners (see [Permissions and ownership](#-permissions-and-ownership)), so run the container as the user that owns your videos instead. `id -u` and `id -g` show your own IDs, and `stat -c '%u:%g' "/path/to/a/video.mkv"` shows a file's:
+
+```bash
+docker run --rm -it --user 1000:100 -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos"
+```
+
+**Keeping the log.** Anything written inside the container is gone when it exits, so point `--log-file` at a mounted folder. If remuxed files can't be given their owner, the list of them is saved next to the log too:
+
+```bash
+docker run --rm -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos" --log-file "/path/to/videos/set_stereo_default.log"
+```
+
+**Running it on a schedule,** e.g. every night at 3 AM from cron, as the files' owner and with no terminal:
+
+```text
+0 3 * * * docker run --rm --user 1000:100 -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos" --log-file "/path/to/videos/set_stereo_default.log"
+```
+
+**Good to know:**
+
+- **Updating:** `docker pull tronyx/set-stereo-default` gets the newest image.
+- **Stopping:** `docker stop` and Ctrl+C both stop the script cleanly, the same as without Docker.
+- **Symlinks:** a symlink that points outside the mounted folders can't be followed inside the container. Mount the folders it points into as well, at the same paths.
+- **Docker Desktop (Windows and macOS):** the path before the `:` is the one on your computer, e.g. `-v "D:\Videos:/videos"`, and you then pass `/videos` to the script.
+- **Building it yourself:** `docker build -t set-stereo-default .` in this repository, then use `set-stereo-default` as the image name.
 
 ## ⚙️ Options
 
@@ -294,7 +353,7 @@ The list has one full path per line, sorted. It's saved next to your `--log-file
 > sudo -u tronyx python3 set_stereo_default.py /mnt/media
 > ```
 >
-> The warning suggests the right `sudo -u` for your files. To fix files that already ended up owned by `nobody`, run `chown` on the NFS server itself, where root isn't squashed.
+> The warning suggests the right `sudo -u` for your files. In the Docker image, it suggests the matching `docker run --user` instead (see [Docker](#-docker)). To fix files that already ended up owned by `nobody`, run `chown` on the NFS server itself, where root isn't squashed.
 
 ### 📅 File dates
 
