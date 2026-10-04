@@ -1,14 +1,16 @@
 """End-to-end tests: generate small real videos with ffmpeg, run the script
 on them as a user would, and check the results with ffprobe and mkvmerge.
 
-Unlike test_set_stereo_default.py, these need ffmpeg/ffprobe on PATH (and
-mkvmerge for the .mkv cases). Without them the tests are skipped, unless
+Unlike test_set_stereo_default.py, these need ffmpeg and ffprobe on PATH,
+mkvmerge for the .mkv and .webm cases, and for a few cases an ffmpeg that
+can encode Opus and VP8. Without them the tests are skipped, unless
 REQUIRE_MEDIA_TOOLS is set -- as it is in CI -- in which case a missing tool
 fails the run instead of quietly skipping everything."""
 
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,14 +26,29 @@ LAYOUTS = {2: "stereo", 6: "5.1"}
 """ffmpeg's channel layout name for each channel count make_video() supports."""
 
 
+def _unavailable(message):
+    """Skip the test, or with REQUIRE_MEDIA_TOOLS set, fail it."""
+    if os.environ.get("REQUIRE_MEDIA_TOOLS"):
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 def need(*tools):
     """Skip (or, with REQUIRE_MEDIA_TOOLS set, fail) unless every tool is on PATH."""
     missing = [t for t in tools if shutil.which(t) is None]
     if missing:
-        message = "not installed: " + ", ".join(missing)
-        if os.environ.get("REQUIRE_MEDIA_TOOLS"):
-            pytest.fail(message)
-        pytest.skip(message)
+        _unavailable("not installed: " + ", ".join(missing))
+
+
+def need_encoders(*encoders):
+    """Skip (or, with REQUIRE_MEDIA_TOOLS set, fail) unless this ffmpeg can
+    encode with every one of encoders, named as ffmpeg -encoders lists them."""
+    res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], check=True,
+                         capture_output=True, text=True)
+    have = {line.split()[1] for line in res.stdout.splitlines() if len(line.split()) > 1}
+    missing = [e for e in encoders if e not in have]
+    if missing:
+        _unavailable("ffmpeg can't encode with: " + ", ".join(missing))
 
 
 @dataclass
@@ -46,13 +63,16 @@ class Track:
     visual_impaired: bool = False
 
 
-def make_video(path, tracks, seconds=1):
+def make_video(path, tracks, seconds=1, audio_codec=("ac3",)):
     """Write a video of the given length at path with one audio stream per
-    Track. Video and audio use encoders built into every ffmpeg (mpeg4,
-    ac3), and the audio is silence, so each file is a few KB per second. A
-    track's title is set both as "title" (what MKV uses for a track name)
-    and "handler_name" (what MP4 uses). MP4 files get their index at the
-    front, so a truncated copy can still be read."""
+    Track. The audio is silence and the picture tiny, so each file is a few
+    KB per second. By default the video is mpeg4 and the audio AC3, which
+    every ffmpeg can encode; WebM files get VP8 video instead, since WebM
+    allows nothing else, and audio_codec (the ffmpeg arguments after -c:a,
+    see AUDIO_CODECS) picks another audio codec. A track's title is set both
+    as "title" (what MKV uses for a track name) and "handler_name" (what MP4
+    uses). MP4 files get their index at the front, so a truncated copy can
+    still be read."""
     cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
            f"testsrc=size=64x48:rate=5:duration={seconds}"]
     for t in tracks:
@@ -61,7 +81,8 @@ def make_video(path, tracks, seconds=1):
     cmd += ["-map", "0:v"]
     for i in range(len(tracks)):
         cmd += ["-map", f"{i + 1}:a"]
-    cmd += ["-c:v", "mpeg4", "-c:a", "ac3", "-disposition:v:0", "default"]
+    cmd += ["-c:v", "libvpx" if path.suffix == ".webm" else "mpeg4", "-c:a", *audio_codec,
+            "-disposition:v:0", "default"]
     for i, t in enumerate(tracks):
         flags = [name for name, on in (("default", t.default), ("comment", t.comment),
                                        ("visual_impaired", t.visual_impaired)) if on]
@@ -89,6 +110,12 @@ def audio_defaults(path):
     """(channels, default flag) for each audio stream, in file order."""
     return [(s["channels"], bool(s["disposition"]["default"]))
             for s in probe(path) if s["codec_type"] == "audio"]
+
+
+def mkvmerge_version():
+    """The major version of the mkvmerge on PATH, e.g. 99."""
+    res = subprocess.run(["mkvmerge", "--version"], check=True, capture_output=True, text=True)
+    return int(re.search(r"v(\d+)\.", res.stdout).group(1))
 
 
 def mkvmerge_defaults(path):
@@ -224,6 +251,177 @@ def test_script_on_a_real_file(tmp_path, case):
         assert boxes.index("moov") < boxes.index("mdat"), f"not faststart: {boxes}"
 
 
+CHAPTERS = """;FFMETADATA1
+title=Rich Test Movie
+[CHAPTER]
+TIMEBASE=1/1000
+START=0
+END=1000
+title=Opening
+[CHAPTER]
+TIMEBASE=1/1000
+START=1000
+END=2000
+title=Ending
+"""
+"""Chapters and a file title in ffmpeg's metadata format, for make_rich_video()."""
+
+
+def make_rich_video(folder, ext, font_type="application/x-truetype-font"):
+    """Write a two-second video with everything a real library file tends to
+    have besides audio, so a remux that drops or changes any of it shows up:
+    a file title and two chapters; 5.1 and stereo audio tracks with names;
+    two subtitle tracks with languages, names and the forced and
+    hearing-impaired flags; and, for MKV, a font attachment of font_type, or
+    for MP4, cover art. Subtitles are SubRip in MKV and mov_text in MP4.
+    The font's file name is set to just "font.ttf", as in real files: on
+    Windows, ffmpeg would otherwise store its full path, which mkvmerge
+    then trims."""
+    srt = folder / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    chapters = folder / "chapters.txt"
+    chapters.write_text(CHAPTERS, encoding="utf-8")
+    cmd = ["ffmpeg", "-v", "error", "-y",
+           "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=2",
+           "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+           "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+           "-i", str(srt), "-i", str(srt), "-i", str(chapters)]
+    maps = ["-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s", "-map", "4:s"]
+    if ext == ".mp4":
+        cover = folder / "cover.png"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=32x32",
+                        "-frames:v", "1", str(cover)], check=True, capture_output=True)
+        cmd += ["-i", str(cover)]
+        maps += ["-map", "6:v"]
+    else:
+        font = folder / "font.ttf"
+        font.write_bytes(b"\x00\x01\x00\x00" + bytes(64))
+        cmd += ["-attach", str(font), "-metadata:s:t", f"mimetype={font_type}",
+                "-metadata:s:t", "filename=font.ttf"]
+    cmd += maps + ["-map_metadata", "5", "-map_chapters", "5",
+                   "-c:v:0", "mpeg4", "-c:a", "ac3",
+                   "-c:s", "mov_text" if ext == ".mp4" else "srt",
+                   "-disposition:v:0", "default",
+                   "-disposition:a:0", "default", "-disposition:a:1", "0",
+                   "-disposition:s:0", "forced", "-disposition:s:1", "hearing_impaired"]
+    for spec, language, title in (("a:0", "eng", "Surround 5.1"), ("a:1", "eng", "Stereo"),
+                                  ("s:0", "eng", "English (Forced)"), ("s:1", "spa", "Español SDH")):
+        cmd += [f"-metadata:s:{spec}", f"language={language}", f"-metadata:s:{spec}", f"title={title}",
+                f"-metadata:s:{spec}", f"handler_name={title}"]
+    if ext == ".mp4":
+        cmd += ["-c:v:1", "png", "-disposition:v:1", "attached_pic", "-movflags", "+faststart"]
+    path = folder / f"rich{ext}"
+    subprocess.run(cmd + [str(path)], check=True, capture_output=True, text=True)
+    return path
+
+
+def contents(path):
+    """Everything about path a remux must keep, as plain data: the file's
+    title, its chapters, and for each stream its type, codec, channel count
+    or picture size, language, name, attachment file name and MIME type,
+    and every disposition flag except the audio default flag, which is the
+    one thing the script changes. Chapter times are rounded to the
+    millisecond, since containers store them with different precision."""
+    res = subprocess.run(["ffprobe", "-v", "error", "-of", "json", "-show_streams",
+                          "-show_chapters", "-show_format", str(path)],
+                         check=True, capture_output=True, text=True)
+    data = json.loads(res.stdout)
+    streams = []
+    for s in data["streams"]:
+        tags = {k.lower(): v for k, v in s.get("tags", {}).items()}
+        disposition = dict(s.get("disposition", {}))
+        if s["codec_type"] == "audio":
+            disposition.pop("default", None)
+        streams.append({
+            "type": s["codec_type"], "codec": s.get("codec_name"),
+            "channels": s.get("channels"), "size": (s.get("width"), s.get("height")),
+            "tags": {k: tags[k] for k in ("language", "title", "handler_name", "filename", "mimetype")
+                     if k in tags},
+            "disposition": disposition})
+    chapters = [(round(float(c["start_time"]), 3), round(float(c["end_time"]), 3),
+                 c.get("tags", {}).get("title")) for c in data.get("chapters", [])]
+    title = {k.lower(): v for k, v in data["format"].get("tags", {}).items()}.get("title")
+    return {"title": title, "chapters": chapters, "streams": streams}
+
+
+@pytest.mark.parametrize("ext, font_type", [
+    (".mkv", "application/x-truetype-font"),
+    (".mkv", "font/ttf"),
+    (".mp4", None),
+], ids=["mkv, older font type", "mkv, newer font type", "mp4"])
+def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type):
+    """A remux may change the audio default flags and nothing else: all of
+    make_rich_video()'s file must come through as it was. The test file is
+    checked first, so a missing feature in the test's own ffmpeg can't make
+    the comparison pass by having nothing to compare. Both font types must
+    come through as they were: newer mkvmerge versions rewrite the older
+    one unless told not to.
+
+    mkvmerge 52 and older drop the hearing-impaired flag, so with one of
+    those, the script must reject the remux and leave the file alone."""
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
+    video = make_rich_video(tmp_path, ext, *([font_type] if font_type else []))
+    before = contents(video)
+    assert before["title"] == "Rich Test Movie" and len(before["chapters"]) == 2, before
+    kinds = [s["type"] for s in before["streams"]]
+    assert kinds.count("audio") == 2 and kinds.count("subtitle") == 2, before
+    assert kinds.count("attachment" if ext == ".mkv" else "video") == (1 if ext == ".mkv" else 2), before
+    assert audio_defaults(video) == [(6, True), (2, False)]
+    original = digest(video)
+
+    code, output = run_script(video)
+
+    if ext == ".mkv" and mkvmerge_version() < 54:
+        assert code == 1, output
+        assert summary(output)["error"] == 1, output
+        assert "lost its hearing_impaired flag" in output, output
+        assert digest(video) == original
+        assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+        return
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert contents(video) == before
+
+
+AUDIO_CODECS = {
+    "aac": (("aac",), "aac"),
+    "e-ac3": (("eac3",), "eac3"),
+    "dts": (("dca", "-strict", "-2"), "dts"),
+    "truehd": (("truehd", "-strict", "-2"), "truehd"),
+    "flac": (("flac",), "flac"),
+    "opus": (("libopus",), "opus"),
+}
+"""The common audio codecs besides AC3, each as (ffmpeg arguments after
+-c:a, the name ffprobe reports). ffmpeg calls its DTS and TrueHD encoders
+experimental, hence -strict -2."""
+
+CODEC_CASES = [(".mkv", codec) for codec in AUDIO_CODECS] + [
+    (".mp4", "aac"), (".mp4", "e-ac3"), (".webm", "opus")]
+"""Each codec in MKV, and the usual ones in MP4 and WebM."""
+
+
+@pytest.mark.parametrize("ext, codec", CODEC_CASES, ids=[f"{e[1:]} {c}" for e, c in CODEC_CASES])
+def test_every_common_audio_codec_is_remuxed_untouched(tmp_path, ext, codec):
+    """Both audio tracks use the codec. The remux must flip the default
+    flags and nothing else: every stream, including the audio's codec and
+    channel count, must come through as it was."""
+    encoder_args, probed_as = AUDIO_CODECS[codec]
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext in (".mkv", ".webm") else []))
+    need_encoders(encoder_args[0], *(["libvpx"] if ext == ".webm" else []))
+    video = make_video(tmp_path / f"video{ext}", [Track(6, default=True), Track(2)],
+                       audio_codec=encoder_args)
+    before = contents(video)
+    assert [s["codec"] for s in before["streams"] if s["type"] == "audio"] == [probed_as] * 2
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert contents(video) == before
+
+
 def test_dry_run_changes_nothing(tmp_path):
     need("ffmpeg", "ffprobe", "mkvmerge")
     video = make_video(tmp_path / "video.mkv", [Track(6, default=True), Track(2)])
@@ -276,8 +474,9 @@ def test_backup_keeps_the_original(tmp_path):
 ], ids=["numbered without a terminal", "--existing-backups replace"])
 def test_a_second_backup_never_loses_the_first_unless_asked(tmp_path, option, kept):
     """A second --backup --force run on the same file finds the first run's
-    .bak. With no terminal to ask (as here, and in cron or Docker) the new
-    backup is numbered; with --existing-backups replace it overwrites."""
+    .bak. With no terminal to ask (as here, and in cron or Docker without
+    -it) the new backup is numbered; with --existing-backups replace it
+    overwrites."""
     need("ffmpeg", "ffprobe")
     video = make_video(tmp_path / "video.mp4", [Track(6, default=True), Track(2)])
     original = digest(video)

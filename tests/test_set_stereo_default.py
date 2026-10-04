@@ -3,6 +3,7 @@ mkvmerge: anything that would call those tools is replaced with a stand-in,
 and subprocess behavior is exercised with small Python child processes."""
 
 import json
+import logging
 import os
 import shlex
 import signal
@@ -58,6 +59,27 @@ def parse_pct_line(line):
     """parse_pct for the test child processes, which print "pct=N"."""
     return int(line.split("=", 1)[1]) if line.startswith("pct=") else None
 
+
+def file_args(**overrides):
+    """The parsed options process_file() and the apply functions take, as a
+    --dry-run with no progress bar."""
+    values = {"prefer_lang": None, "avi_reorder": False, "force": False, "dry_run": True,
+              "backup": False, "keep_dates": False, "no_progress": True, "jobs": 1}
+    values.update(overrides)
+    return types.SimpleNamespace(**values)
+
+
+def make_videos(folder, count):
+    """Create count placeholder videos in folder: e00.mkv, e01.mkv, ... Only
+    their names matter, since the tests that use them replace
+    process_file()."""
+    for i in range(count):
+        (folder / f"e{i:02}.mkv").write_text("x")
+
+
+def not_permitted(*args):
+    """A stand-in for os.chown() on an NFS share that squashes root."""
+    raise PermissionError(1, "Operation not permitted")
 
 
 def test_choose_target_picks_the_only_stereo_track():
@@ -324,6 +346,23 @@ def test_probe_streams_reads_every_stream_and_the_commentary_flags(monkeypatch):
     assert duration == 60.0
 
 
+@pytest.mark.parametrize("returncode, stdout, logged", [
+    (1, "", "ffprobe failed on v.mkv: unreadable"),
+    (0, "not json", "Could not parse ffprobe output for v.mkv"),
+], ids=["ffprobe failed", "unreadable output"])
+def test_probe_streams_logs_why_it_couldnt_read_a_file(monkeypatch, caplog, returncode, stdout,
+                                                       logged):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=returncode, stdout=stdout, stderr="unreadable\n"))
+
+    assert ssd.probe_streams(Path("v.mkv")) == (None, None)
+    assert logged in caplog.text
+
+    caplog.clear()
+    assert ssd.probe_streams(Path("v.mkv"), report=False) == (None, None)
+    assert caplog.text == ""
+
+
 @pytest.mark.parametrize("tags, is_commentary", [
     ({"title": "Director's Commentary"}, True),
     ({"name": "Director's Commentary", "handler_name": "SoundHandler"}, True),
@@ -350,7 +389,6 @@ def test_commentary_is_found_by_any_track_name(monkeypatch, tags, is_commentary)
 def test_needs_change(defaults, expected):
     streams = [audio(1, 6, default=defaults[0]), audio(2, 2, default=defaults[1])]
     assert ssd.needs_change(streams, 2) is expected
-
 
 
 @pytest.fixture
@@ -387,6 +425,19 @@ def test_iter_files_respects_ext(library):
     assert names(found, library) == ["b.MP4"]
 
 
+@pytest.mark.parametrize("ext, found", [
+    ("mkv", ["a.mkv"]),
+    ("mkv, .MP4", ["a.mkv", "b.MP4"]),
+    (".AVI,", ["c.avi"]),
+], ids=["one", "spaces, dots and capitals", "trailing comma"])
+def test_ext_takes_extensions_however_theyre_written(tmp_path, ext, found):
+    for name in ("a.mkv", "b.MP4", "c.avi", "d.webm"):
+        (tmp_path / name).write_bytes(b"x")
+    args = types.SimpleNamespace(paths=[str(tmp_path)], ext=ext, no_recursive=False,
+                                 skip_symlinks=False, follow_symlinks=False)
+    assert [p.name for p in ssd.find_files(args)] == found
+
+
 def test_iter_files_accepts_files_passed_directly(library):
     paths = [library / "a.mkv", library / "a.mkv.tmp_remux.mkv", library / "notes.nfo"]
     assert names(ssd.iter_files(paths, ssd.DEFAULT_EXTS, recursive=True), library) == ["a.mkv"]
@@ -417,10 +468,10 @@ def test_iter_files_warns_about_a_path_that_isnt_a_file_or_folder(tmp_path, capl
 
 
 def test_iter_files_warns_about_a_folder_it_cant_open(library, monkeypatch, caplog):
-    """os.walk() skips a folder it can't open without a word, so its files
-    would quietly be missing from the run. The folder is made unreadable by
-    failing os.scandir() for it, which works the same on every platform
-    and when run as root."""
+    """A folder that can't be opened (no permission, a network share that
+    dropped) must be reported, or its files would quietly be missing from
+    the run. The folder is made unreadable by failing os.scandir() for it,
+    which works the same on every platform and when run as root."""
     real_scandir = os.scandir
     locked = library / "Season 01"
 
@@ -460,6 +511,7 @@ def test_a_mistyped_path_is_reported_on_the_console_and_the_rest_still_run(tmp_p
 
     assert f"Skipping {typo}: no such file or directory" in capsys.readouterr().out
     assert sorted(processed) == ["e00.mkv", "e01.mkv"]
+
 
 @pytest.fixture
 def linked(tmp_path):
@@ -531,7 +583,6 @@ def test_a_file_given_more_than_once_is_found_once(linked, monkeypatch):
 
     assert sorted(str(p.resolve()) for p in found) == [str(linked / "lib" / "own.mkv"),
                                                         str(linked / "real" / "movie.mkv")]
-
 
 
 def test_make_backup_hard_links_and_replaces_a_stale_backup(tmp_path):
@@ -727,7 +778,6 @@ def test_no_backup_question_without_existing_backups(backed_up):
     assert seen == ["number", "number"]
 
 
-
 @pytest.fixture
 def fake_ffprobe(monkeypatch):
     """Replace run() with a stand-in ffprobe. Set layouts[path] to the
@@ -750,7 +800,11 @@ def fake_ffprobe(monkeypatch):
 
 ORIGINAL_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 1, "eac3", 6, "eng"),
                    stream(2, "audio", 0, "aac", 2, "eng"), stream(3, "subtitle")]
+
+
 ORIGINAL_AUDIO = [audio(1, 6, "eac3", default=True), audio(2, 2, "aac")]
+
+
 REMUX = str(Path("v.mkv" + ssd.TMP_MARKER + ".mkv"))
 
 
@@ -786,7 +840,7 @@ def test_verify_remux(fake_ffprobe, remuxed, expected):
 
 
 def test_verify_remux_avi_reorder(fake_ffprobe):
-    fake_ffprobe[REMUX] = [stream(0, "video", 0, "xvid"), stream(1, "audio", 0, "aac", 2, "eng"),
+    fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, "eng"),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
     assert ssd.verify_remux(plan_to_check(), reordered=True) is None
 
@@ -799,10 +853,96 @@ def test_verify_remux_avi_reorder_compares_languages_however_theyre_written(fake
                                                                             accepted):
     """The target is tagged "eng"; the remux's first track may say the same
     language another way."""
-    fake_ffprobe[REMUX] = [stream(0, "video", 0, "xvid"), stream(1, "audio", 0, "aac", 2, tagged),
+    fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, tagged),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
     problem = ssd.verify_remux(plan_to_check(), reordered=True)
     assert (problem is None) is accepted
+
+
+def described(index, codec_type, codec, default=0, channels=None, language="eng", title=None,
+              flags=()):
+    """A stream the way ffprobe's JSON reports it, with a name and flags."""
+    s = stream(index, codec_type, default, codec, channels, language)
+    s["disposition"].update(dict.fromkeys(flags, 1))
+    if title:
+        s.setdefault("tags", {})["title"] = title
+    return s
+
+
+def rich_layout(**changes):
+    """How ffprobe reports a correctly remuxed file: a video, a 5.1 track, a
+    stereo track (now the default), a commentary track and a forced
+    subtitle, with names and languages. rich_plan() describes the same file
+    before the remux. changes replaces streams by index, e.g.
+    rich_layout(stream3=...), to make the remux lose or change something."""
+    streams = [described(0, "video", "h264", 1),
+               described(1, "audio", "eac3", 0, 6, title="Surround"),
+               described(2, "audio", "aac", 1, 2, title="Stereo"),
+               described(3, "audio", "aac", 0, 2, title="Director", flags=("comment",)),
+               described(4, "subtitle", "subrip", 0, title="Signs", flags=("forced",))]
+    for key, value in changes.items():
+        streams[int(key.removeprefix("stream"))] = value
+    return streams
+
+
+def rich_plan(name):
+    """The Plan for name (e.g. "v.mkv") with rich_layout()'s original
+    streams, making stream 2 default. Returns (plan, its remux's path)."""
+    original = rich_layout(stream1=described(1, "audio", "eac3", 1, 6, title="Surround"),
+                           stream2=described(2, "audio", "aac", 0, 2, title="Stereo"))
+    layout = [ssd._stream_info(s) for s in original]
+    plan = ssd.Plan(Path(name), [s for s in layout if s.type == "audio"], 2, layout=layout)
+    return plan, str(plan.tmp_path)
+
+
+@pytest.mark.parametrize("remuxed, problem", [
+    (rich_layout(), None),
+    (rich_layout(stream4=described(4, "subtitle", "subrip", title="Signs", flags=("forced", "dub"))),
+     None),
+    (rich_layout(stream3=described(3, "audio", "aac", 0, 2, title="Director", flags=("comment",),
+                                   language="und")), None),
+    (rich_layout(stream3=described(3, "audio", "aac", 0, 2, title="Director", flags=("comment",),
+                                   language="en")), None),
+    (rich_layout(stream1=described(1, "audio", "ac3", 0, 6, title="Surround")),
+     "stream#1 changed from audio eac3 6ch to audio ac3 6ch"),
+    (rich_layout(stream4=described(4, "subtitle", "subrip", language="spa", title="Signs",
+                                   flags=("forced",))),
+     "stream#4's language changed from eng to spa"),
+    (rich_layout(stream2=described(2, "audio", "aac", 1, 2)), "stream#2 lost its name 'Stereo'"),
+], ids=["identical", "a flag added", "language now unknown", "language written another way",
+        "codec changed", "language changed", "name lost"])
+def test_verify_remux_checks_every_stream_came_through(fake_ffprobe, remuxed, problem):
+    plan, remux = rich_plan("v.mkv")
+    fake_ffprobe[remux] = remuxed
+    assert ssd.verify_remux(plan, reordered=False) == problem
+
+
+def test_verify_remux_rejects_a_flag_lost_from_an_mkv_file(fake_ffprobe):
+    """mkvmerge 52 and older drop the commentary flag, which mkvmerge 54 and
+    newer keep, so the remux is rejected and the fix named."""
+    plan, remux = rich_plan("v.mkv")
+    fake_ffprobe[remux] = rich_layout(stream3=described(3, "audio", "aac", 0, 2, title="Director"))
+    assert ssd.verify_remux(plan, reordered=False) == (
+        "stream#3 lost its comment flag; mkvmerge 52 and older drop it, so update MKVToolNix "
+        "to 54 or newer")
+
+
+def test_verify_remux_warns_about_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
+    """ffmpeg can't write the flag to MP4 files at all, so rejecting the
+    remux would leave the file unfixable: it's used, with a warning."""
+    plan, remux = rich_plan("v.mp4")
+    fake_ffprobe[remux] = rich_layout(
+        stream3=described(3, "audio", "aac", 0, 2, title="Director"),
+        stream4=described(4, "subtitle", "subrip", title="Signs"))
+    assert ssd.verify_remux(plan, reordered=False) is None
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+        "    v.mp4: stream#3 lost its comment flag, which ffmpeg can't write to .mp4 files",
+        "    v.mp4: stream#4 lost its forced flag, which ffmpeg can't write to .mp4 files"]
+
+
+def test_stream_info_reads_every_flag_but_default():
+    raw = described(4, "subtitle", "subrip", 1, flags=("forced", "hearing_impaired"))
+    assert ssd._stream_info(raw).flags == {"forced", "hearing_impaired"}
 
 
 REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6),
@@ -921,6 +1061,22 @@ def test_keep_dates_leaves_the_backup_with_the_original_dates(tmp_path):
     assert bak.stat().st_mtime_ns == video.stat().st_mtime_ns == OLD_TIMES_NS[1]
 
 
+def test_a_numbered_backup_is_announced(tmp_path, caplog):
+    """When <name>.bak is taken, the new backup's name is logged, so it can
+    be found."""
+    caplog.set_level("INFO")
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    (tmp_path / "v.mkv.bak").write_bytes(b"older backup")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+
+    ssd.swap_in(video, tmp, backup="number")
+
+    assert (tmp_path / "v.mkv.bak.1").read_bytes() == b"original"
+    assert "v.mkv: kept the original as v.mkv.bak.1" in caplog.text
+
+
 @pytest.fixture
 def nfs_owners(tmp_path, monkeypatch):
     """Makes every original look owned by tronyx:users (1000:100) and every
@@ -966,8 +1122,6 @@ def test_swap_in_leaves_the_owner_alone_when_it_already_matches(tmp_path, monkey
     """e.g. an NFS share that maps every user to the media owner, where
     changing the owner fails but isn't needed, so there's nothing to warn
     about."""
-    def not_permitted(*args):
-        raise PermissionError(1, "Operation not permitted")
     monkeypatch.setattr(ssd.os, "chown", not_permitted, raising=False)
     monkeypatch.setattr(ssd, "_owner", lambda path: (1000, 100))
     video = tmp_path / "v.mkv"
@@ -981,9 +1135,20 @@ def test_swap_in_leaves_the_owner_alone_when_it_already_matches(tmp_path, monkey
     assert "Couldn't give" not in caplog.text
 
 
-def not_permitted(*args):
-    """A stand-in for os.chown() on an NFS share that squashes root."""
-    raise PermissionError(1, "Operation not permitted")
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows only has a read-only flag, not Unix permissions")
+def test_copy_ownership_without_chown_still_copies_permissions(tmp_path, monkeypatch):
+    """Without os.chown (Windows), only the permissions can be copied."""
+    monkeypatch.delattr(ssd.os, "chown", raising=False)
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.write_bytes(b"x")
+    dst.write_bytes(b"x")
+    src.chmod(0o640)
+    dst.chmod(0o600)
+
+    ssd.copy_ownership(src, dst)
+
+    assert dst.stat().st_mode & 0o777 == 0o640
+    assert not ssd._ownership_failures
 
 
 def test_owner_failures_are_reported_once_at_the_end_with_a_list(nfs_owners, monkeypatch,
@@ -1073,6 +1238,20 @@ def test_owner_name(nfs_owners, uid, gid, described):
     assert ssd._owner_name(uid, gid) == described
 
 
+def test_optional_module_is_none_when_it_cant_be_imported():
+    """e.g. pwd and grp on Windows."""
+    assert ssd._optional_module("no_such_module_here") is None
+
+
+def test_owner_names_without_pwd_and_grp_fall_back_to_ids(monkeypatch):
+    """Windows has no user or group names to look up."""
+    monkeypatch.setattr(ssd, "pwd", None)
+    monkeypatch.setattr(ssd, "grp", None)
+    assert ssd._user_name(1000) is None
+    assert ssd._group_name(100) is None
+    assert ssd._owner_name(1000, 100) == "1000:100"
+
+
 def test_sudo_hint_uses_the_user_id_when_the_owner_has_no_name(nfs_owners, monkeypatch, caplog):
     """e.g. Unraid's 99:100 seen from a client with no user 99. sudo accepts
     a numeric user as '#99'."""
@@ -1093,11 +1272,24 @@ def test_sudo_hint_uses_the_user_id_when_the_owner_has_no_name(nfs_owners, monke
     assert not list(video.parent.glob("set_stereo_default-owners-*.log"))
 
 
+def test_hint_in_the_docker_image_is_a_docker_run_user(nfs_owners, monkeypatch, tmp_path, caplog):
+    """The image has no sudo, and usually no name for the owner's IDs."""
+    monkeypatch.setenv(ssd.IN_DOCKER_VAR, "1")
+    ssd._ownership_failures.append((str(tmp_path / "v.mkv"), (1000, 100), (65534, 65534),
+                                    "Operation not permitted"))
+
+    ssd.report_ownership_failures(tmp_path)
+
+    assert ("Run the container as the files' owner instead (docker run --user 1000:100 ...)."
+            in caplog.text)
+    assert "sudo" not in caplog.text
+
+
 def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, monkeypatch,
                                                                         capsys):
-    """The run from the bug report: with --jobs, the warning used to appear
-    under whichever file failed first. The list of files is saved in the
-    folder the script was run from."""
+    """With --jobs, the warning must still come once, after every file's
+    lines, not under whichever file happened to fail first. The list of
+    files is saved in the folder the script was run from."""
     videos, run_from = tmp_path / "videos", tmp_path / "run from here"
     videos.mkdir()
     run_from.mkdir()
@@ -1325,15 +1517,6 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
     assert video.read_bytes() == b"original"
 
 
-def file_args(**overrides):
-    """The parsed options process_file() and the apply functions take, as a
-    --dry-run with no progress bar."""
-    values = {"prefer_lang": None, "avi_reorder": False, "force": False, "dry_run": True,
-              "backup": False, "keep_dates": False, "no_progress": True, "jobs": 1}
-    values.update(overrides)
-    return types.SimpleNamespace(**values)
-
-
 @pytest.fixture
 def probed(monkeypatch):
     """Replace probe_streams() so every file reports ORIGINAL_AUDIO;
@@ -1413,7 +1596,29 @@ def test_file_without_audio_is_skipped(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(ssd, "probe_streams", lambda path: ([], 100.0))
 
     assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
-    assert "v.mkv: no audio streams found, skipping" in caplog.text
+    assert "v.mkv: SKIP (no audio streams found)" in caplog.text
+
+
+def test_an_unexpected_error_fails_only_that_file(tmp_path, monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise RuntimeError("something nobody expected")
+    monkeypatch.setattr(ssd, "_process_file", broken)
+
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "error"
+    assert "v.mkv: unexpected error, skipping rest of file (something nobody expected)" in caplog.text
+
+
+def test_a_file_ffprobe_cant_read_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: (None, None))
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "error"
+
+
+def test_a_file_with_no_track_to_pick_is_skipped_with_the_reason(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: ([audio(1, 6, default=True)], 100.0))
+
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
+    assert "v.mkv: SKIP (no 2-channel audio track found)" in caplog.text
 
 
 def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatch):
@@ -1454,6 +1659,27 @@ def test_ffmpeg_failure_message_leaves_out_progress_lines(tmp_path, monkeypatch,
     assert error.endswith("ffmpeg remux failed: [mp4 @ 0x5581] Could not find tag for codec")
     assert seen == ([50] if duration else [])
 
+
+@pytest.mark.parametrize("line, expected", [
+    ("#GUI#progress 42%", 42),
+    ("#GUI#progress 100%", 100),
+    ("#GUI#warning Something odd", None),
+    ("Progress: 42%", None),
+])
+def test_mkvmerge_pct(line, expected):
+    assert ssd._mkvmerge_pct(line) == expected
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("out_time_us=5000000", 50),
+    ("out_time_us=N/A", 0),
+    ("progress=continue", 0),
+    ("[mp4 @ 0x1] some warning", None),
+], ids=["halfway", "not known yet", "another key", "not a progress line"])
+def test_ffmpeg_pct(line, expected):
+    """ffmpeg reports out_time_us=N/A before its first packet, which is
+    still a progress line, just with no progress to show."""
+    assert ssd._ffmpeg_pct(10.0)(line) == expected
 
 
 def test_run_with_progress_reports_increases_and_finishes_at_100():
@@ -1546,6 +1772,57 @@ def test_mkvmerge_is_told_to_write_utf8(tmp_path, caplog):
     assert args[args.index("--output-charset") + 1] == "UTF-8"
 
 
+def font(mimetype):
+    """A font attachment stream with the given MIME type."""
+    return ssd.Stream(index=9, type="attachment", codec="ttf", mimetype=mimetype)
+
+
+@pytest.mark.parametrize("attachments, option_known, added", [
+    ([font("application/x-truetype-font")], True, True),
+    ([font("Application/Vnd.MS-OpenType")], True, True),
+    ([font("font/ttf"), font("application/x-truetype-font")], True, True),
+    ([font("application/x-truetype-font")], False, False),
+    ([font("font/ttf")], True, False),
+    ([], True, False),
+], ids=["legacy ttf", "legacy otf, any case", "mixed", "mkvmerge too old", "new type only",
+        "no fonts"])
+def test_mkvmerge_keeps_legacy_font_types(tmp_path, caplog, monkeypatch, attachments,
+                                          option_known, added):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(ssd, "mkvmerge_can_keep_legacy_font_types", lambda: option_known)
+    plan = ssd.Plan(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2,
+                    layout=[*ORIGINAL_AUDIO, *attachments])
+
+    assert ssd.apply_mkv(plan, file_args())
+
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    assert ("--enable-legacy-font-mime-types" in args) is added
+    assert args.index("-o") < args.index("--default-track")
+
+
+@pytest.mark.parametrize("help_text, expected", [
+    ("  --enable-legacy-font-mime-types  Use legacy font MIME types", True),
+    ("  --default-track <TID[:bool]>", False),
+], ids=["has the option", "older mkvmerge"])
+def test_mkvmerge_can_keep_legacy_font_types(monkeypatch, help_text, expected):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=0, stdout=help_text, stderr=""))
+    assert ssd.mkvmerge_can_keep_legacy_font_types() is expected
+
+
+def test_mkvmerge_can_keep_legacy_font_types_without_mkvmerge(monkeypatch):
+    def missing(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory")
+    monkeypatch.setattr(ssd, "run", missing)
+    assert ssd.mkvmerge_can_keep_legacy_font_types() is False
+
+
+def test_stream_info_reads_an_attachments_mime_type():
+    raw = {"index": 5, "codec_type": "attachment", "codec_name": "ttf",
+           "tags": {"filename": "Font.ttf", "mimetype": "application/x-truetype-font"}}
+    assert ssd._stream_info(raw).mimetype == "application/x-truetype-font"
+
+
 def dry_run_flags(caplog):
     """The --default-track values from a logged mkvmerge dry-run command."""
     args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
@@ -1617,6 +1894,53 @@ def test_run_with_progress_kills_its_subprocess_on_an_exception(monkeypatch):
         ssd.run_with_progress(SLOW_CMD, "x", parse_pct_line, ssd.Progress(on_progress=fail))
     assert started[0].poll() is not None
     assert not ssd._active_procs
+
+
+@pytest.mark.parametrize("have_tqdm, no_progress, terminal, shown", [
+    (True, False, True, True),
+    (True, False, False, False),
+    (True, True, True, False),
+    (False, False, True, False),
+], ids=["terminal", "no terminal", "--no-progress", "no tqdm"])
+def test_bars_need_tqdm_a_terminal_and_no_no_progress(monkeypatch, have_tqdm, no_progress,
+                                                      terminal, shown):
+    monkeypatch.setattr(ssd, "HAVE_TQDM", have_tqdm)
+    monkeypatch.setattr(ssd.sys, "stderr", types.SimpleNamespace(isatty=lambda: terminal))
+    assert ssd._show_bars(file_args(no_progress=no_progress)) is shown
+
+
+@pytest.mark.parametrize("terminal", [True, False], ids=["terminal", "no terminal"])
+def test_log_file_counter_only_shows_on_a_terminal(tmp_path, monkeypatch, capsys, terminal):
+    """The counter redraws itself with a carriage return, which only works
+    on a terminal; in a log it would run every count into one line."""
+    monkeypatch.setattr(ssd, "_show_bars", lambda args: False)
+    monkeypatch.setattr(ssd, "process_file", lambda path, args, **kwargs: "unchanged")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: terminal)
+    stats = {}
+
+    ssd.process_all([tmp_path / "a.mkv", tmp_path / "b.mkv"],
+                    file_args(log_file=str(tmp_path / "run.log")), stats)
+
+    assert stats == {"unchanged": 2}
+    assert ("\rProcessing 2/2..." in capsys.readouterr().out) is terminal
+
+
+def test_the_script_runs_without_tqdm(tmp_path):
+    """tqdm is optional: without it, the script must still import and run,
+    logging through a plain handler with no progress bars. Run in a separate
+    Python, where importing tqdm fails as if it weren't installed."""
+    code = ("import sys\n"
+            "sys.modules['tqdm'] = None\n"
+            f"sys.path.insert(0, {str(Path(ssd.__file__).parent)!r})\n"
+            "import set_stereo_default as ssd\n"
+            "print('HAVE_TQDM', ssd.HAVE_TQDM)\n"
+            f"sys.exit(ssd.main([{str(tmp_path)!r}]))\n")
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         encoding="utf-8", check=False)
+    assert "HAVE_TQDM False" in res.stdout, res.stdout + res.stderr
+    assert "No matching files found." in res.stdout + res.stderr
+    assert res.returncode == 1
+    assert "Traceback" not in res.stderr, res.stderr
 
 
 def test_run_with_progress_kills_its_subprocess_if_the_bar_cant_be_created(monkeypatch):
@@ -1724,6 +2048,30 @@ def test_a_quick_command_is_only_listed_while_it_runs():
     assert not ssd._active_procs
 
 
+def test_run_kills_its_subprocess_if_interrupted(monkeypatch):
+    """A stop (or any error) while waiting must not leave the tool running."""
+    class Interrupted:
+        returncode = None
+        killed = waited = False
+
+        def communicate(self):
+            raise KeyboardInterrupt
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+    proc = Interrupted()
+    monkeypatch.setattr(ssd.subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    with pytest.raises(KeyboardInterrupt):
+        ssd.run(["ffprobe", "x"])
+
+    assert proc.killed and proc.waited
+    assert not ssd._active_procs
+
+
 def test_a_file_stopped_while_being_checked_is_reported_as_cancelled(tmp_path, monkeypatch,
                                                                      caplog):
     """Not as "ffprobe failed": the command only failed because it was killed."""
@@ -1766,7 +2114,6 @@ def test_terminate_active_procs_waits_5s_in_total_not_per_process(monkeypatch):
     assert all(p.killed for p in procs)
 
 
-
 @pytest.mark.parametrize("jobs", ["1", "3"])
 def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
     pytest.importorskip("tqdm")
@@ -1789,20 +2136,13 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
+    monkeypatch.setattr(ssd, "_show_bars", lambda args: True)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--jobs", jobs])
 
     ssd.main()
 
     assert {round(0.25 * i, 2) for i in range(1, 13)} <= set(shown)
     assert max(shown) == 3.0
-
-
-def make_videos(folder, count):
-    """Create count placeholder videos in folder: e00.mkv, e01.mkv, ... Only
-    their names matter, since the tests that use them replace
-    process_file()."""
-    for i in range(count):
-        (folder / f"e{i:02}.mkv").write_text("x")
 
 
 def under_headers(lines):
@@ -1867,11 +2207,11 @@ def test_lines_outside_a_file_pass_straight_through(caplog):
 
 
 def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys):
-    """The run from the bug report: in a --jobs dry run, each file printed
-    its "setting ..." line after ffprobe, then its command after the
-    mkvmerge lookup, by which time other files had printed, so its header
-    was repeated. Both files are held at the lookup until both get there;
-    the "setting ..." line now waits for the command and prints with it."""
+    """In a --jobs dry run, each file's "setting ..." line must print
+    together with its command, so the file's header appears only once. Both
+    files are held at the mkvmerge lookup, between the two lines, until
+    both get there, so if the "setting ..." line printed on its own, the
+    other file's lines would come between it and the command."""
     make_videos(tmp_path, 2)
     barrier = threading.Barrier(2, timeout=5)
 
@@ -1898,10 +2238,11 @@ def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys
 
 
 def test_jobs_keeps_each_files_lines_under_its_own_header(tmp_path, monkeypatch, capsys):
-    """The run from the bug report: with --jobs, each file logs its header,
-    then later its command. Both files are made to log their header before
-    either logs its command, which used to put both commands under the
-    second header. Lines must still print as they happen, not at the end."""
+    """With --jobs, each file's lines must print under that file's header.
+    Both files log their first line before either logs its second, so the
+    second lines follow the other file's; each must get its own header
+    again rather than appearing under the other's. Lines must still print
+    as they happen, not at the end."""
     make_videos(tmp_path, 2)
     barrier = threading.Barrier(2, timeout=5)
 
@@ -1924,8 +2265,9 @@ def test_jobs_keeps_each_files_lines_under_its_own_header(tmp_path, monkeypatch,
 
 
 def test_ctrl_c_with_jobs_skips_files_that_havent_started(tmp_path, monkeypatch):
-    """Leaving the thread pool waits for its workers, which kept taking
-    queued files after Ctrl+C until the whole queue had been remuxed."""
+    """Files still waiting their turn when Ctrl+C arrives must not start.
+    Leaving the thread pool waits for its workers, which would otherwise
+    keep taking queued files until the whole queue had been remuxed."""
     make_videos(tmp_path, 8)
     started = []
 
@@ -2062,6 +2404,7 @@ def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, cap
     assert "Summary" not in out
     assert processed == []
 
+
 @pytest.mark.filterwarnings("error")
 def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     """Two files reporting 1% at a time used to add up to
@@ -2086,12 +2429,12 @@ def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
+    monkeypatch.setattr(ssd, "_show_bars", lambda args: True)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path)])
 
     ssd.main()
 
     assert finals and set(finals) == {2}
-
 
 
 def test_log_file_gets_everything_but_the_console_only_warnings_and_errors(tmp_path, capsys):
@@ -2107,6 +2450,22 @@ def test_log_file_gets_everything_but_the_console_only_warnings_and_errors(tmp_p
     assert "careful" in out and "broken" in out
     logged = log_file.read_text()
     assert "detail" in logged and "careful" in logged and "broken" in logged
+
+
+def test_log_handler_reports_its_own_errors_instead_of_raising(monkeypatch):
+    """A message that can't be written mustn't stop the run; logging's
+    handleError() reports it instead."""
+    def broken_write(text):
+        raise OSError("console went away")
+    handled = []
+    monkeypatch.setattr(ssd, "tqdm", types.SimpleNamespace(write=broken_write))
+    handler = ssd.TqdmLoggingHandler()
+    monkeypatch.setattr(handler, "handleError", handled.append)
+    record = logging.LogRecord("x", logging.INFO, __file__, 1, "hello", None, None)
+
+    handler.emit(record)
+
+    assert handled == [record]
 
 
 @pytest.mark.parametrize("make_files, expected", [

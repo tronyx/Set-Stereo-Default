@@ -10,7 +10,9 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
-# Only the coverage-badge job needs more than this.
+# Every job can only read the repository, except the three that need more:
+# coverage-badge (writes the badges branch), and docker and publish (push
+# the image to the GitHub Container Registry).
 permissions:
   contents: read
 
@@ -23,9 +25,12 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.10", "3.14"]
-        # Windows decodes subprocess output differently, so run the logic tests there too.
+        # Windows decodes subprocess output differently, and macOS has its own
+        # file system (APFS) and temp folder layout, so run the logic tests on both.
         include:
           - os: windows-latest
+            python-version: "3.14"
+          - os: macos-latest
             python-version: "3.14"
     steps:
       - uses: actions/checkout@v7
@@ -55,6 +60,7 @@ jobs:
 
   # Lint (ruff) and type checks (mypy), set up in pyproject.toml. mypy runs
   # twice: the script imports different modules on Linux and on Windows.
+  # Then lints this workflow, the Dockerfile and the Markdown files.
   lint:
     name: Lint and type check
     runs-on: ubuntu-latest
@@ -69,10 +75,29 @@ jobs:
       - run: python -m ruff check .
       - run: python -m mypy --platform linux
       - run: python -m mypy --platform win32
+      # This workflow, including shellcheck on its scripts. Pinned, so a new
+      # release with new checks can't suddenly fail the job.
+      - name: Lint the workflow
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+      # hadolint only tags full versions (v3.5.0), not v3 on its own.
+      - name: Lint the Dockerfile
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+      # The README, the changelog and everything in .github, with the
+      # settings in .markdownlint.json.
+      - name: Lint the Markdown files
+        uses: DavidAnson/markdownlint-cli2-action@v24
+        with:
+          globs: "**/*.md"
 
   # Writes the coverage total to coverage-<branch>.json on the badges branch,
   # which the README's coverage badges read through shields.io. Only runs
-  # for pushes to master and develop, once every test job has passed.
+  # for pushes to master and develop, once the logic tests (which measure
+  # the coverage) have passed.
   coverage-badge:
     name: Update the coverage badge
     needs: test
@@ -117,7 +142,8 @@ jobs:
           }
 
   # Runs the script on real files generated with ffmpeg (tests/test_real_files.py),
-  # once per ffmpeg version that common distros ship, plus the newest release.
+  # once per ffmpeg version that common distros ship, plus the newest release,
+  # and once with the oldest mkvmerge the README lists.
   real-files:
     name: Real files, ${{ matrix.name }}
     runs-on: ubuntu-latest
@@ -138,6 +164,12 @@ jobs:
           - name: newest ffmpeg (static build)
             image: debian:13
             static-ffmpeg: true
+          # The oldest mkvmerge the README lists, from MKVToolNix's archive of
+          # AppImages (see below). It predates the newer Matroska track flags,
+          # and the tests check that the script notices it dropping them.
+          - name: mkvmerge 45 (AppImage)
+            image: debian:13
+            old-mkvmerge: "45.0.0"
     env:
       DEBIAN_FRONTEND: noninteractive
       # Fail, rather than skip, if a tool is missing.
@@ -147,8 +179,29 @@ jobs:
       - name: Install tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends mkvtoolnix python3 python3-pytest python3-tqdm \
-            ${{ matrix.static-ffmpeg && 'ca-certificates curl xz-utils' || 'ffmpeg' }}
+          apt-get install -y --no-install-recommends python3 python3-pytest python3-tqdm \
+            ${{ matrix.static-ffmpeg && 'ca-certificates curl xz-utils' || 'ffmpeg' }} \
+            ${{ matrix.old-mkvmerge && 'ca-certificates curl' || 'mkvtoolnix' }}
+      # The AppImage is unpacked rather than run, which needs no FUSE inside a
+      # container, and its mkvmerge goes on PATH as a wrapper that points it at
+      # the libraries it ships with.
+      - name: Install mkvmerge ${{ matrix.old-mkvmerge }}
+        if: matrix.old-mkvmerge
+        env:
+          VERSION: ${{ matrix.old-mkvmerge }}
+        run: |
+          cd /opt
+          curl -sSLf -o mkvtoolnix.AppImage \
+            "https://mkvtoolnix.download/appimage/MKVToolNix_GUI-$VERSION-x86_64.AppImage"
+          chmod +x mkvtoolnix.AppImage
+          ./mkvtoolnix.AppImage --appimage-extract > /dev/null
+          mv squashfs-root mkvtoolnix
+          rm mkvtoolnix.AppImage
+          cat > /usr/local/bin/mkvmerge <<'WRAPPER'
+          #!/bin/sh
+          LD_LIBRARY_PATH=/opt/mkvtoolnix/usr/lib exec /opt/mkvtoolnix/usr/bin/mkvmerge "$@"
+          WRAPPER
+          chmod +x /usr/local/bin/mkvmerge
       # https://github.com/BtbN/FFmpeg-Builds keeps builds of the newest release
       # branches (e.g. ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz) and drops old
       # ones, so pick the highest version listed rather than pinning one.
@@ -221,3 +274,250 @@ jobs:
           mkvmerge --version
           python --version
       - run: python -m pytest tests/test_real_files.py -v
+
+  # The real-file tests on macOS, with Homebrew's ffmpeg and MKVToolNix: the
+  # newest releases, built the way most Mac users get them.
+  real-files-macos:
+    name: Real files, newest ffmpeg (macOS)
+    runs-on: macos-latest
+    env:
+      # Fail, rather than skip, if a tool is missing.
+      REQUIRE_MEDIA_TOOLS: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Install ffmpeg and MKVToolNix
+        run: brew install ffmpeg mkvtoolnix
+      - name: Tool versions
+        run: |
+          ffmpeg -version | head -n 1
+          mkvmerge --version
+          python --version
+      - run: python -m pytest tests/test_real_files.py -v
+
+  # Builds the Docker image, runs every test inside it with the image's own
+  # Python, ffmpeg and MKVToolNix, then runs the image the way people will.
+  # Once for each architecture the image is published for, each natively on
+  # its own runner, so an arm64-only problem fails here before it's published.
+  #
+  # Pushes to master and develop also push the tested image to both registries,
+  # by digest and without a tag, so it isn't visible to users yet. The publish
+  # job tags it once every test job has passed, which means what's published
+  # is exactly what was tested here, never a rebuild.
+  docker:
+    name: Docker image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: set-stereo-default:ci
+      PUBLISH: >-
+        ${{ github.repository == 'tronyx/Set-Stereo-Default'
+        && github.event_name != 'pull_request'
+        && (github.ref_name == 'master' || github.ref_name == 'develop') }}
+    # Naming the shell adds -o pipefail, which GitHub's default bash lacks, so a
+    # failing docker run piped into tee fails the step instead of being hidden.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # One build with two outputs: loaded into Docker as $IMAGE for the steps
+      # below, and (when publishing) pushed by digest. No cache, and a fresh
+      # pull of alpine, so every build gets the newest Alpine packages.
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          pull: true
+          no-cache: true
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          outputs: |
+            type=docker,name=${{ env.IMAGE }}
+            type=image,"name=tronyx/set-stereo-default,ghcr.io/tronyx/set-stereo-default",push-by-digest=true,name-canonical=true,push=${{ env.PUBLISH }}
+      - name: Tool versions
+        run: |
+          docker image ls "$IMAGE" --format 'Image size: {{.Size}}'
+          docker run --rm --entrypoint sh "$IMAGE" -c \
+            'ffmpeg -version | head -n 1; mkvmerge --version; python3 --version'
+      # The repo is copied inside, so the read-only mount stays untouched.
+      - name: Tests inside the image
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -e REQUIRE_MEDIA_TOOLS=1 --entrypoint sh "$IMAGE" -c \
+            'apk add --no-cache -q py3-pytest && cp -r /src /tmp/repo && cd /tmp/repo && python3 -m pytest -v'
+      # As the runner's own user, like docker run --user on an NFS share, and
+      # without -t, like cron: the output must have no progress-bar codes.
+      - name: Run the image like a user
+        run: |
+          mkdir videos
+          as_me=(--rm --user "$(id -u):$(id -g)" -v "$PWD/videos:/videos")
+          docker run "${as_me[@]}" --entrypoint ffmpeg "$IMAGE" -v error \
+            -f lavfi -i testsrc=d=2:s=320x240 -f lavfi -i sine=d=2 -f lavfi -i sine=d=2 \
+            -map 0 -map 1 -map 2 -c:v libx264 -preset ultrafast -c:a aac -ac:a:0 6 -ac:a:1 2 \
+            -disposition:a:0 default -disposition:a:1 0 "/videos/Épisode 1.mkv"
+          check() {
+            echo "$output"
+            grep -qF "$1" <<< "$output" || { echo "::error::Expected '$1' in the output"; exit 1; }
+            if grep -q $'\e' <<< "$output"; then echo "::error::Terminal codes in the output"; exit 1; fi
+          }
+          output=$(docker run --rm "$IMAGE" 2>&1); check "usage: set_stereo_default.py"
+          output=$(docker run "${as_me[@]}" "$IMAGE" /videos --dry-run 2>&1); check "Would change: 1"
+          output=$(docker run "${as_me[@]}" "$IMAGE" /videos 2>&1); check "Changed: 1"
+          output=$(docker run "${as_me[@]}" "$IMAGE" /videos 2>&1); check "Unchanged: 1"
+      # As root, the default: a remuxed file (and its backup, a hard link) must
+      # keep its owner and permissions. Files are checked through the image, so
+      # the step works the same on any host.
+      - name: Run the image as root
+        run: |
+          mkdir -m 777 owned
+          docker run --rm --user 1234:5678 -v "$PWD/owned:/videos" --entrypoint ffmpeg "$IMAGE" -v error \
+            -f lavfi -i testsrc=d=2:s=320x240 -f lavfi -i sine=d=2 -f lavfi -i sine=d=2 \
+            -map 0 -map 1 -map 2 -c:v libx264 -preset ultrafast -c:a aac -ac:a:0 6 -ac:a:1 2 \
+            -disposition:a:0 default -disposition:a:1 0 /videos/v.mkv
+          docker run --rm -v "$PWD/owned:/videos" --entrypoint chmod "$IMAGE" 640 /videos/v.mkv
+          docker run --rm -v "$PWD/owned:/videos" "$IMAGE" /videos --backup | tee output.txt
+          grep -qF "Changed: 1" output.txt
+          owners=$(docker run --rm -v "$PWD/owned:/videos" --entrypoint stat "$IMAGE" \
+            -c '%n %u:%g %a' /videos/v.mkv /videos/v.mkv.bak)
+          echo "$owners"
+          test "$owners" = $'/videos/v.mkv 1234:5678 640\n/videos/v.mkv.bak 1234:5678 640' \
+            || { echo "::error::Owner or permissions not kept"; exit 1; }
+      # docker stop partway through a remux must remove the half-written file,
+      # leave that file's original alone, and exit 143. On a runner's fast disk
+      # a remux takes well under a second, too short to stop reliably, so the
+      # container gets a tenth of a CPU, which stretches each one to several
+      # seconds. The stop waits until a temp file shows a remux has started,
+      # and that file is the one checked.
+      - name: Stop the image partway through a remux
+        run: |
+          mkdir stop
+          in_image=(--rm -v "$PWD/stop:/videos" --entrypoint)
+          docker run "${in_image[@]}" ffmpeg "$IMAGE" -v error -f lavfi -i sine=d=900 -f lavfi -i sine=d=900 \
+            -map 0 -map 1 -c:a pcm_s16le -ac:a:0 6 -ac:a:1 2 \
+            -disposition:a:0 default -disposition:a:1 0 /videos/a.mkv
+          cp stop/a.mkv stop/b.mkv
+          hashes=$(docker run "${in_image[@]}" sha256sum "$IMAGE" /videos/a.mkv /videos/b.mkv)
+          docker run -d --name stop-test --cpus 0.1 -v "$PWD/stop:/videos" "$IMAGE" /videos
+          temp=
+          for _ in $(seq 300); do
+            temp=$(compgen -G "stop/*.tmp_remux*" | head -n 1 || true)
+            test -n "$temp" && break
+            sleep 0.1
+          done
+          test -n "$temp" || { echo "::error::No remux started"; docker logs stop-test; exit 1; }
+          docker stop -t 30 stop-test
+          original=$(basename "${temp%%.tmp_remux*}")
+          before=$(grep -F "/videos/$original" <<< "$hashes")
+          code=$(docker inspect stop-test --format '{{.State.ExitCode}}')
+          docker logs stop-test 2>&1 | tee output.txt
+          docker rm stop-test
+          echo "Stopped while remuxing $original"
+          test "$code" -eq 143 || { echo "::error::Exit code $code, expected 143"; exit 1; }
+          grep -qF "Stopped by SIGTERM" output.txt
+          ! compgen -G "stop/*.tmp_remux*" || { echo "::error::Temp file left behind"; exit 1; }
+          after=$(docker run "${in_image[@]}" sha256sum "$IMAGE" "/videos/$original")
+          test "$before" = "$after" || { echo "::error::$original changed"; exit 1; }
+      # Only reached if every step above passed, so only tested images get one.
+      - name: Save the pushed digest for the publish job
+        if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          test -n "$DIGEST" || { echo "::error::The build reported no digest"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publishes the tested images to Docker Hub and the GitHub Container
+  # Registry, once every test job has passed: master as "latest", develop as
+  # "develop", each covering amd64 and arm64. Nothing is built here; it only
+  # tags the digests the docker jobs pushed. The weekly run rebuilds and
+  # retests "latest" from scratch, so it picks up Alpine's security fixes even
+  # without a push. Pull requests never publish.
+  #
+  # Needs two repository secrets: DOCKERHUB_USERNAME, and DOCKERHUB_TOKEN, a
+  # Docker Hub personal access token with Read & Write access.
+  publish:
+    name: Publish the Docker image
+    needs: [test, lint, real-files, real-files-windows, real-files-macos, docker]
+    if: >-
+      github.repository == 'tronyx/Set-Stereo-Default'
+      && github.event_name != 'pull_request'
+      && (github.ref_name == 'master' || github.ref_name == 'develop')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    # Two quick pushes publish in order, rather than racing each other.
+    concurrency:
+      group: publish-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # The annotations are what Docker Hub and GitHub show for the image.
+      - name: Tag the tested images
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAG: ${{ github.ref_name == 'master' && 'latest' || 'develop' }}
+          SOURCE: https://github.com/${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          digests=(*)
+          test "${#digests[@]}" -eq 2 || { echo "::error::Expected 2 digests, got: ${digests[*]}"; exit 1; }
+          for repo in tronyx/set-stereo-default ghcr.io/tronyx/set-stereo-default; do
+            docker buildx imagetools create -t "$repo:$TAG" \
+              --annotation "index:org.opencontainers.image.title=set-stereo-default" \
+              --annotation "index:org.opencontainers.image.description=Make the stereo audio track play by default, across your whole video library." \
+              --annotation "index:org.opencontainers.image.source=$SOURCE" \
+              --annotation "index:org.opencontainers.image.revision=$REVISION" \
+              --annotation "index:org.opencontainers.image.licenses=MIT" \
+              "${digests[@]/#/$repo@sha256:}"
+            docker buildx imagetools inspect "$repo:$TAG"
+          done

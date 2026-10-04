@@ -6,6 +6,7 @@
 - [ ] I've read the [contributing guide](https://github.com/tronyx/Set-Stereo-Default/blob/develop/.github/CONTRIBUTING.md) and this whole template.
 - [ ] This pull request makes one change.
 - [ ] I've documented my change in docstrings (no `#` comments), and updated the README if needed.
+- [ ] I've added a line about my change under **Unreleased** in `CHANGELOG.md`.
 - [ ] I've tested my change and added or updated tests for it.
 - [ ] `python -m ruff check .` and `python -m mypy` pass.
 - [ ] My change works on Python 3.10 and doesn't add a required package.

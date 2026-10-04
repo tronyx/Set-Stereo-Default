@@ -1,9 +1,9 @@
 # 🔊 set_stereo_default
 
-[![tests: master](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=master&label=tests%3A%20master)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Amaster)
-[![tests: develop](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=develop&label=tests%3A%20develop)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Adevelop)
-[![coverage: master](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftronyx%2FSet-Stereo-Default%2Fbadges%2Fcoverage-master.json)](#-running-the-tests)
-[![coverage: develop](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftronyx%2FSet-Stereo-Default%2Fbadges%2Fcoverage-develop.json)](#-running-the-tests)
+[![Tests: master](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=master&label=tests%3A%20master)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Amaster)
+[![Tests: develop](https://img.shields.io/github/actions/workflow/status/tronyx/Set-Stereo-Default/tests.yml?branch=develop&label=tests%3A%20develop)](https://github.com/tronyx/Set-Stereo-Default/actions/workflows/tests.yml?query=branch%3Adevelop)
+[![Coverage: master](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftronyx%2FSet-Stereo-Default%2Fbadges%2Fcoverage-master.json)](#-running-the-tests)
+[![Coverage: develop](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Ftronyx%2FSet-Stereo-Default%2Fbadges%2Fcoverage-develop.json)](#-running-the-tests)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](#-requirements)
 [![License: MIT](https://img.shields.io/github/license/tronyx/Set-Stereo-Default)](LICENSE.md)
 
@@ -33,6 +33,7 @@ The commentary is stereo too, but it's never picked (see [Picking the track](#-p
 - ⚡ **Parallel.** `--jobs N` works on several files at once.
 - 📝 **Quiet logging.** `--log-file` keeps the details in a file and the console tidy.
 - 🛑 **Stops cleanly.** Ctrl+C or `docker stop` halts mid-run without leaving half-written files.
+- 🐳 **Docker image.** Everything it needs in one image, for amd64 and arm64 (see [Docker](#-docker)).
 
 ## 📋 Requirements
 
@@ -40,19 +41,23 @@ The commentary is stereo too, but it's never picked (see [Picking the track](#-p
 | --- | --- | --- |
 | [Python](https://www.python.org) | 3.10 or newer | Everything |
 | [ffmpeg and ffprobe](https://ffmpeg.org) | 4.4 or newer | Everything |
-| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any | `.mkv` and `.webm` files |
+| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any; 54 or newer recommended | `.mkv` and `.webm` files |
 | [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
 
-The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45 through 102.
+The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45, 65, 74, 82, 92 and the newest release.
+
+Using Docker? The image has all of these built in, so you only need Docker itself (see [Docker](#-docker)).
 
 > [!NOTE]
 > ffmpeg versions older than 4.4 can't read the commentary and audio-description flags in MKV files, so they might make a commentary track the default.
+>
+> mkvmerge 52 and older drop the commentary, audio-description, hearing-impaired and original-language flags from MKV files when remuxing. The script notices and leaves files with those flags untouched, so with an older MKVToolNix, those files can't be fixed until you update it. 54 and newer keep every flag.
 
 ### 💾 Disk space
 
 Each file is rewritten to a temporary copy next to the original before it's swapped in, so you need free space about the size of your largest file while the script runs.
 
-`--backup` doesn't add to that during the run, because each backup starts as a hard link to the original rather than a copy. But once the new file replaces the original, the backup holds the original's data on its own, so **every backup takes as much space as the file it backs up** until you delete it. Running `--backup` over a whole library needs about as much free space as the files that get changed.
+`--backup` usually doesn't add to that during the run, because each backup starts as a hard link to the original rather than a copy. (Where hard links aren't supported, such as on exFAT drives and some network shares, the backup is a full copy from the start.) Either way, once the new file replaces the original, the backup holds the original's data on its own, so **every backup takes as much space as the file it backs up** until you delete it. Running `--backup` over a whole library needs about as much free space as the files that get changed.
 
 ## 📦 Installation
 
@@ -97,9 +102,72 @@ python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
 python3 set_stereo_default.py "/path/to/videos"
 ```
 
-Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
+Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist, such as a mistyped one, is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
 
 On Windows, type `py` instead of `python3`.
+
+## 🐳 Docker
+
+The image has the script, Python, ffmpeg, MKVToolNix and tqdm, so there's nothing else to install. It runs on `amd64` and `arm64` (e.g. a Raspberry Pi 4 or 5, or an ARM-based NAS), and is published in two places:
+
+| Registry | Image |
+| --- | --- |
+| Docker Hub | `tronyx/set-stereo-default` |
+| GitHub | `ghcr.io/tronyx/set-stereo-default` |
+
+`latest` is built from `master`, and rebuilt every week for Alpine's security fixes. `develop` is built from the `develop` branch.
+
+```bash
+# 1. See what would change, without touching anything
+docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --dry-run
+
+# 2. Try it for real on one folder, keeping backups
+docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default "/videos/Some Show" --backup
+
+# 3. Happy? Run it on everything, 3 files at a time
+docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --jobs 3
+```
+
+Everything after the image name is passed to the script, so every [option](#%EF%B8%8F-options) works the same way. With no options, it shows the built-in help.
+
+**What the `docker run` options do:**
+
+- **`-v "/path/to/videos:/videos"`** lets the container see your videos: the folder on your computer before the `:`, at `/videos` inside the container. The container can only see folders you mount, and the script is then given paths inside it, so the output shows `/videos/...` rather than your real paths. Don't mount it read-only (`:ro`), since the script has to replace the files.
+- **`-it`** gives the script a terminal, which shows the progress bars and lets it ask the [backup question](#-backups). Leave it out for cron and other scheduled runs: the bars are hidden and new backups are numbered.
+- **`--rm`** removes the container once the run finishes.
+
+**Several folders.** Mount each one under `/videos`, then pass `/videos` to work on all of them:
+
+```bash
+docker run --rm -it -v "/mnt/media/Movies:/videos/Movies" -v "/mnt/media/TV Shows:/videos/TV Shows" tronyx/set-stereo-default /videos --dry-run
+```
+
+**Running as the files' owner.** The container runs as root by default, which lets it give every remuxed file its original owner on a local disk. On an NFS share, root usually becomes `nobody` and can't change owners (see [Permissions and ownership](#-permissions-and-ownership)), so run the container as the user that owns your videos instead. `id -u` and `id -g` show your own IDs, and `stat -c '%u:%g' "/path/to/a/video.mkv"` shows a file's:
+
+```bash
+docker run --rm -it --user 1000:100 -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos
+```
+
+**Keeping the log.** Anything written inside the container is gone when it exits, so point `--log-file` at the mounted folder. If remuxed files can't be given their owner, the list of them is saved next to the log too:
+
+```bash
+docker run --rm -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --log-file /videos/set_stereo_default.log
+```
+
+**Running it on a schedule,** e.g. every night at 3 AM from cron, as the files' owner and with no terminal:
+
+```text
+0 3 * * * docker run --rm --user 1000:100 -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --log-file /videos/set_stereo_default.log
+```
+
+**Good to know:**
+
+- **Updating:** `docker pull tronyx/set-stereo-default` gets the newest image.
+- **Stopping:** `docker stop` and Ctrl+C both stop the script cleanly, the same as without Docker.
+- **Forgot the `-v`?** The script reports `Skipping /videos: no such file or directory` and `No matching files found.`, then exits with code `1` without changing anything.
+- **Symlinks:** inside the container, a symlink is followed to the path it holds, and that path has to exist there too. A relative link within the mounted folder works. One that points elsewhere, or uses an absolute path from your computer (`/mnt/media/...`), only works if that path is also mounted, at the same place.
+- **Docker Desktop (Windows and macOS):** the path before the `:` is one on your computer, e.g. `-v "D:\Videos:/videos"`.
+- **Building it yourself:** `docker build -t set-stereo-default .` in this repository, then use `set-stereo-default` as the image name.
 
 ## ⚙️ Options
 
@@ -118,7 +186,7 @@ On Windows, type `py` instead of `python3`.
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](#-changing-the-file)) |
 | `--force` | Remux even files that are already correct, e.g. to restore thumbnails (see [Troubleshooting](#-troubleshooting)) |
 | `--keep-dates` | Give each changed file the original's modification date, so it doesn't look newly changed (see [File dates](#-file-dates)) |
-| `--no-progress` | Hide the progress bars, e.g. for cron or CI logs |
+| `--no-progress` | Hide the progress bars. They're already hidden when the output isn't a terminal (cron, `docker run` without `-t`, a pipe) |
 
 > [!TIP]
 > **Choosing `--jobs`:** the work is limited by disk speed, not CPU, so pick a number your storage can keep up with rather than your core count. Above `1`, you'll see only the overall progress bar. Lines from different files print as they happen, so when a file's line follows another file's, its `[i/N]` header is printed again first to show which file it belongs to.
@@ -240,7 +308,13 @@ A file is **skipped** (and counted under `Skipped` in the summary) when:
 
 ### 🧩 Changing the file
 
-Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged, and not noticeably shorter than the original) before it replaces the original. If the check fails, the original is kept and the file is counted as an `Error`.
+Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked before it replaces the original:
+
+- every stream must still be there, with the same codec, language, name and flags;
+- the right track must be the default;
+- it mustn't be noticeably shorter than the original.
+
+If the check fails, the original is kept and the file is counted as an `Error`. The one exception is a flag such as "commentary" in an MP4, MOV or AVI file: ffmpeg can't write those flags to these formats at all, so losing one is a warning rather than an error (see [Troubleshooting](#-troubleshooting)).
 
 > [!NOTE]
 > A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
@@ -265,7 +339,7 @@ The question comes before any file is checked, so the count can include files th
 - **n** keeps every existing backup and saves the new one as the first free `<name>.bak.1`, `<name>.bak.2`, ...
 - **q** stops without changing anything.
 
-To skip the question, pass `--existing-backups replace` or `--existing-backups number`. When there's no one to ask (cron, Docker, Windows Task Scheduler, or input or output redirected), new backups are numbered, since that never deletes anything. The same happens if the question gets no answer at all (Ctrl+D).
+To skip the question, pass `--existing-backups replace` or `--existing-backups number`. When there's no one to ask (cron, Docker without `-it`, Windows Task Scheduler, or input or output redirected), new backups are numbered, since that never deletes anything. The same happens if the question gets no answer at all (Ctrl+D).
 
 ### 🪢 Symlinks
 
@@ -294,7 +368,7 @@ The list has one full path per line, sorted. It's saved next to your `--log-file
 > sudo -u tronyx python3 set_stereo_default.py /mnt/media
 > ```
 >
-> The warning suggests the right `sudo -u` for your files. To fix files that already ended up owned by `nobody`, run `chown` on the NFS server itself, where root isn't squashed.
+> The warning suggests the right `sudo -u` for your files. In the Docker image, it suggests the matching `docker run --user` instead (see [Docker](#-docker)). To fix files that already ended up owned by `nobody`, run `chown` on the NFS server itself, where root isn't squashed.
 
 ### 📅 File dates
 
@@ -344,9 +418,13 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 **`post-remux check failed (duration dropped from ...)`.** The original contains less than its header claims, usually because it's an incomplete download. It's left untouched; re-download it or check it in a player. See [Changing the file](#-changing-the-file).
 
+**`post-remux check failed (stream#N lost its ... flag; ...)`.** Your mkvmerge is too old to keep a track flag (commentary, hearing impaired, ...) that the file has, so the file is left untouched. Update MKVToolNix to 54 or newer and run the script again. A similar check rejects a remux that changed a track's codec or language or lost its name.
+
+**`stream#N lost its ... flag, which ffmpeg can't write to .mp4 files`.** A warning, not an error: the file was fixed, but ffmpeg can't store flags such as "commentary" in MP4, MOV or AVI files at all, so that flag is gone. The tracks themselves are unchanged, but players can no longer tell, for example, that a track is commentary unless its name says so.
+
 **`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
 
-**`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command. See [Permissions and ownership](#-permissions-and-ownership).
+**`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command to use, or in the Docker image, the `docker run --user` one. See [Permissions and ownership](#-permissions-and-ownership).
 
 **`Skipping leftover temp file`.** An earlier run was killed mid-file. The temp file is safe to delete. See [Leftover temp files](#-leftover-temp-files).
 
@@ -364,9 +442,9 @@ python -m pytest
 There are two sets of tests:
 
 - **Logic tests** ([tests/test_set_stereo_default.py](tests/test_set_stereo_default.py)) cover the script's own decisions: picking the track, finding files, backups, checking a remux, progress reporting and clean stopping. They stand in for ffmpeg and mkvmerge, so they run anywhere.
-- **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4 and AVI files for each case the script handles, run the script on them, and check the results. They need ffmpeg, ffprobe and mkvmerge on your `PATH`, and are skipped if those aren't installed. Set `REQUIRE_MEDIA_TOOLS=1` to make a missing tool fail them instead, as GitHub does.
+- **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4, WebM and AVI files for each case the script handles, run the script on them, and check the results. Some files also have subtitles, chapters, track names, a font attachment or cover art, and others use each common audio codec (AAC, AC3, E-AC3, DTS, TrueHD, FLAC and Opus); all of it must come through the remux unchanged. They need ffmpeg, ffprobe and mkvmerge on your `PATH` (and, for a few of them, an ffmpeg that can encode Opus and VP8, as most builds can), and are skipped if those aren't installed. Set `REQUIRE_MEDIA_TOOLS=1` to make a missing tool fail them instead, as GitHub does.
 
-GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions. The real-file tests run against every ffmpeg version listed under [Requirements](#-requirements) on Linux. Both also run on Windows, with the newest ffmpeg and MKVToolNix. A third job lints the code (`python -m ruff check .`) and checks its type hints (`python -m mypy`), for Linux and for Windows.
+GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions. The real-file tests run on Linux against every ffmpeg and mkvmerge version listed under [Requirements](#-requirements). Both also run on Windows and macOS, with the newest ffmpeg and MKVToolNix. A third job lints the code (`python -m ruff check .`) and checks its type hints (`python -m mypy`), for Linux and for Windows, then lints the workflow, the `Dockerfile` and the Markdown files. A fourth builds the Docker image on both `amd64` and `arm64`, runs both sets of tests inside it with the image's own tools, then runs the image the ways people will: as a regular user, as root (checking each file keeps its owner and permissions), and stopped with `docker stop` partway through a remux.
 
 To see which lines of the script the logic tests reach, run them under coverage. GitHub does the same on every run and shows the result on the run's summary page; it's for information only and never fails a build. The coverage badges at the top show the total for the latest push to each branch:
 

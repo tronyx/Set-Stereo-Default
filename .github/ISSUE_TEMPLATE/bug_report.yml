@@ -14,7 +14,7 @@ body:
       options:
         - label: I've searched the existing issues and this hasn't been reported yet.
           required: true
-        - label: I'm using the latest `set_stereo_default.py` from the `master` branch.
+        - label: I'm using the latest version, from the `master` branch or the `latest` Docker image.
           required: true
 
   - type: textarea
@@ -32,6 +32,7 @@ body:
       description: The command you ran and everything it printed. `--dry-run` output is ideal. Feel free to shorten long folder paths.
       placeholder: |
         python3 set_stereo_default.py "/path/to/videos" --dry-run
+        (or: docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --dry-run)
         ...
       render: text
     validations:
@@ -50,7 +51,7 @@ body:
     attributes:
       label: Versions
       description: |
-        The output of `python3 --version`, the first line of `ffmpeg -version`, and `mkvmerge --version` (if the file is .mkv or .webm).
+        The output of `python3 --version`, the first line of `ffmpeg -version`, and `mkvmerge --version` (if the file is .mkv or .webm). With the Docker image, its name and tag are enough, e.g. `tronyx/set-stereo-default:latest`.
       placeholder: |
         Python 3.12.3
         ffmpeg version 7.1 ...
@@ -66,6 +67,8 @@ body:
       description: |
         If a file was handled wrongly, its audio tracks from:
         `ffprobe -v error -show_streams -select_streams a -of json "<file>"`
+        Without ffprobe installed, the Docker image can run it:
+        `docker run --rm -v "/path/to/videos:/videos" --entrypoint ffprobe tronyx/set-stereo-default -v error -show_streams -select_streams a -of json "/videos/<file>"`
       render: json
 
   - type: textarea

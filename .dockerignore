@@ -1,0 +1,3 @@
+# The image only needs the script; keep everything else out of the build context.
+*
+!set_stereo_default.py

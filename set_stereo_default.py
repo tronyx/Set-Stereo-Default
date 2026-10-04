@@ -37,10 +37,11 @@ How it changes each file:
 Safe by default:
   - Files that are already right are left alone.
   - --dry-run shows what would change without touching anything.
-  - Each new file is checked (no lost streams, no shorter than the
-    original, the right track is default) before it replaces the
-    original. --backup also keeps the original as <name>.bak, never
-    deleting an existing backup unless you say so.
+  - Each new file is checked before it replaces the original: every
+    stream still there with the same codec, language, name and flags,
+    the right track default, and no shorter than the original. --backup
+    also keeps the original as <name>.bak, never deleting an existing
+    backup unless you say so.
   - Ctrl+C or SIGTERM (docker stop, kill) stops cleanly and removes any
     half-written temp files.
   - A symlinked file is fixed through its link: the file it points to is
@@ -65,6 +66,10 @@ Examples:
     python3 set_stereo_default.py file1.mkv file2.mp4
     python3 set_stereo_default.py /path/to/videos --ext mkv --no-recursive
 
+In the Docker image, mount your videos at /videos and put the options after
+the image name, e.g. to preview every change:
+    docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --dry-run
+
 Exit codes: 0 all done, 1 a file had an error, no files matched or a tool is
 missing, 2 invalid options, 130 stopped by Ctrl+C, 143 stopped by SIGTERM.
 
@@ -75,6 +80,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import importlib
 import json
 import logging
@@ -103,7 +109,6 @@ except ImportError:
     HAVE_TQDM = False
 
 
-
 def _optional_module(name: str) -> ModuleType | None:
     """Import a module that only some systems have, or return None."""
     try:
@@ -130,6 +135,10 @@ AVI_EXTS = {".avi"}
 MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
 """Remuxed with -movflags +faststart, keeping the index at the front of the file."""
 
+IN_DOCKER_VAR = "SET_STEREO_DEFAULT_IN_DOCKER"
+"""Set to "1" by the project's Docker image, so advice can show docker
+commands instead of ones for running the script directly."""
+
 TMP_MARKER = ".tmp_remux"
 """Marks a file's temp copy while it's remuxed, e.g. "movie.mkv.tmp_remux.mkv"."""
 
@@ -139,6 +148,11 @@ COMMENTARY_NAME_RE = re.compile(r"commentary|audio[ -]?description|descriptive|d
 really named: "Director's Commentary", "Audio Description", "Descriptive
 Video Service", "Described Video", "DVS". A bare "description" is too loose
 to count."""
+
+LEGACY_FONT_MIME_TYPES = frozenset({"application/x-truetype-font", "application/vnd.ms-opentype",
+                                    "application/x-font-ttf", "application/x-font-otf"})
+"""Older MIME types for font attachments, which newer mkvmerge versions
+rewrite to font/ttf and font/otf unless told not to (see apply_mkv())."""
 
 NAME_TAGS = ("title", "name", "handler_name")
 """Tags that can hold a track's name: MKV uses "title", and ffprobe reports
@@ -472,8 +486,11 @@ class Stream:
     """One stream in a file, as probe_streams() reads it: its index (as
     ffprobe numbers streams), type ("audio", "video", "subtitle", ...),
     codec, channel count (None if not audio), language tag ("" if none),
-    names (from NAME_TAGS), and its default, commentary and
-    audio-description flags. Frozen, so streams can be shared freely."""
+    names (from NAME_TAGS), its default, commentary and audio-description
+    flags, every other flag it has (flags, e.g. {"forced",
+    "hearing_impaired"}, as ffprobe names them; never "default"), and its
+    MIME type ("" if none; attachments, such as fonts, have one). Frozen, so
+    streams can be shared freely."""
     index: int
     type: str = ""
     codec: str = ""
@@ -483,6 +500,8 @@ class Stream:
     visual_impaired: bool = False
     language: str = ""
     names: tuple[str, ...] = ()
+    flags: frozenset[str] = frozenset()
+    mimetype: str = ""
 
 
 def _stream_info(raw: dict) -> Stream:
@@ -499,6 +518,8 @@ def _stream_info(raw: dict) -> Stream:
         visual_impaired=bool(disposition.get("visual_impaired", 0)),
         language=tags.get("language", ""),
         names=tuple(tags[k] for k in NAME_TAGS if tags.get(k)),
+        flags=frozenset(k for k, on in disposition.items() if on and k != "default"),
+        mimetype=tags.get("mimetype", ""),
     )
 
 
@@ -619,6 +640,32 @@ def needs_change(streams: list[Stream], target_index: int) -> bool:
     return any((s.index == target_index) != s.default for s in streams)
 
 
+def _stream_loss(was: Stream, now: Stream) -> str | None:
+    """What a remux changed about one stream (was, before; now, after), as a
+    short reason, or None if nothing it must keep. Its type, codec and
+    channel count must match, a known language mustn't change, and every
+    name it had must still be there. Flags are checked by verify_remux(),
+    since whether losing one is acceptable depends on the container.
+
+    Only losses count. A tool may add a name (ffmpeg names MP4 tracks
+    "SoundHandler" when they have none) or fill in "und" for a missing
+    language, which loses nothing."""
+    def shape(s: Stream) -> str:
+        """e.g. "audio eac3 6ch" or "subtitle subrip"."""
+        return " ".join(str(part) for part in (s.type, s.codec, f"{s.channels}ch" if s.channels else "")
+                        if part)
+
+    if (was.type, was.codec, was.channels) != (now.type, now.codec, now.channels):
+        return f"stream#{was.index} changed from {shape(was)} to {shape(now)}"
+    old, new = normalize_language(was.language), normalize_language(now.language)
+    if old not in ("", "und") and new not in ("", "und") and old != new:
+        return f"stream#{was.index}'s language changed from {was.language} to {now.language}"
+    gone = [name for name in was.names if name not in now.names]
+    if gone:
+        return f"stream#{was.index} lost its name {gone[0]!r}"
+    return None
+
+
 def verify_remux(plan: Plan, reordered: bool) -> str | None:
     """Check the finished remux at plan.tmp_path before it replaces the
     original. Returns None if it looks right, otherwise a short reason why
@@ -633,12 +680,24 @@ def verify_remux(plan: Plan, reordered: bool) -> str | None:
     to look at. A longer one is fine: the original's header just
     understated it. The check is skipped if either duration is unknown.
 
+    Every stream must then come through as it was (see _stream_loss()):
+    same type, codec and channels, no known language changed and no name
+    lost. Its flags (forced, commentary, hearing impaired, ...) must all
+    survive in MKV files: mkvmerge 54 and newer keep every one, but 52 and
+    older drop the commentary, audio-description, hearing-impaired and
+    original-language flags, which players use to label and choose tracks.
+    ffmpeg can't write any of these
+    flags to MP4, MOV or AVI files, so a flag lost there is unavoidable: it's
+    logged as a warning, and the remux is still used.
+
     Then the target must be the only audio track flagged default. A
     remux keeps audio tracks in order, so the target is found by its
     position among them. After an AVI reorder (reordered=True) there's no
     flag to check, so the first audio track must instead match the
     target's codec, channel count and language (compared after
-    normalize_language(), as everywhere else)."""
+    normalize_language(), as everywhere else). The streams are then in
+    apply_remux()'s order: video, the target, the other audio tracks,
+    subtitles, data."""
     after, after_duration = probe_streams(plan.tmp_path, report=False)
     if after is None:
         return "ffprobe couldn't read the file"
@@ -662,6 +721,26 @@ def verify_remux(plan: Plan, reordered: bool) -> str | None:
                 or (target.language and normalize_language(first.language)
                     != normalize_language(target.language))):
             return "target audio track didn't end up first"
+        of_type = {t: [s for s in before if s.type == t] for t in ("video", "audio", "subtitle", "data")}
+        moved = next(s for s in of_type["audio"] if s.index == plan.target_index)
+        order = (of_type["video"] + [moved] + [s for s in of_type["audio"] if s is not moved]
+                 + of_type["subtitle"] + of_type["data"] + [s for s in before if s.type not in of_type])
+    else:
+        order = before
+    is_mkv = plan.path.suffix.lower() in MKV_EXTS
+    for was, now in zip(order, after, strict=True):
+        loss = _stream_loss(was, now)
+        if loss:
+            return loss
+        lost = sorted(was.flags - now.flags)
+        if not lost:
+            continue
+        what = f"stream#{was.index} lost its {', '.join(lost)} flag{'s' if len(lost) > 1 else ''}"
+        if is_mkv:
+            return f"{what}; mkvmerge 52 and older drop it, so update MKVToolNix to 54 or newer"
+        log.warning(f"    {plan.path.name}: {what}, which ffmpeg can't write to "
+                    f"{plan.path.suffix.lower()} files")
+    if reordered:
         return None
 
     expected = audio[streams.index(target)].index
@@ -793,15 +872,22 @@ def report_ownership_failures(folder: Path | str = ".") -> None:
     It's one warning at the end of the run, just before the summary, because
     the cause (usually running as root on an NFS share) affects the whole
     run, not one file. Shown under whichever file happened to fail first,
-    it looked like that file's problem."""
+    it looked like that file's problem.
+
+    In the Docker image (see IN_DOCKER_VAR), the fix is a docker run
+    --user with the owner's IDs instead of sudo: sudo isn't there, and the
+    owner's name usually isn't either."""
     if not _ownership_failures:
         return
     path, wanted, got, reason = _ownership_failures[0]
     count = len(_ownership_failures)
-    user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
+    if os.environ.get(IN_DOCKER_VAR) == "1":
+        how = f"the container as the files' owner instead (docker run --user {wanted[0]}:{wanted[1]} ...)"
+    else:
+        user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
+        how = f"the script as the files' owner instead (sudo -u {user} python3 ...)"
     advice = (f"Permissions were still copied. Changing a file's owner needs root, and NFS "
-              f"shares usually turn root into 'nobody'. Run the script as the files' owner "
-              f"instead (sudo -u {user} python3 ...).")
+              f"shares usually turn root into 'nobody'. Run {how}.")
     if count == 1:
         log.warning(f"\nCouldn't give {path} its original owner ({reason}).\n\n"
                     f"It should belong to {_owner_name(*wanted)} but belongs to "
@@ -910,6 +996,17 @@ def mkvmerge_audio_ids(path: Path) -> list[int] | None:
     except (json.JSONDecodeError, AttributeError):
         return None
     return [t["id"] for t in tracks if t.get("type") == "audio"]
+
+
+@functools.cache
+def mkvmerge_can_keep_legacy_font_types() -> bool:
+    """True if this mkvmerge has --enable-legacy-font-mime-types, judging by
+    its --help. Older versions don't have it, and don't need it either:
+    they leave font MIME types alone. Checked once per run."""
+    try:
+        return "--enable-legacy-font-mime-types" in run(["mkvmerge", "--help"]).stdout
+    except OSError:
+        return False
 
 
 def _announce(intro: str | None, line: str | None = None) -> None:
@@ -1032,6 +1129,13 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
       encoding, which isn't UTF-8 on Windows or with LANG=C in Docker.
     - Exit code 1 means it finished with warnings, which are logged
       without mkvmerge's "#GUI#warning" and "Warning:" prefixes.
+    - Newer versions rewrite fonts attached with an older MIME type
+      (LEGACY_FONT_MIME_TYPES) to font/ttf or font/otf, which ffmpeg, and
+      players built on it, don't recognize as fonts, so styled subtitles
+      could lose them. For a file with such a font,
+      --enable-legacy-font-mime-types keeps its type as it is. That also
+      turns any font/ttf or font/otf in the same file into the older type,
+      but a file with both is rare, and the older types work everywhere.
     """
     path = plan.path
     ids = mkvmerge_audio_ids(path)
@@ -1042,7 +1146,11 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
                   f"leaving the file alone")
         return False
 
-    cmd = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "-o", str(plan.tmp_path)]
+    cmd = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8"]
+    if (any(s.mimetype.lower() in LEGACY_FONT_MIME_TYPES for s in plan.layout)
+            and mkvmerge_can_keep_legacy_font_types()):
+        cmd.append("--enable-legacy-font-mime-types")
+    cmd += ["-o", str(plan.tmp_path)]
     for s, track_id in zip(plan.streams, ids, strict=True):
         flag = "yes" if s.index == plan.target_index else "no"
         cmd += ["--default-track", f"{track_id}:{flag}"]
@@ -1135,7 +1243,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
         return "error"
     streams = [s for s in layout if s.type == "audio"]
     if not streams:
-        log.info(f"  {path.name}: no audio streams found, skipping")
+        log.info(f"  {path.name}: SKIP (no audio streams found)")
         return "skipped"
 
     target, note = choose_target(streams, args.prefer_lang)
@@ -1160,7 +1268,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
                 intro=f"  {path.name}: {action} stream#{target.index} "
                       f"({target.language or 'und'}, {target.codec}) {outcome}{fallback}",
                 layout=layout)
-    progress = Progress(show=HAVE_TQDM and not args.no_progress and args.jobs == 1,
+    progress = Progress(show=_show_bars(args) and args.jobs == 1,
                         position=position, on_progress=on_progress)
     apply = apply_mkv if ext in MKV_EXTS else apply_remux
     return "changed" if apply(plan, args, progress) else "error"
@@ -1338,7 +1446,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="With --backup, what to do when <name>.bak already exists: replace "
                          "it, or number the new one (.bak.1, .bak.2, ...). Without this, "
                          "you're asked once before any file is changed; when there's no "
-                         "one to ask (cron, Docker), new backups are numbered")
+                         "one to ask (cron, Docker without -it), new backups are numbered")
     ap.add_argument("--prefer-lang", default=None, metavar="LANG",
                     help="Language to use when there's a stereo track in it, as a 2- or "
                          "3-letter code (en, eng, de, ger and deu all work); also picks "
@@ -1360,7 +1468,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Write the details to this file instead of the console; warnings, "
                          "errors, the progress bar and the summary still show on the console")
     ap.add_argument("--no-progress", action="store_true",
-                    help="Hide the progress bars (useful for logs from cron or CI)")
+                    help="Hide the progress bars. They're already hidden when the output "
+                         "isn't a terminal (cron, docker run without -t, a pipe)")
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="Remux up to N files at once (default: 1). The work is limited by "
                          "disk speed, not CPU, so choose N for what your storage can handle. "
@@ -1416,6 +1525,14 @@ def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:
     return "number"
 
 
+def _show_bars(args: argparse.Namespace) -> bool:
+    """True if progress bars should be drawn: tqdm is installed, --no-progress
+    wasn't given, and the bars' output (stderr) is a terminal. Anywhere else
+    (cron, docker run without -t, docker logs, a pipe), the codes that move
+    the cursor to redraw a bar would land in the output as junk."""
+    return HAVE_TQDM and not args.no_progress and sys.stderr.isatty()
+
+
 def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, int]) -> None:
     """Process every file, adding each outcome to stats ("changed": 3, ...).
     A stop (Ctrl+C, SIGTERM) comes out as KeyboardInterrupt, with the
@@ -1426,7 +1543,8 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
       current file above the overall one. --jobs N > 1 handles N at once in
       threads (the work waits on disk, not CPU) and shows only the overall
       bar. With --log-file and no bars, a "Processing i/N..." counter takes
-      their place.
+      their place on a terminal. Without one, there are no bars or counter
+      (see _show_bars()).
     - The overall bar counts fractions of files, so it keeps moving during
       a long remux. Its count is rounded and capped at the total, because
       adding up many small steps can drift just past it, which makes tqdm
@@ -1439,8 +1557,8 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
       (_FileHeaderFilter).
     - Once a stop is requested, files still waiting their turn return
       "cancelled" straight away instead of starting."""
-    use_bar = HAVE_TQDM and not args.no_progress
-    counter = args.log_file and not use_bar
+    use_bar = _show_bars(args)
+    counter = args.log_file and not use_bar and sys.stdout.isatty()
     bars, overall = [], None
     if use_bar:
         first_row = 1 if args.jobs == 1 else 0
@@ -1453,9 +1571,9 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
 
     def advance_overall(delta: float) -> None:
         """Move the overall bar by delta files. Several threads report at once
-        with --jobs > 1, so updates go through a lock."""
-        if overall is None:
-            return
+        with --jobs > 1, so updates go through a lock. Only called when
+        there is an overall bar."""
+        assert overall is not None
         with overall_lock:
             overall.n = min(round(overall.n + delta, 6), overall.total)
             overall.refresh()

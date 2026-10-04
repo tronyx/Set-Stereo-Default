@@ -11,6 +11,13 @@ updates:
       actions:
         patterns: ["*"]
 
+  # The Alpine version the Dockerfile is built on, when a new one comes out.
+  - package-ecosystem: docker
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: monthly
+
   # Only the pinned checkers in requirements-dev.txt. Everything else there
   # is a minimum version (>=), which new releases already satisfy. A new ruff
   # or mypy can bring new rules, so if the checks fail on this pull request,

@@ -8,7 +8,7 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 
 - The command you ran and what it printed (`--dry-run` output is ideal).
 - Your operating system, and your Python, ffmpeg and mkvmerge versions (`python3 --version`, `ffmpeg -version`, `mkvmerge --version`).
-- If a file was handled wrongly, its track list from `ffprobe -v error -show_streams -select_streams a -of json "<file>"`.
+- If a file was handled wrongly, its track list from `ffprobe -v error -show_streams -select_streams a -of json "<file>"`. The form shows how to get it through the Docker image if you don't have ffprobe installed.
 
 ## 💡 Suggesting a feature
 
@@ -43,6 +43,21 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
    The real-file tests are skipped unless ffmpeg, ffprobe and mkvmerge are installed. GitHub runs them for you on every pull request, but it's quicker to catch problems locally. To see which lines your tests reach, run `python -m coverage run -m pytest` and then `python -m coverage report`.
 
    `ruff` is a linter and `mypy` checks the type hints; both are set up in `pyproject.toml`, and GitHub runs them on every push too.
+
+   GitHub also lints the workflow ([actionlint](https://github.com/rhysd/actionlint)), the `Dockerfile` ([hadolint](https://github.com/hadolint/hadolint), set up in `.hadolint.yaml`) and the Markdown files ([markdownlint](https://github.com/DavidAnson/markdownlint-cli2), set up in `.markdownlint.json`). If you change any of those and have Docker, you can run the same checks locally:
+
+   ```bash
+   docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12
+   docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint hadolint --config .hadolint.yaml Dockerfile
+   docker run --rm -v "$PWD:/workdir" davidanson/markdownlint-cli2 "**/*.md"
+   ```
+
+   If you change the `Dockerfile`, build the image and try it on a copy of a few videos. GitHub also runs every test inside it, on amd64 and arm64:
+
+   ```bash
+   docker build -t set-stereo-default .
+   docker run --rm -it -v "/path/to/test/videos:/videos" set-stereo-default /videos --dry-run
+   ```
 
 5. Commit, push, and open a pull request against `develop`:
 
