@@ -3,6 +3,7 @@ mkvmerge: anything that would call those tools is replaced with a stand-in,
 and subprocess behavior is exercised with small Python child processes."""
 
 import json
+import logging
 import os
 import shlex
 import signal
@@ -2305,3 +2306,181 @@ def test_fatal_errors_reach_the_console_with_a_log_file(tmp_path, monkeypatch, c
     assert ssd.main() == 1
     assert expected in capsys.readouterr().out
     assert expected in (tmp_path / "run.log").read_text()
+
+
+def test_optional_module_is_none_when_it_cant_be_imported():
+    """e.g. pwd and grp on Windows."""
+    assert ssd._optional_module("no_such_module_here") is None
+
+
+def test_owner_names_without_pwd_and_grp_fall_back_to_ids(monkeypatch):
+    """Windows has no user or group names to look up."""
+    monkeypatch.setattr(ssd, "pwd", None)
+    monkeypatch.setattr(ssd, "grp", None)
+    assert ssd._user_name(1000) is None
+    assert ssd._group_name(100) is None
+    assert ssd._owner_name(1000, 100) == "1000:100"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows only has a read-only flag, not Unix permissions")
+def test_copy_ownership_without_chown_still_copies_permissions(tmp_path, monkeypatch):
+    """Without os.chown (Windows), only the permissions can be copied."""
+    monkeypatch.delattr(ssd.os, "chown", raising=False)
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.write_bytes(b"x")
+    dst.write_bytes(b"x")
+    src.chmod(0o640)
+    dst.chmod(0o600)
+
+    ssd.copy_ownership(src, dst)
+
+    assert dst.stat().st_mode & 0o777 == 0o640
+    assert not ssd._ownership_failures
+
+
+def test_a_numbered_backup_is_announced(tmp_path, caplog):
+    """When <name>.bak is taken, the new backup's name is logged, so it can
+    be found."""
+    caplog.set_level("INFO")
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    (tmp_path / "v.mkv.bak").write_bytes(b"older backup")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+
+    ssd.swap_in(video, tmp, backup="number")
+
+    assert (tmp_path / "v.mkv.bak.1").read_bytes() == b"original"
+    assert "v.mkv: kept the original as v.mkv.bak.1" in caplog.text
+
+
+@pytest.mark.parametrize("returncode, stdout, logged", [
+    (1, "", "ffprobe failed on v.mkv: unreadable"),
+    (0, "not json", "Could not parse ffprobe output for v.mkv"),
+], ids=["ffprobe failed", "unreadable output"])
+def test_probe_streams_logs_why_it_couldnt_read_a_file(monkeypatch, caplog, returncode, stdout,
+                                                       logged):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=returncode, stdout=stdout, stderr="unreadable\n"))
+
+    assert ssd.probe_streams(Path("v.mkv")) == (None, None)
+    assert logged in caplog.text
+
+    caplog.clear()
+    assert ssd.probe_streams(Path("v.mkv"), report=False) == (None, None)
+    assert caplog.text == ""
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("#GUI#progress 42%", 42),
+    ("#GUI#progress 100%", 100),
+    ("#GUI#warning Something odd", None),
+    ("Progress: 42%", None),
+])
+def test_mkvmerge_pct(line, expected):
+    assert ssd._mkvmerge_pct(line) == expected
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("out_time_us=5000000", 50),
+    ("out_time_us=N/A", 0),
+    ("progress=continue", 0),
+    ("[mp4 @ 0x1] some warning", None),
+], ids=["halfway", "not known yet", "another key", "not a progress line"])
+def test_ffmpeg_pct(line, expected):
+    """ffmpeg reports out_time_us=N/A before its first packet, which is
+    still a progress line, just with no progress to show."""
+    assert ssd._ffmpeg_pct(10.0)(line) == expected
+
+
+def test_an_unexpected_error_fails_only_that_file(tmp_path, monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise RuntimeError("something nobody expected")
+    monkeypatch.setattr(ssd, "_process_file", broken)
+
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "error"
+    assert "v.mkv: unexpected error, skipping rest of file (something nobody expected)" in caplog.text
+
+
+def test_a_file_ffprobe_cant_read_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: (None, None))
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "error"
+
+
+def test_a_file_with_no_track_to_pick_is_skipped_with_the_reason(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: ([audio(1, 6, default=True)], 100.0))
+
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
+    assert "v.mkv: SKIP (no 2-channel audio track found)" in caplog.text
+
+
+@pytest.mark.parametrize("ext, found", [
+    ("mkv", ["a.mkv"]),
+    ("mkv, .MP4", ["a.mkv", "b.MP4"]),
+    (".AVI,", ["c.avi"]),
+], ids=["one", "spaces, dots and capitals", "trailing comma"])
+def test_ext_takes_extensions_however_theyre_written(tmp_path, ext, found):
+    for name in ("a.mkv", "b.MP4", "c.avi", "d.webm"):
+        (tmp_path / name).write_bytes(b"x")
+    args = types.SimpleNamespace(paths=[str(tmp_path)], ext=ext, no_recursive=False,
+                                 skip_symlinks=False, follow_symlinks=False)
+    assert [p.name for p in ssd.find_files(args)] == found
+
+
+def test_log_handler_reports_its_own_errors_instead_of_raising(monkeypatch):
+    """A message that can't be written mustn't stop the run; logging's
+    handleError() reports it instead."""
+    def broken_write(text):
+        raise OSError("console went away")
+    handled = []
+    monkeypatch.setattr(ssd, "tqdm", types.SimpleNamespace(write=broken_write))
+    handler = ssd.TqdmLoggingHandler()
+    monkeypatch.setattr(handler, "handleError", handled.append)
+    record = logging.LogRecord("x", logging.INFO, __file__, 1, "hello", None, None)
+
+    handler.emit(record)
+
+    assert handled == [record]
+
+
+def test_run_kills_its_subprocess_if_interrupted(monkeypatch):
+    """A stop (or any error) while waiting must not leave the tool running."""
+    class Interrupted:
+        returncode = None
+        killed = waited = False
+
+        def communicate(self):
+            raise KeyboardInterrupt
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+    proc = Interrupted()
+    monkeypatch.setattr(ssd.subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    with pytest.raises(KeyboardInterrupt):
+        ssd.run(["ffprobe", "x"])
+
+    assert proc.killed and proc.waited
+    assert not ssd._active_procs
+
+
+def test_the_script_runs_without_tqdm(tmp_path):
+    """tqdm is optional: without it, the script must still import and run,
+    logging through a plain handler with no progress bars. Run in a separate
+    Python, where importing tqdm fails as if it weren't installed."""
+    code = ("import sys\n"
+            "sys.modules['tqdm'] = None\n"
+            f"sys.path.insert(0, {str(Path(ssd.__file__).parent)!r})\n"
+            "import set_stereo_default as ssd\n"
+            "print('HAVE_TQDM', ssd.HAVE_TQDM)\n"
+            f"sys.exit(ssd.main([{str(tmp_path)!r}]))\n")
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         encoding="utf-8", check=False)
+    assert "HAVE_TQDM False" in res.stdout, res.stdout + res.stderr
+    assert "No matching files found." in res.stdout + res.stderr
+    assert res.returncode == 1
+    assert "Traceback" not in res.stderr, res.stderr

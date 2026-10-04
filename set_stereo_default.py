@@ -1567,9 +1567,9 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
 
     def advance_overall(delta: float) -> None:
         """Move the overall bar by delta files. Several threads report at once
-        with --jobs > 1, so updates go through a lock."""
-        if overall is None:
-            return
+        with --jobs > 1, so updates go through a lock. Only called when
+        there is an overall bar."""
+        assert overall is not None
         with overall_lock:
             overall.n = min(round(overall.n + delta, 6), overall.total)
             overall.refresh()

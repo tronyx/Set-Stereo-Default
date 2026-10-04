@@ -23,6 +23,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 ### Project
 
 - CI tests mkvmerge 45, the oldest the README lists, from MKVToolNix's AppImage archive.
+- The logic tests cover the last untested paths, including running without tqdm, an unreadable ffprobe result, an unexpected error in one file, and `--ext` written with spaces, dots or capitals. Coverage is up from 96% to 99%.
 - CI runs the logic and real-file tests on macOS too, with Homebrew's ffmpeg and MKVToolNix.
 - The real-file tests cover each common audio codec (AAC, E-AC3, DTS, TrueHD, FLAC and Opus, besides AC3) in MKV, and AAC, E-AC3 and Opus in MP4 and WebM.
 - The real-file tests check that subtitles, chapters, track names and languages, font attachments and cover art all come through a remux unchanged.
