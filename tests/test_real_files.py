@@ -271,7 +271,10 @@ def make_rich_video(folder, ext, font_type="application/x-truetype-font"):
     a file title and two chapters; 5.1 and stereo audio tracks with names;
     two subtitle tracks with languages, names and the forced and
     hearing-impaired flags; and, for MKV, a font attachment of font_type, or
-    for MP4, cover art. Subtitles are SubRip in MKV and mov_text in MP4."""
+    for MP4, cover art. Subtitles are SubRip in MKV and mov_text in MP4.
+    The font's file name is set to just "font.ttf", as in real files: on
+    Windows, ffmpeg would otherwise store its full path, which mkvmerge
+    then trims."""
     srt = folder / "subs.srt"
     srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
     chapters = folder / "chapters.txt"
@@ -291,7 +294,8 @@ def make_rich_video(folder, ext, font_type="application/x-truetype-font"):
     else:
         font = folder / "font.ttf"
         font.write_bytes(b"\x00\x01\x00\x00" + bytes(64))
-        cmd += ["-attach", str(font), "-metadata:s:t", f"mimetype={font_type}"]
+        cmd += ["-attach", str(font), "-metadata:s:t", f"mimetype={font_type}",
+                "-metadata:s:t", "filename=font.ttf"]
     cmd += maps + ["-map_metadata", "5", "-map_chapters", "5",
                    "-c:v:0", "mpeg4", "-c:a", "ac3",
                    "-c:s", "mov_text" if ext == ".mp4" else "srt",

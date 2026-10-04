@@ -401,9 +401,11 @@ jobs:
           test "$owners" = $'/videos/v.mkv 1234:5678 640\n/videos/v.mkv.bak 1234:5678 640' \
             || { echo "::error::Owner or permissions not kept"; exit 1; }
       # docker stop partway through a remux must remove the half-written file,
-      # leave that file's original alone, and exit 143. Two large audio-only
-      # files make each remux last a few seconds; the stop waits until a temp
-      # file shows one has started, and that file is the one checked.
+      # leave that file's original alone, and exit 143. On a runner's fast disk
+      # a remux takes well under a second, too short to stop reliably, so the
+      # container gets a tenth of a CPU, which stretches each one to several
+      # seconds. The stop waits until a temp file shows a remux has started,
+      # and that file is the one checked.
       - name: Stop the image partway through a remux
         run: |
           mkdir stop
@@ -413,14 +415,14 @@ jobs:
             -disposition:a:0 default -disposition:a:1 0 /videos/a.mkv
           cp stop/a.mkv stop/b.mkv
           hashes=$(docker run "${in_image[@]}" sha256sum "$IMAGE" /videos/a.mkv /videos/b.mkv)
-          docker run -d --name stop-test -v "$PWD/stop:/videos" "$IMAGE" /videos
+          docker run -d --name stop-test --cpus 0.1 -v "$PWD/stop:/videos" "$IMAGE" /videos
           temp=
           for _ in $(seq 300); do
             temp=$(compgen -G "stop/*.tmp_remux*" | head -n 1) && break
             sleep 0.1
           done
           test -n "$temp" || { echo "::error::No remux started"; docker logs stop-test; exit 1; }
-          docker stop stop-test
+          docker stop -t 30 stop-test
           original=$(basename "${temp%%.tmp_remux*}")
           before=$(grep -F "/videos/$original" <<< "$hashes")
           code=$(docker inspect stop-test --format '{{.State.ExitCode}}')
