@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-04 · [#9](https://github.com/tronyx/Set-Stereo-Default/pull/9)
+
 ### Added
 
 - **A Docker image** with the script, ffmpeg, MKVToolNix and tqdm, for amd64 and arm64, built on Alpine (about 310 MB). It's published as `tronyx/set-stereo-default` on Docker Hub and as `ghcr.io/tronyx/set-stereo-default`: `latest` from `master`, rebuilt weekly for Alpine's security fixes, and `develop` from `develop`. The README's new 🐳 Docker section covers mounting folders, running as the files' owner, keeping the log and running on a schedule.
