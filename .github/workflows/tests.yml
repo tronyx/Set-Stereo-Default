@@ -326,6 +326,11 @@ jobs:
         ${{ github.repository == 'tronyx/Set-Stereo-Default'
         && github.event_name != 'pull_request'
         && (github.ref_name == 'master' || github.ref_name == 'develop') }}
+    # Naming the shell adds -o pipefail, which GitHub's default bash lacks, so a
+    # failing docker run piped into tee fails the step instead of being hidden.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -418,7 +423,8 @@ jobs:
           docker run -d --name stop-test --cpus 0.1 -v "$PWD/stop:/videos" "$IMAGE" /videos
           temp=
           for _ in $(seq 300); do
-            temp=$(compgen -G "stop/*.tmp_remux*" | head -n 1) && break
+            temp=$(compgen -G "stop/*.tmp_remux*" | head -n 1 || true)
+            test -n "$temp" && break
             sleep 0.1
           done
           test -n "$temp" || { echo "::error::No remux started"; docker logs stop-test; exit 1; }
