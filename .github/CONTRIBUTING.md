@@ -56,7 +56,7 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 
    ```bash
    docker build -t set-stereo-default .
-   docker run --rm -it -v "/path/to/test/videos:/videos" set-stereo-default /videos --dry-run
+   docker run --rm -it -v "/path/to/test/videos:/videos" set-stereo-default --dry-run
    ```
 
 5. Commit, push, and open a pull request against `develop`:

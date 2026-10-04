@@ -374,6 +374,8 @@ jobs:
             'apk add --no-cache -q py3-pytest && cp -r /src /tmp/repo && cd /tmp/repo && python3 -m pytest -v'
       # As the runner's own user, like docker run --user on an NFS share, and
       # without -t, like cron: the output must have no progress-bar codes.
+      # Covers no arguments (the help), a forgotten -v, the default /videos
+      # path, and /videos given explicitly.
       - name: Run the image like a user
         run: |
           mkdir videos
@@ -388,7 +390,8 @@ jobs:
             if grep -q $'\e' <<< "$output"; then echo "::error::Terminal codes in the output"; exit 1; fi
           }
           output=$(docker run --rm "$IMAGE" 2>&1); check "usage: set_stereo_default.py"
-          output=$(docker run "${as_me[@]}" "$IMAGE" /videos --dry-run 2>&1); check "Would change: 1"
+          output=$(docker run --rm "$IMAGE" --dry-run 2>&1 || true); check "Nothing is mounted at /videos"
+          output=$(docker run "${as_me[@]}" "$IMAGE" --dry-run 2>&1); check "Would change: 1"
           output=$(docker run "${as_me[@]}" "$IMAGE" /videos 2>&1); check "Changed: 1"
           output=$(docker run "${as_me[@]}" "$IMAGE" /videos 2>&1); check "Unchanged: 1"
       # As root, the default: a remuxed file (and its backup, a hard link) must

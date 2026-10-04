@@ -1,7 +1,7 @@
 # set_stereo_default with everything it needs: Python, ffmpeg, MKVToolNix and tqdm.
 #
 #   docker build -t set-stereo-default .
-#   docker run --rm -it -v "/path/to/videos:/videos" set-stereo-default /videos --dry-run
+#   docker run --rm -it -v "/path/to/videos:/videos" set-stereo-default --dry-run
 #
 # Alpine, because Debian's ffmpeg package pulls in about 600 MB of graphics
 # libraries (LLVM, Mesa) the script never uses: this image is about 310 MB,
