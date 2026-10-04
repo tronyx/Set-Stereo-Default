@@ -102,7 +102,7 @@ python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
 python3 set_stereo_default.py "/path/to/videos"
 ```
 
-Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist, such as a mistyped one, is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
+Folders are searched recursively. You can also pass individual files, or a mix of files and folders. They're processed in the order you give them, each folder's files in alphabetical order, so you can put the shows you care about most first. A path that doesn't exist, such as a mistyped one, is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
 
 On Windows, type `py` instead of `python3`.
 

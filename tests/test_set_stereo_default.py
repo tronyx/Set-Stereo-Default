@@ -457,6 +457,21 @@ def test_ext_takes_extensions_however_theyre_written(tmp_path, ext, found):
     assert [p.name for p in ssd.find_files(args)] == found
 
 
+def test_files_come_path_by_path_in_the_order_given(tmp_path):
+    """Listing one show before another processes it first; within each
+    path, files are sorted. A file reached again later isn't repeated."""
+    for name in ["Show B/e02.mkv", "Show B/e01.mkv", "Show A/e02.mkv", "Show A/e01.mkv"]:
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).write_text("x")
+    paths = [tmp_path / "Show B", tmp_path / "Show A", tmp_path / "Show B" / "e01.mkv"]
+    args = types.SimpleNamespace(paths=paths, ext=None, no_recursive=False, skip_symlinks=False,
+                                 follow_symlinks=False)
+
+    found = [p.relative_to(tmp_path).as_posix() for p in ssd.find_files(args)]
+
+    assert found == ["Show B/e01.mkv", "Show B/e02.mkv", "Show A/e01.mkv", "Show A/e02.mkv"]
+
+
 def test_iter_files_accepts_files_passed_directly(library):
     paths = [library / "a.mkv", library / "a.mkv.tmp_remux.mkv", library / "notes.nfo"]
     assert names(ssd.iter_files(paths, ssd.DEFAULT_EXTS, recursive=True), library) == ["a.mkv"]

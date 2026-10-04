@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+
+- Paths are processed in the order you give them, each folder's files in alphabetical order, instead of every file from every path being sorted together. A file reached through more than one path is still processed once.
 
 ## 2026-10-04 · [#10](https://github.com/tronyx/Set-Stereo-Default/pull/10)
 

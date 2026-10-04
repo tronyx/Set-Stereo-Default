@@ -1332,11 +1332,12 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
 
 def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
                skip_symlinks: bool = False, follow_symlinks: bool = False) -> Iterator[Path]:
-    """Yield every file in paths with an extension in exts. Files are used
-    as given; folders are searched (into subfolders if recursive). The
-    extension is checked before anything else, and files found in a folder
-    are checked using what the folder listing already says about them (see
-    _walk()), so searching costs little beyond listing each folder.
+    """Yield every file in paths with an extension in exts, path by path in
+    the order given, each path's files sorted. Files are used as given;
+    folders are searched (into subfolders if recursive). The extension is
+    checked before anything else, and files found in a folder are checked
+    using what the folder listing already says about them (see _walk()), so
+    searching costs little beyond listing each folder.
 
     A symlinked file is yielded as the file it points to, so that file gets
     fixed and the link keeps working; replacing the link itself would turn
@@ -1344,7 +1345,7 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
     instead. Symlinked subfolders are only searched with follow_symlinks
     (see _walk()); a folder named in paths is always searched. A file
     reached by more than one path (through links, or given twice) is only
-    yielded once.
+    yielded once, with the first path that reaches it.
 
     A run killed outright (kill -9, a reboot) can leave a temp file such as
     "name.mkv.tmp_remux.mkv", which still ends in .mkv. Those are skipped
@@ -1372,11 +1373,13 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
         else:
             log.warning(f"Skipping {p}: not a file or directory")
             continue
+        here = []
         for candidate in candidates:
             found = _video_file(*candidate, exts, skip_symlinks)
             if found and found[1] not in seen:
                 seen.add(found[1])
-                yield found[0]
+                here.append(found[0])
+        yield from sorted(here)
 
 
 def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, exts: set[str],
@@ -1526,14 +1529,16 @@ def _tell(args: argparse.Namespace, line: str) -> None:
 
 
 def find_files(args: argparse.Namespace) -> list[Path]:
-    """Every file to process, sorted: the ones under args.paths with an
-    extension from --ext (or DEFAULT_EXTS). See iter_files()."""
+    """Every file to process: the ones under args.paths with an extension
+    from --ext (or DEFAULT_EXTS), in the order the paths were given, each
+    path's files sorted. So listing one show before another processes it
+    first. See iter_files()."""
     if args.ext:
         exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")}
     else:
         exts = DEFAULT_EXTS
-    return sorted(set(iter_files(args.paths, exts, not args.no_recursive,
-                                 args.skip_symlinks, args.follow_symlinks)))
+    return list(iter_files(args.paths, exts, not args.no_recursive,
+                           args.skip_symlinks, args.follow_symlinks))
 
 
 def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:
