@@ -10,7 +10,9 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
-# Only the coverage-badge job needs more than this.
+# Every job can only read the repository, except the three that need more:
+# coverage-badge (writes the badges branch), and docker and publish (push
+# the image to the GitHub Container Registry).
 permissions:
   contents: read
 
@@ -94,7 +96,8 @@ jobs:
 
   # Writes the coverage total to coverage-<branch>.json on the badges branch,
   # which the README's coverage badges read through shields.io. Only runs
-  # for pushes to master and develop, once every test job has passed.
+  # for pushes to master and develop, once the logic tests (which measure
+  # the coverage) have passed.
   coverage-badge:
     name: Update the coverage badge
     needs: test
@@ -139,7 +142,8 @@ jobs:
           }
 
   # Runs the script on real files generated with ffmpeg (tests/test_real_files.py),
-  # once per ffmpeg version that common distros ship, plus the newest release.
+  # once per ffmpeg version that common distros ship, plus the newest release,
+  # and once with the oldest mkvmerge the README lists.
   real-files:
     name: Real files, ${{ matrix.name }}
     runs-on: ubuntu-latest
