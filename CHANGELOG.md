@@ -8,7 +8,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ### Added
 
-- A `Dockerfile` that packages the script with ffmpeg, MKVToolNix and tqdm on Alpine (about 310 MB, for amd64 and arm64). Inside it, the ownership warning suggests `docker run --user` instead of `sudo`.
+- **A Docker image** with the script, ffmpeg, MKVToolNix and tqdm, on Alpine (about 310 MB), for amd64 and arm64. It's published as `tronyx/set-stereo-default` on Docker Hub and `ghcr.io/tronyx/set-stereo-default`: `latest` from `master` (rebuilt weekly for Alpine's security fixes) and `develop` from `develop`. Inside it, the ownership warning suggests `docker run --user` instead of `sudo`.
 
 ### Changed
 

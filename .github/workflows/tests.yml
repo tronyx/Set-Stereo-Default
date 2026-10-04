@@ -262,3 +262,61 @@ jobs:
           output=$(docker run "${as_me[@]}" "$IMAGE" /videos --dry-run 2>&1); check "Would change: 1"
           output=$(docker run "${as_me[@]}" "$IMAGE" /videos 2>&1); check "Changed: 1"
           output=$(docker run "${as_me[@]}" "$IMAGE" /videos 2>&1); check "Unchanged: 1"
+
+  # Publishes the image to Docker Hub and the GitHub Container Registry, for
+  # amd64 and arm64, once every test job has passed: master as "latest",
+  # develop as "develop". The weekly run rebuilds "latest" from scratch, so
+  # it picks up Alpine's security fixes even without a push. Pull requests
+  # never publish.
+  #
+  # Needs two repository secrets: DOCKERHUB_USERNAME, and DOCKERHUB_TOKEN, a
+  # Docker Hub personal access token with Read & Write access.
+  publish:
+    name: Publish the Docker image
+    needs: [test, lint, real-files, real-files-windows, docker]
+    if: >-
+      github.repository == 'tronyx/Set-Stereo-Default'
+      && github.event_name != 'pull_request'
+      && (github.ref_name == 'master' || github.ref_name == 'develop')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    # Two quick pushes publish in order, rather than racing each other.
+    concurrency:
+      group: publish-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: |
+            tronyx/set-stereo-default
+            ghcr.io/tronyx/set-stereo-default
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref_name == 'master' }}
+            type=raw,value=develop,enable=${{ github.ref_name == 'develop' }}
+      # No cache, and a fresh pull of alpine, so every build gets the newest
+      # Alpine packages rather than reusing old layers.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
