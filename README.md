@@ -44,7 +44,7 @@ The commentary is stereo too, but it's never picked (see [Picking the track](#-p
 | [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any; 54 or newer recommended | `.mkv` and `.webm` files |
 | [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
 
-The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45 through 102.
+The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45, 65, 74, 82, 92 and the newest release.
 
 Using Docker? The image has all of these built in, so you only need Docker itself (see [Docker](#-docker)).
 
@@ -57,7 +57,7 @@ Using Docker? The image has all of these built in, so you only need Docker itsel
 
 Each file is rewritten to a temporary copy next to the original before it's swapped in, so you need free space about the size of your largest file while the script runs.
 
-`--backup` doesn't add to that during the run, because each backup starts as a hard link to the original rather than a copy. But once the new file replaces the original, the backup holds the original's data on its own, so **every backup takes as much space as the file it backs up** until you delete it. Running `--backup` over a whole library needs about as much free space as the files that get changed.
+`--backup` usually doesn't add to that during the run, because each backup starts as a hard link to the original rather than a copy. (Where hard links aren't supported, such as on exFAT drives and some network shares, the backup is a full copy from the start.) Either way, once the new file replaces the original, the backup holds the original's data on its own, so **every backup takes as much space as the file it backs up** until you delete it. Running `--backup` over a whole library needs about as much free space as the files that get changed.
 
 ## 📦 Installation
 
@@ -102,7 +102,7 @@ python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
 python3 set_stereo_default.py "/path/to/videos"
 ```
 
-Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
+Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist, such as a mistyped one, is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
 
 On Windows, type `py` instead of `python3`.
 
@@ -308,7 +308,13 @@ A file is **skipped** (and counted under `Skipped` in the summary) when:
 
 ### 🧩 Changing the file
 
-Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked (same number of streams, the right track flagged, and not noticeably shorter than the original) before it replaces the original. If the check fails, the original is kept and the file is counted as an `Error`.
+Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked before it replaces the original:
+
+- every stream must still be there, with the same codec, language, name and flags;
+- the right track must be the default;
+- it mustn't be noticeably shorter than the original.
+
+If the check fails, the original is kept and the file is counted as an `Error`. The one exception is a flag such as "commentary" in an MP4, MOV or AVI file: ffmpeg can't write those flags to these formats at all, so losing one is a warning rather than an error (see [Troubleshooting](#-troubleshooting)).
 
 > [!NOTE]
 > A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
@@ -333,7 +339,7 @@ The question comes before any file is checked, so the count can include files th
 - **n** keeps every existing backup and saves the new one as the first free `<name>.bak.1`, `<name>.bak.2`, ...
 - **q** stops without changing anything.
 
-To skip the question, pass `--existing-backups replace` or `--existing-backups number`. When there's no one to ask (cron, Docker, Windows Task Scheduler, or input or output redirected), new backups are numbered, since that never deletes anything. The same happens if the question gets no answer at all (Ctrl+D).
+To skip the question, pass `--existing-backups replace` or `--existing-backups number`. When there's no one to ask (cron, Docker without `-it`, Windows Task Scheduler, or input or output redirected), new backups are numbered, since that never deletes anything. The same happens if the question gets no answer at all (Ctrl+D).
 
 ### 🪢 Symlinks
 
@@ -418,7 +424,7 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 **`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
 
-**`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command. See [Permissions and ownership](#-permissions-and-ownership).
+**`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command to use, or in the Docker image, the `docker run --user` one. See [Permissions and ownership](#-permissions-and-ownership).
 
 **`Skipping leftover temp file`.** An earlier run was killed mid-file. The temp file is safe to delete. See [Leftover temp files](#-leftover-temp-files).
 
@@ -436,9 +442,9 @@ python -m pytest
 There are two sets of tests:
 
 - **Logic tests** ([tests/test_set_stereo_default.py](tests/test_set_stereo_default.py)) cover the script's own decisions: picking the track, finding files, backups, checking a remux, progress reporting and clean stopping. They stand in for ffmpeg and mkvmerge, so they run anywhere.
-- **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4 and AVI files for each case the script handles, run the script on them, and check the results. Some files also have subtitles, chapters, track names, a font attachment or cover art, which must all come through the remux unchanged. Others use each common audio codec (AAC, AC3, E-AC3, DTS, TrueHD, FLAC and Opus), which must be copied, never re-encoded. They need ffmpeg, ffprobe and mkvmerge on your `PATH`, and are skipped if those aren't installed. Set `REQUIRE_MEDIA_TOOLS=1` to make a missing tool fail them instead, as GitHub does.
+- **Real-file tests** ([tests/test_real_files.py](tests/test_real_files.py)) use ffmpeg to create small MKV, MP4, WebM and AVI files for each case the script handles, run the script on them, and check the results. Some files also have subtitles, chapters, track names, a font attachment or cover art, and others use each common audio codec (AAC, AC3, E-AC3, DTS, TrueHD, FLAC and Opus); all of it must come through the remux unchanged. They need ffmpeg, ffprobe and mkvmerge on your `PATH` (and, for a few of them, an ffmpeg that can encode Opus and VP8, as most builds can), and are skipped if those aren't installed. Set `REQUIRE_MEDIA_TOOLS=1` to make a missing tool fail them instead, as GitHub does.
 
-GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions. The real-file tests run against every ffmpeg version listed under [Requirements](#-requirements) on Linux. Both also run on Windows and macOS, with the newest ffmpeg and MKVToolNix. A third job lints the code (`python -m ruff check .`) and checks its type hints (`python -m mypy`), for Linux and for Windows, then lints the workflow, the `Dockerfile` and the Markdown files. A fourth builds the Docker image on both `amd64` and `arm64`, runs both sets of tests inside it with the image's own tools, then runs the image the ways people will: as a regular user, as root (checking each file keeps its owner and permissions), and stopped with `docker stop` partway through a remux.
+GitHub runs both on every push and pull request, plus once a week, so a new ffmpeg release that breaks something gets noticed (see [.github/workflows/tests.yml](.github/workflows/tests.yml)). The logic tests run on the oldest and newest supported Python versions. The real-file tests run on Linux against every ffmpeg and mkvmerge version listed under [Requirements](#-requirements). Both also run on Windows and macOS, with the newest ffmpeg and MKVToolNix. A third job lints the code (`python -m ruff check .`) and checks its type hints (`python -m mypy`), for Linux and for Windows, then lints the workflow, the `Dockerfile` and the Markdown files. A fourth builds the Docker image on both `amd64` and `arm64`, runs both sets of tests inside it with the image's own tools, then runs the image the ways people will: as a regular user, as root (checking each file keeps its owner and permissions), and stopped with `docker stop` partway through a remux.
 
 To see which lines of the script the logic tests reach, run them under coverage. GitHub does the same on every run and shows the result on the run's summary page; it's for information only and never fails a build. The coverage badges at the top show the total for the latest push to each branch:
 

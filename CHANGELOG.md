@@ -13,6 +13,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 ### Changed
 
 - Progress bars are hidden automatically when the output isn't a terminal (cron, `docker run` without `-t`, `docker logs`, a pipe), instead of filling it with cursor codes. The same goes for the `Processing i/N...` counter shown with `--log-file`.
+- `--help` shows how to run the script with the Docker image, which runs `--help` when it's given no options.
 
 ### Fixed
 

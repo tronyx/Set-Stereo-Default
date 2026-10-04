@@ -37,10 +37,11 @@ How it changes each file:
 Safe by default:
   - Files that are already right are left alone.
   - --dry-run shows what would change without touching anything.
-  - Each new file is checked (no lost streams, no shorter than the
-    original, the right track is default) before it replaces the
-    original. --backup also keeps the original as <name>.bak, never
-    deleting an existing backup unless you say so.
+  - Each new file is checked before it replaces the original: every
+    stream still there with the same codec, language, name and flags,
+    the right track default, and no shorter than the original. --backup
+    also keeps the original as <name>.bak, never deleting an existing
+    backup unless you say so.
   - Ctrl+C or SIGTERM (docker stop, kill) stops cleanly and removes any
     half-written temp files.
   - A symlinked file is fixed through its link: the file it points to is
@@ -64,6 +65,10 @@ Examples:
   Just these files, or only .mkv files and not in subfolders:
     python3 set_stereo_default.py file1.mkv file2.mp4
     python3 set_stereo_default.py /path/to/videos --ext mkv --no-recursive
+
+In the Docker image, mount your videos at /videos and put the options after
+the image name, e.g. to preview every change:
+    docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --dry-run
 
 Exit codes: 0 all done, 1 a file had an error, no files matched or a tool is
 missing, 2 invalid options, 130 stopped by Ctrl+C, 143 stopped by SIGTERM.
@@ -1442,7 +1447,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="With --backup, what to do when <name>.bak already exists: replace "
                          "it, or number the new one (.bak.1, .bak.2, ...). Without this, "
                          "you're asked once before any file is changed; when there's no "
-                         "one to ask (cron, Docker), new backups are numbered")
+                         "one to ask (cron, Docker without -it), new backups are numbered")
     ap.add_argument("--prefer-lang", default=None, metavar="LANG",
                     help="Language to use when there's a stereo track in it, as a 2- or "
                          "3-letter code (en, eng, de, ger and deu all work); also picks "
