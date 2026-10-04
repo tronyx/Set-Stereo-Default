@@ -14,8 +14,13 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - Progress bars are hidden automatically when the output isn't a terminal (cron, `docker run` without `-t`, `docker logs`, a pipe), instead of filling it with cursor codes. The same goes for the `Processing i/N...` counter shown with `--log-file`.
 
+### Fixed
+
+- Remuxing an MKV file with a recent mkvmerge (seen with 99; 82 and older don't do it) no longer changes the MIME type of attached fonts from the older `application/x-truetype-font` style to `font/ttf`, which ffmpeg, and players built on it, don't recognize as a font. Styled subtitles could otherwise lose their fonts.
+
 ### Project
 
+- The real-file tests check that subtitles, chapters, track names and languages, font attachments and cover art all come through a remux unchanged.
 - CI builds the Docker image on every push, runs all the tests inside it, and runs it as a regular user to check its output.
 
 ## 2026-10-03 · [#8](https://github.com/tronyx/Set-Stereo-Default/pull/8)

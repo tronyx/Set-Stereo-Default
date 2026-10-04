@@ -1559,6 +1559,57 @@ def test_mkvmerge_is_told_to_write_utf8(tmp_path, caplog):
     assert args[args.index("--output-charset") + 1] == "UTF-8"
 
 
+def font(mimetype):
+    """A font attachment stream with the given MIME type."""
+    return ssd.Stream(index=9, type="attachment", codec="ttf", mimetype=mimetype)
+
+
+@pytest.mark.parametrize("attachments, option_known, added", [
+    ([font("application/x-truetype-font")], True, True),
+    ([font("Application/Vnd.MS-OpenType")], True, True),
+    ([font("font/ttf"), font("application/x-truetype-font")], True, True),
+    ([font("application/x-truetype-font")], False, False),
+    ([font("font/ttf")], True, False),
+    ([], True, False),
+], ids=["legacy ttf", "legacy otf, any case", "mixed", "mkvmerge too old", "new type only",
+        "no fonts"])
+def test_mkvmerge_keeps_legacy_font_types(tmp_path, caplog, monkeypatch, attachments,
+                                          option_known, added):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(ssd, "mkvmerge_can_keep_legacy_font_types", lambda: option_known)
+    plan = ssd.Plan(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2,
+                    layout=[*ORIGINAL_AUDIO, *attachments])
+
+    assert ssd.apply_mkv(plan, file_args())
+
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    assert ("--enable-legacy-font-mime-types" in args) is added
+    assert args.index("-o") < args.index("--default-track")
+
+
+@pytest.mark.parametrize("help_text, expected", [
+    ("  --enable-legacy-font-mime-types  Use legacy font MIME types", True),
+    ("  --default-track <TID[:bool]>", False),
+], ids=["has the option", "older mkvmerge"])
+def test_mkvmerge_can_keep_legacy_font_types(monkeypatch, help_text, expected):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=0, stdout=help_text, stderr=""))
+    assert ssd.mkvmerge_can_keep_legacy_font_types() is expected
+
+
+def test_mkvmerge_can_keep_legacy_font_types_without_mkvmerge(monkeypatch):
+    def missing(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory")
+    monkeypatch.setattr(ssd, "run", missing)
+    assert ssd.mkvmerge_can_keep_legacy_font_types() is False
+
+
+def test_stream_info_reads_an_attachments_mime_type():
+    raw = {"index": 5, "codec_type": "attachment", "codec_name": "ttf",
+           "tags": {"filename": "Font.ttf", "mimetype": "application/x-truetype-font"}}
+    assert ssd._stream_info(raw).mimetype == "application/x-truetype-font"
+
+
 def dry_run_flags(caplog):
     """The --default-track values from a logged mkvmerge dry-run command."""
     args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])

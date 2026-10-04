@@ -32,8 +32,10 @@ def _reset():
 def clean_module_state(monkeypatch):
     """Reset the script's state before and after every test, and put back
     the Ctrl+C and SIGTERM handlers that main() replaces. Tests run as if
-    outside the Docker image, even when they run inside it."""
+    outside the Docker image, even when they run inside it, and each one
+    checks mkvmerge's options afresh."""
     monkeypatch.delenv(ssd.IN_DOCKER_VAR, raising=False)
+    ssd.mkvmerge_can_keep_legacy_font_types.cache_clear()
     original_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     _reset()
     yield

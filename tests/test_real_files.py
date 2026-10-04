@@ -224,6 +224,122 @@ def test_script_on_a_real_file(tmp_path, case):
         assert boxes.index("moov") < boxes.index("mdat"), f"not faststart: {boxes}"
 
 
+CHAPTERS = """;FFMETADATA1
+title=Rich Test Movie
+[CHAPTER]
+TIMEBASE=1/1000
+START=0
+END=1000
+title=Opening
+[CHAPTER]
+TIMEBASE=1/1000
+START=1000
+END=2000
+title=Ending
+"""
+"""Chapters and a file title in ffmpeg's metadata format, for make_rich_video()."""
+
+
+def make_rich_video(folder, ext, font_type="application/x-truetype-font"):
+    """Write a two-second video with everything a real library file tends to
+    have besides audio, so a remux that drops or changes any of it shows up:
+    a file title and two chapters; 5.1 and stereo audio tracks with names;
+    two subtitle tracks with languages, names and the forced and
+    hearing-impaired flags; and, for MKV, a font attachment of font_type, or
+    for MP4, cover art. Subtitles are SubRip in MKV and mov_text in MP4."""
+    srt = folder / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    chapters = folder / "chapters.txt"
+    chapters.write_text(CHAPTERS, encoding="utf-8")
+    cmd = ["ffmpeg", "-v", "error", "-y",
+           "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=2",
+           "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+           "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+           "-i", str(srt), "-i", str(srt), "-i", str(chapters)]
+    maps = ["-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s", "-map", "4:s"]
+    if ext == ".mp4":
+        cover = folder / "cover.png"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=32x32",
+                        "-frames:v", "1", str(cover)], check=True, capture_output=True)
+        cmd += ["-i", str(cover)]
+        maps += ["-map", "6:v"]
+    else:
+        font = folder / "font.ttf"
+        font.write_bytes(b"\x00\x01\x00\x00" + bytes(64))
+        cmd += ["-attach", str(font), "-metadata:s:t", f"mimetype={font_type}"]
+    cmd += maps + ["-map_metadata", "5", "-map_chapters", "5",
+                   "-c:v:0", "mpeg4", "-c:a", "ac3",
+                   "-c:s", "mov_text" if ext == ".mp4" else "srt",
+                   "-disposition:v:0", "default",
+                   "-disposition:a:0", "default", "-disposition:a:1", "0",
+                   "-disposition:s:0", "forced", "-disposition:s:1", "hearing_impaired"]
+    for spec, language, title in (("a:0", "eng", "Surround 5.1"), ("a:1", "eng", "Stereo"),
+                                  ("s:0", "eng", "English (Forced)"), ("s:1", "spa", "Español SDH")):
+        cmd += [f"-metadata:s:{spec}", f"language={language}", f"-metadata:s:{spec}", f"title={title}",
+                f"-metadata:s:{spec}", f"handler_name={title}"]
+    if ext == ".mp4":
+        cmd += ["-c:v:1", "png", "-disposition:v:1", "attached_pic", "-movflags", "+faststart"]
+    path = folder / f"rich{ext}"
+    subprocess.run(cmd + [str(path)], check=True, capture_output=True, text=True)
+    return path
+
+
+def contents(path):
+    """Everything about path a remux must keep, as plain data: the file's
+    title, its chapters, and for each stream its type, codec, shape,
+    language, name and every disposition flag, except the audio default
+    flag, which is the one thing the script changes. Timings are rounded to
+    the millisecond, since containers store them with different
+    precision."""
+    res = subprocess.run(["ffprobe", "-v", "error", "-of", "json", "-show_streams",
+                          "-show_chapters", "-show_format", str(path)],
+                         check=True, capture_output=True, text=True)
+    data = json.loads(res.stdout)
+    streams = []
+    for s in data["streams"]:
+        tags = {k.lower(): v for k, v in s.get("tags", {}).items()}
+        disposition = dict(s.get("disposition", {}))
+        if s["codec_type"] == "audio":
+            disposition.pop("default", None)
+        streams.append({
+            "type": s["codec_type"], "codec": s.get("codec_name"),
+            "channels": s.get("channels"), "size": (s.get("width"), s.get("height")),
+            "tags": {k: tags[k] for k in ("language", "title", "handler_name", "filename", "mimetype")
+                     if k in tags},
+            "disposition": disposition})
+    chapters = [(round(float(c["start_time"]), 3), round(float(c["end_time"]), 3),
+                 c.get("tags", {}).get("title")) for c in data.get("chapters", [])]
+    title = {k.lower(): v for k, v in data["format"].get("tags", {}).items()}.get("title")
+    return {"title": title, "chapters": chapters, "streams": streams}
+
+
+@pytest.mark.parametrize("ext, font_type", [
+    (".mkv", "application/x-truetype-font"),
+    (".mkv", "font/ttf"),
+    (".mp4", None),
+], ids=["mkv, older font type", "mkv, newer font type", "mp4"])
+def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type):
+    """The test file is checked first, so a missing feature in the test's
+    own ffmpeg can't make the comparison pass by having nothing to compare.
+    Both font types must come through as they were: newer mkvmerge versions
+    rewrite the older one unless told not to."""
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
+    video = make_rich_video(tmp_path, ext, *([font_type] if font_type else []))
+    before = contents(video)
+    assert before["title"] == "Rich Test Movie" and len(before["chapters"]) == 2, before
+    kinds = [s["type"] for s in before["streams"]]
+    assert kinds.count("audio") == 2 and kinds.count("subtitle") == 2, before
+    assert kinds.count("attachment" if ext == ".mkv" else "video") == (1 if ext == ".mkv" else 2), before
+    assert audio_defaults(video) == [(6, True), (2, False)]
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert contents(video) == before
+
+
 def test_dry_run_changes_nothing(tmp_path):
     need("ffmpeg", "ffprobe", "mkvmerge")
     video = make_video(tmp_path / "video.mkv", [Track(6, default=True), Track(2)])

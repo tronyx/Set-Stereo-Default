@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import importlib
 import json
 import logging
@@ -143,6 +144,11 @@ COMMENTARY_NAME_RE = re.compile(r"commentary|audio[ -]?description|descriptive|d
 really named: "Director's Commentary", "Audio Description", "Descriptive
 Video Service", "Described Video", "DVS". A bare "description" is too loose
 to count."""
+
+LEGACY_FONT_MIME_TYPES = frozenset({"application/x-truetype-font", "application/vnd.ms-opentype",
+                                    "application/x-font-ttf", "application/x-font-otf"})
+"""Older MIME types for font attachments, which newer mkvmerge versions
+rewrite to font/ttf and font/otf unless told not to (see apply_mkv())."""
 
 NAME_TAGS = ("title", "name", "handler_name")
 """Tags that can hold a track's name: MKV uses "title", and ffprobe reports
@@ -476,8 +482,9 @@ class Stream:
     """One stream in a file, as probe_streams() reads it: its index (as
     ffprobe numbers streams), type ("audio", "video", "subtitle", ...),
     codec, channel count (None if not audio), language tag ("" if none),
-    names (from NAME_TAGS), and its default, commentary and
-    audio-description flags. Frozen, so streams can be shared freely."""
+    names (from NAME_TAGS), its default, commentary and audio-description
+    flags, and its MIME type ("" if none; attachments, such as fonts, have
+    one). Frozen, so streams can be shared freely."""
     index: int
     type: str = ""
     codec: str = ""
@@ -487,6 +494,7 @@ class Stream:
     visual_impaired: bool = False
     language: str = ""
     names: tuple[str, ...] = ()
+    mimetype: str = ""
 
 
 def _stream_info(raw: dict) -> Stream:
@@ -503,6 +511,7 @@ def _stream_info(raw: dict) -> Stream:
         visual_impaired=bool(disposition.get("visual_impaired", 0)),
         language=tags.get("language", ""),
         names=tuple(tags[k] for k in NAME_TAGS if tags.get(k)),
+        mimetype=tags.get("mimetype", ""),
     )
 
 
@@ -923,6 +932,17 @@ def mkvmerge_audio_ids(path: Path) -> list[int] | None:
     return [t["id"] for t in tracks if t.get("type") == "audio"]
 
 
+@functools.cache
+def mkvmerge_can_keep_legacy_font_types() -> bool:
+    """True if this mkvmerge has --enable-legacy-font-mime-types, judging by
+    its --help. Older versions don't have it, and don't need it either:
+    they leave font MIME types alone. Checked once per run."""
+    try:
+        return "--enable-legacy-font-mime-types" in run(["mkvmerge", "--help"]).stdout
+    except OSError:
+        return False
+
+
 def _announce(intro: str | None, line: str | None = None) -> None:
     """Log a file's intro (what's about to happen to it, from
     _process_file()) and line together, as one message. With --jobs > 1,
@@ -1043,6 +1063,13 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
       encoding, which isn't UTF-8 on Windows or with LANG=C in Docker.
     - Exit code 1 means it finished with warnings, which are logged
       without mkvmerge's "#GUI#warning" and "Warning:" prefixes.
+    - Newer versions rewrite fonts attached with an older MIME type
+      (LEGACY_FONT_MIME_TYPES) to font/ttf or font/otf, which ffmpeg, and
+      players built on it, don't recognize as fonts, so styled subtitles
+      could lose them. For a file with such a font,
+      --enable-legacy-font-mime-types keeps its type as it is. That also
+      turns any font/ttf or font/otf in the same file into the older type,
+      but a file with both is rare, and the older types work everywhere.
     """
     path = plan.path
     ids = mkvmerge_audio_ids(path)
@@ -1053,7 +1080,11 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
                   f"leaving the file alone")
         return False
 
-    cmd = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "-o", str(plan.tmp_path)]
+    cmd = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8"]
+    if (any(s.mimetype.lower() in LEGACY_FONT_MIME_TYPES for s in plan.layout)
+            and mkvmerge_can_keep_legacy_font_types()):
+        cmd.append("--enable-legacy-font-mime-types")
+    cmd += ["-o", str(plan.tmp_path)]
     for s, track_id in zip(plan.streams, ids, strict=True):
         flag = "yes" if s.index == plan.target_index else "no"
         cmd += ["--default-track", f"{track_id}:{flag}"]
