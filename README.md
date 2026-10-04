@@ -41,7 +41,7 @@ The commentary is stereo too, but it's never picked (see [Picking the track](#-p
 | --- | --- | --- |
 | [Python](https://www.python.org) | 3.10 or newer | Everything |
 | [ffmpeg and ffprobe](https://ffmpeg.org) | 4.4 or newer | Everything |
-| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any | `.mkv` and `.webm` files |
+| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any; 54 or newer recommended | `.mkv` and `.webm` files |
 | [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
 
 The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45 through 102.
@@ -50,6 +50,8 @@ Using Docker? The image has all of these built in, so you only need Docker itsel
 
 > [!NOTE]
 > ffmpeg versions older than 4.4 can't read the commentary and audio-description flags in MKV files, so they might make a commentary track the default.
+>
+> mkvmerge 52 and older drop the commentary, audio-description, hearing-impaired and original-language flags from MKV files when remuxing. The script notices and leaves files with those flags untouched, so with an older MKVToolNix, those files can't be fixed until you update it. 54 and newer keep every flag.
 
 ### 💾 Disk space
 
@@ -409,6 +411,10 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 **`SKIP (...)` on a file you expected to change.** Usually the stereo track is in a different language from the current default, or several stereo tracks qualify. Both are settled with `--prefer-lang`. See [Picking the track](#-picking-the-track).
 
 **`post-remux check failed (duration dropped from ...)`.** The original contains less than its header claims, usually because it's an incomplete download. It's left untouched; re-download it or check it in a player. See [Changing the file](#-changing-the-file).
+
+**`post-remux check failed (stream#N lost its ... flag; ...)`.** Your mkvmerge is too old to keep a track flag (commentary, hearing impaired, ...) that the file has, so the file is left untouched. Update MKVToolNix to 54 or newer and run the script again. A similar check rejects a remux that changed a track's codec or language or lost its name.
+
+**`stream#N lost its ... flag, which ffmpeg can't write to .mp4 files`.** A warning, not an error: the file was fixed, but ffmpeg can't store flags such as "commentary" in MP4, MOV or AVI files at all, so that flag is gone. The tracks themselves are unchanged, but players can no longer tell, for example, that a track is commentary unless its name says so.
 
 **`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
 

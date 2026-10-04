@@ -786,7 +786,7 @@ def test_verify_remux(fake_ffprobe, remuxed, expected):
 
 
 def test_verify_remux_avi_reorder(fake_ffprobe):
-    fake_ffprobe[REMUX] = [stream(0, "video", 0, "xvid"), stream(1, "audio", 0, "aac", 2, "eng"),
+    fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, "eng"),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
     assert ssd.verify_remux(plan_to_check(), reordered=True) is None
 
@@ -799,10 +799,95 @@ def test_verify_remux_avi_reorder_compares_languages_however_theyre_written(fake
                                                                             accepted):
     """The target is tagged "eng"; the remux's first track may say the same
     language another way."""
-    fake_ffprobe[REMUX] = [stream(0, "video", 0, "xvid"), stream(1, "audio", 0, "aac", 2, tagged),
+    fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, tagged),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
     problem = ssd.verify_remux(plan_to_check(), reordered=True)
     assert (problem is None) is accepted
+
+
+def described(index, codec_type, codec, default=0, channels=None, language="eng", title=None,
+              flags=()):
+    """A stream the way ffprobe's JSON reports it, with a name and flags."""
+    s = stream(index, codec_type, default, codec, channels, language)
+    s["disposition"].update(dict.fromkeys(flags, 1))
+    if title:
+        s.setdefault("tags", {})["title"] = title
+    return s
+
+
+def rich_layout(**changes):
+    """A file with a 5.1 default and a stereo track, a commentary track,
+    and a forced English subtitle, as ffprobe reports it; after the remux
+    the stereo track is default. changes replaces streams by index, e.g.
+    rich_layout(stream3=...)."""
+    streams = [described(0, "video", "h264", 1),
+               described(1, "audio", "eac3", 0, 6, title="Surround"),
+               described(2, "audio", "aac", 1, 2, title="Stereo"),
+               described(3, "audio", "aac", 0, 2, title="Director", flags=("comment",)),
+               described(4, "subtitle", "subrip", 0, title="Signs", flags=("forced",))]
+    for key, value in changes.items():
+        streams[int(key.removeprefix("stream"))] = value
+    return streams
+
+
+def rich_plan(name):
+    """The Plan for name (e.g. "v.mkv") with rich_layout()'s original
+    streams, making stream 2 default. Returns (plan, its remux's path)."""
+    original = rich_layout(stream1=described(1, "audio", "eac3", 1, 6, title="Surround"),
+                           stream2=described(2, "audio", "aac", 0, 2, title="Stereo"))
+    layout = [ssd._stream_info(s) for s in original]
+    plan = ssd.Plan(Path(name), [s for s in layout if s.type == "audio"], 2, layout=layout)
+    return plan, str(plan.tmp_path)
+
+
+@pytest.mark.parametrize("remuxed, problem", [
+    (rich_layout(), None),
+    (rich_layout(stream4=described(4, "subtitle", "subrip", title="Signs", flags=("forced", "dub"))),
+     None),
+    (rich_layout(stream3=described(3, "audio", "aac", 0, 2, title="Director", flags=("comment",),
+                                   language="und")), None),
+    (rich_layout(stream3=described(3, "audio", "aac", 0, 2, title="Director", flags=("comment",),
+                                   language="en")), None),
+    (rich_layout(stream1=described(1, "audio", "ac3", 0, 6, title="Surround")),
+     "stream#1 changed from audio eac3 6ch to audio ac3 6ch"),
+    (rich_layout(stream4=described(4, "subtitle", "subrip", language="spa", title="Signs",
+                                   flags=("forced",))),
+     "stream#4's language changed from eng to spa"),
+    (rich_layout(stream2=described(2, "audio", "aac", 1, 2)), "stream#2 lost its name 'Stereo'"),
+], ids=["identical", "a flag added", "language now unknown", "language written another way",
+        "codec changed", "language changed", "name lost"])
+def test_verify_remux_checks_every_stream_came_through(fake_ffprobe, remuxed, problem):
+    plan, remux = rich_plan("v.mkv")
+    fake_ffprobe[remux] = remuxed
+    assert ssd.verify_remux(plan, reordered=False) == problem
+
+
+def test_verify_remux_rejects_a_flag_lost_from_an_mkv_file(fake_ffprobe):
+    """mkvmerge 52 and older drop the commentary flag, which mkvmerge 54 and
+    newer keep, so the remux is rejected and the fix named."""
+    plan, remux = rich_plan("v.mkv")
+    fake_ffprobe[remux] = rich_layout(stream3=described(3, "audio", "aac", 0, 2, title="Director"))
+    assert ssd.verify_remux(plan, reordered=False) == (
+        "stream#3 lost its comment flag; mkvmerge 52 and older drop it, so update MKVToolNix "
+        "to 54 or newer")
+
+
+def test_verify_remux_warns_about_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
+    """ffmpeg can't write the flag to MP4 files at all, so rejecting the
+    remux would leave the file unfixable: it's used, with a warning."""
+    plan, remux = rich_plan("v.mp4")
+    fake_ffprobe[remux] = rich_layout(
+        stream3=described(3, "audio", "aac", 0, 2, title="Director"),
+        stream4=described(4, "subtitle", "subrip", title="Signs"))
+    assert ssd.verify_remux(plan, reordered=False) is None
+    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+        "    v.mp4: stream#3 lost its comment flag, which ffmpeg can't write to .mp4 files",
+        "    v.mp4: stream#4 lost its forced flag, which ffmpeg can't write to .mp4 files"]
+
+
+def test_stream_info_reads_every_flag_but_default():
+    raw = described(4, "subtitle", "subrip", 1, flags=("forced", "hearing_impaired"))
+    assert ssd._stream_info(raw).flags == {"forced", "hearing_impaired"}
 
 
 REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6),

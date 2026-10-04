@@ -141,6 +141,12 @@ jobs:
           - name: newest ffmpeg (static build)
             image: debian:13
             static-ffmpeg: true
+          # The oldest mkvmerge the README lists, from MKVToolNix's archive of
+          # AppImages (see below). It predates the newer Matroska track flags,
+          # and the tests check that the script notices it dropping them.
+          - name: mkvmerge 45 (AppImage)
+            image: debian:13
+            old-mkvmerge: "45.0.0"
     env:
       DEBIAN_FRONTEND: noninteractive
       # Fail, rather than skip, if a tool is missing.
@@ -150,8 +156,29 @@ jobs:
       - name: Install tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends mkvtoolnix python3 python3-pytest python3-tqdm \
-            ${{ matrix.static-ffmpeg && 'ca-certificates curl xz-utils' || 'ffmpeg' }}
+          apt-get install -y --no-install-recommends python3 python3-pytest python3-tqdm \
+            ${{ matrix.static-ffmpeg && 'ca-certificates curl xz-utils' || 'ffmpeg' }} \
+            ${{ matrix.old-mkvmerge && 'ca-certificates curl' || 'mkvtoolnix' }}
+      # The AppImage is unpacked rather than run, which needs no FUSE inside a
+      # container, and its mkvmerge goes on PATH as a wrapper that points it at
+      # the libraries it ships with.
+      - name: Install mkvmerge ${{ matrix.old-mkvmerge }}
+        if: matrix.old-mkvmerge
+        env:
+          VERSION: ${{ matrix.old-mkvmerge }}
+        run: |
+          cd /opt
+          curl -sSLf -o mkvtoolnix.AppImage \
+            "https://mkvtoolnix.download/appimage/MKVToolNix_GUI-$VERSION-x86_64.AppImage"
+          chmod +x mkvtoolnix.AppImage
+          ./mkvtoolnix.AppImage --appimage-extract > /dev/null
+          mv squashfs-root mkvtoolnix
+          rm mkvtoolnix.AppImage
+          cat > /usr/local/bin/mkvmerge <<'WRAPPER'
+          #!/bin/sh
+          LD_LIBRARY_PATH=/opt/mkvtoolnix/usr/lib exec /opt/mkvtoolnix/usr/bin/mkvmerge "$@"
+          WRAPPER
+          chmod +x /usr/local/bin/mkvmerge
       # https://github.com/BtbN/FFmpeg-Builds keeps builds of the newest release
       # branches (e.g. ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz) and drops old
       # ones, so pick the highest version listed rather than pinning one.

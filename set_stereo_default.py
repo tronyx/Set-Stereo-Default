@@ -483,8 +483,10 @@ class Stream:
     ffprobe numbers streams), type ("audio", "video", "subtitle", ...),
     codec, channel count (None if not audio), language tag ("" if none),
     names (from NAME_TAGS), its default, commentary and audio-description
-    flags, and its MIME type ("" if none; attachments, such as fonts, have
-    one). Frozen, so streams can be shared freely."""
+    flags, every other flag it has (flags, e.g. {"forced",
+    "hearing_impaired"}, as ffprobe names them; never "default"), and its
+    MIME type ("" if none; attachments, such as fonts, have one). Frozen, so
+    streams can be shared freely."""
     index: int
     type: str = ""
     codec: str = ""
@@ -494,6 +496,7 @@ class Stream:
     visual_impaired: bool = False
     language: str = ""
     names: tuple[str, ...] = ()
+    flags: frozenset[str] = frozenset()
     mimetype: str = ""
 
 
@@ -511,6 +514,7 @@ def _stream_info(raw: dict) -> Stream:
         visual_impaired=bool(disposition.get("visual_impaired", 0)),
         language=tags.get("language", ""),
         names=tuple(tags[k] for k in NAME_TAGS if tags.get(k)),
+        flags=frozenset(k for k, on in disposition.items() if on and k != "default"),
         mimetype=tags.get("mimetype", ""),
     )
 
@@ -632,6 +636,32 @@ def needs_change(streams: list[Stream], target_index: int) -> bool:
     return any((s.index == target_index) != s.default for s in streams)
 
 
+def _stream_loss(was: Stream, now: Stream) -> str | None:
+    """What a remux changed about one stream (was, before; now, after), as a
+    short reason, or None if nothing it must keep. Its type, codec and
+    channel count must match, a known language mustn't change, and every
+    name it had must still be there. Flags are checked by verify_remux(),
+    since whether losing one is acceptable depends on the container.
+
+    Only losses count. A tool may add a name (ffmpeg names MP4 tracks
+    "SoundHandler" when they have none) or fill in "und" for a missing
+    language, which loses nothing."""
+    def shape(s: Stream) -> str:
+        """e.g. "audio eac3 6ch" or "subtitle subrip"."""
+        return " ".join(str(part) for part in (s.type, s.codec, f"{s.channels}ch" if s.channels else "")
+                        if part)
+
+    if (was.type, was.codec, was.channels) != (now.type, now.codec, now.channels):
+        return f"stream#{was.index} changed from {shape(was)} to {shape(now)}"
+    old, new = normalize_language(was.language), normalize_language(now.language)
+    if old not in ("", "und") and new not in ("", "und") and old != new:
+        return f"stream#{was.index}'s language changed from {was.language} to {now.language}"
+    gone = [name for name in was.names if name not in now.names]
+    if gone:
+        return f"stream#{was.index} lost its name {gone[0]!r}"
+    return None
+
+
 def verify_remux(plan: Plan, reordered: bool) -> str | None:
     """Check the finished remux at plan.tmp_path before it replaces the
     original. Returns None if it looks right, otherwise a short reason why
@@ -646,12 +676,24 @@ def verify_remux(plan: Plan, reordered: bool) -> str | None:
     to look at. A longer one is fine: the original's header just
     understated it. The check is skipped if either duration is unknown.
 
+    Every stream must then come through as it was (see _stream_loss()):
+    same type, codec and channels, no known language changed and no name
+    lost. Its flags (forced, commentary, hearing impaired, ...) must all
+    survive in MKV files: mkvmerge 54 and newer keep every one, but 52 and
+    older drop the commentary, audio-description, hearing-impaired and
+    original-language flags, which players use to label and choose tracks.
+    ffmpeg can't write any of these
+    flags to MP4, MOV or AVI files, so a flag lost there is unavoidable: it's
+    logged as a warning, and the remux is still used.
+
     Then the target must be the only audio track flagged default. A
     remux keeps audio tracks in order, so the target is found by its
     position among them. After an AVI reorder (reordered=True) there's no
     flag to check, so the first audio track must instead match the
     target's codec, channel count and language (compared after
-    normalize_language(), as everywhere else)."""
+    normalize_language(), as everywhere else). The streams are then in
+    apply_remux()'s order: video, the target, the other audio tracks,
+    subtitles, data."""
     after, after_duration = probe_streams(plan.tmp_path, report=False)
     if after is None:
         return "ffprobe couldn't read the file"
@@ -675,6 +717,26 @@ def verify_remux(plan: Plan, reordered: bool) -> str | None:
                 or (target.language and normalize_language(first.language)
                     != normalize_language(target.language))):
             return "target audio track didn't end up first"
+        of_type = {t: [s for s in before if s.type == t] for t in ("video", "audio", "subtitle", "data")}
+        moved = next(s for s in of_type["audio"] if s.index == plan.target_index)
+        order = (of_type["video"] + [moved] + [s for s in of_type["audio"] if s is not moved]
+                 + of_type["subtitle"] + of_type["data"] + [s for s in before if s.type not in of_type])
+    else:
+        order = before
+    is_mkv = plan.path.suffix.lower() in MKV_EXTS
+    for was, now in zip(order, after, strict=True):
+        loss = _stream_loss(was, now)
+        if loss:
+            return loss
+        lost = sorted(was.flags - now.flags)
+        if not lost:
+            continue
+        what = f"stream#{was.index} lost its {', '.join(lost)} flag{'s' if len(lost) > 1 else ''}"
+        if is_mkv:
+            return f"{what}; mkvmerge 52 and older drop it, so update MKVToolNix to 54 or newer"
+        log.warning(f"    {plan.path.name}: {what}, which ffmpeg can't write to "
+                    f"{plan.path.suffix.lower()} files")
+    if reordered:
         return None
 
     expected = audio[streams.index(target)].index

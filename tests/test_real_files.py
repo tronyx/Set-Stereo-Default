@@ -9,6 +9,7 @@ fails the run instead of quietly skipping everything."""
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -107,6 +108,12 @@ def audio_defaults(path):
     """(channels, default flag) for each audio stream, in file order."""
     return [(s["channels"], bool(s["disposition"]["default"]))
             for s in probe(path) if s["codec_type"] == "audio"]
+
+
+def mkvmerge_version():
+    """The major version of the mkvmerge on PATH, e.g. 99."""
+    res = subprocess.run(["mkvmerge", "--version"], check=True, capture_output=True, text=True)
+    return int(re.search(r"v(\d+)\.", res.stdout).group(1))
 
 
 def mkvmerge_defaults(path):
@@ -340,7 +347,10 @@ def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type
     """The test file is checked first, so a missing feature in the test's
     own ffmpeg can't make the comparison pass by having nothing to compare.
     Both font types must come through as they were: newer mkvmerge versions
-    rewrite the older one unless told not to."""
+    rewrite the older one unless told not to.
+
+    mkvmerge 52 and older drop the hearing-impaired flag, so with one of
+    those, the script must reject the remux and leave the file alone."""
     need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
     video = make_rich_video(tmp_path, ext, *([font_type] if font_type else []))
     before = contents(video)
@@ -349,9 +359,17 @@ def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type
     assert kinds.count("audio") == 2 and kinds.count("subtitle") == 2, before
     assert kinds.count("attachment" if ext == ".mkv" else "video") == (1 if ext == ".mkv" else 2), before
     assert audio_defaults(video) == [(6, True), (2, False)]
+    original = digest(video)
 
     code, output = run_script(video)
 
+    if ext == ".mkv" and mkvmerge_version() < 54:
+        assert code == 1, output
+        assert summary(output)["error"] == 1, output
+        assert "lost its hearing_impaired flag" in output, output
+        assert digest(video) == original
+        assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+        return
     assert code == 0, output
     assert summary(output)["changed"] == 1, output
     assert audio_defaults(video) == [(6, False), (2, True)]

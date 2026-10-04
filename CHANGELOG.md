@@ -18,8 +18,11 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - Remuxing an MKV file with a recent mkvmerge (seen with 99; 82 and older don't do it) no longer changes the MIME type of attached fonts from the older `application/x-truetype-font` style to `font/ttf`, which ffmpeg, and players built on it, don't recognize as a font. Styled subtitles could otherwise lose their fonts.
 
+- The check before a remux replaces the original now compares every stream, not just how many there are: a changed codec or channel count, a changed language or a lost track name rejects the remux. So does a lost track flag in MKV files, which mkvmerge 52 and older drop (commentary, audio description, hearing impaired, original language); update MKVToolNix to 54 or newer to fix those files. ffmpeg can't write these flags to MP4, MOV or AVI files at all, so a flag lost there is now reported as a warning, where it used to go unnoticed.
+
 ### Project
 
+- CI tests mkvmerge 45, the oldest the README lists, from MKVToolNix's AppImage archive.
 - CI runs the logic and real-file tests on macOS too, with Homebrew's ffmpeg and MKVToolNix.
 - The real-file tests cover each common audio codec (AAC, E-AC3, DTS, TrueHD, FLAC and Opus, besides AC3) in MKV, and AAC, E-AC3 and Opus in MP4 and WebM.
 - The real-file tests check that subtitles, chapters, track names and languages, font attachments and cover art all come through a remux unchanged.
