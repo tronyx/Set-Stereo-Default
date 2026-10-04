@@ -79,8 +79,9 @@ jobs:
         uses: docker://rhysd/actionlint:1.7.12
         with:
           args: -color
+      # hadolint only tags full versions (v3.5.0), not v3 on its own.
       - name: Lint the Dockerfile
-        uses: hadolint/hadolint-action@v3
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
           config: .hadolint.yaml
