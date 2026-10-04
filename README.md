@@ -117,47 +117,54 @@ The image has the script, Python, ffmpeg, MKVToolNix and tqdm, so there's nothin
 
 ```bash
 # 1. See what would change, without touching anything
-docker run --rm -it -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos" --dry-run
+docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --dry-run
 
 # 2. Try it for real on one folder, keeping backups
-docker run --rm -it -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos/Some Show" --backup
+docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default "/videos/Some Show" --backup
 
 # 3. Happy? Run it on everything, 3 files at a time
-docker run --rm -it -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos" --jobs 3
+docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --jobs 3
 ```
 
 Everything after the image name is passed to the script, so every [option](#%EF%B8%8F-options) works the same way. With no options, it shows the built-in help.
 
 **What the `docker run` options do:**
 
-- **`-v "/path/to/videos:/path/to/videos"`** lets the container see your videos. It can only see folders you mount. Mounting each one at the same path inside the container means every path in the output matches your real one. Add one `-v` per folder, and don't mount them read-only (`:ro`), since the script has to replace the files.
+- **`-v "/path/to/videos:/videos"`** lets the container see your videos: the folder on your computer before the `:`, at `/videos` inside the container. The container can only see folders you mount, and the script is then given paths inside it, so the output shows `/videos/...` rather than your real paths. Don't mount it read-only (`:ro`), since the script has to replace the files.
 - **`-it`** gives the script a terminal, which shows the progress bars and lets it ask the [backup question](#-backups). Leave it out for cron and other scheduled runs: the bars are hidden and new backups are numbered.
 - **`--rm`** removes the container once the run finishes.
+
+**Several folders.** Mount each one under `/videos`, then pass `/videos` to work on all of them:
+
+```bash
+docker run --rm -it -v "/mnt/media/Movies:/videos/Movies" -v "/mnt/media/TV Shows:/videos/TV Shows" tronyx/set-stereo-default /videos --dry-run
+```
 
 **Running as the files' owner.** The container runs as root by default, which lets it give every remuxed file its original owner on a local disk. On an NFS share, root usually becomes `nobody` and can't change owners (see [Permissions and ownership](#-permissions-and-ownership)), so run the container as the user that owns your videos instead. `id -u` and `id -g` show your own IDs, and `stat -c '%u:%g' "/path/to/a/video.mkv"` shows a file's:
 
 ```bash
-docker run --rm -it --user 1000:100 -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos"
+docker run --rm -it --user 1000:100 -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos
 ```
 
-**Keeping the log.** Anything written inside the container is gone when it exits, so point `--log-file` at a mounted folder. If remuxed files can't be given their owner, the list of them is saved next to the log too:
+**Keeping the log.** Anything written inside the container is gone when it exits, so point `--log-file` at the mounted folder. If remuxed files can't be given their owner, the list of them is saved next to the log too:
 
 ```bash
-docker run --rm -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos" --log-file "/path/to/videos/set_stereo_default.log"
+docker run --rm -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --log-file /videos/set_stereo_default.log
 ```
 
 **Running it on a schedule,** e.g. every night at 3 AM from cron, as the files' owner and with no terminal:
 
 ```text
-0 3 * * * docker run --rm --user 1000:100 -v "/path/to/videos:/path/to/videos" tronyx/set-stereo-default "/path/to/videos" --log-file "/path/to/videos/set_stereo_default.log"
+0 3 * * * docker run --rm --user 1000:100 -v "/path/to/videos:/videos" tronyx/set-stereo-default /videos --log-file /videos/set_stereo_default.log
 ```
 
 **Good to know:**
 
 - **Updating:** `docker pull tronyx/set-stereo-default` gets the newest image.
 - **Stopping:** `docker stop` and Ctrl+C both stop the script cleanly, the same as without Docker.
-- **Symlinks:** a symlink that points outside the mounted folders can't be followed inside the container. Mount the folders it points into as well, at the same paths.
-- **Docker Desktop (Windows and macOS):** the path before the `:` is the one on your computer, e.g. `-v "D:\Videos:/videos"`, and you then pass `/videos` to the script.
+- **Forgot the `-v`?** The script reports `Skipping /videos: no such file or directory` and `No matching files found.`, then exits with code `1` without changing anything.
+- **Symlinks:** inside the container, a symlink is followed to the path it holds, and that path has to exist there too. A relative link within the mounted folder works. One that points elsewhere, or uses an absolute path from your computer (`/mnt/media/...`), only works if that path is also mounted, at the same place.
+- **Docker Desktop (Windows and macOS):** the path before the `:` is one on your computer, e.g. `-v "D:\Videos:/videos"`.
 - **Building it yourself:** `docker build -t set-stereo-default .` in this repository, then use `set-stereo-default` as the image name.
 
 ## ⚙️ Options
