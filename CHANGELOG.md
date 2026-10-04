@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+### Added
+
+- **`--input-file FILE`** processes the paths listed in a file, one per line, in the list's order; `--input-file -` reads them from a pipe. Each line can be a plain path, a path quoted the way a shell or `ls` shows it (including `'\''` for an apostrophe and backslash-escaped spaces), a path relative to the list's folder, or one starting with `~`. Blank lines and `#` comments are skipped. In the Docker image, a list replaces the `/videos` default.
+
 ### Changed
 
 - Paths are processed in the order you give them, each folder's files in alphabetical order, instead of every file from every path being sorted together. A file reached through more than one path is still processed once.

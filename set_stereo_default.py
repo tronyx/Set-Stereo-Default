@@ -62,6 +62,10 @@ Examples:
   plays by default now:
     python3 set_stereo_default.py /path/to/videos --prefer-lang en
 
+  Work through a list of folders, one per line, in the list's order (see
+  --input-file below for how lines can be written):
+    python3 set_stereo_default.py --input-file shows.txt --dry-run
+
   Just these files, or only .mkv files and not in subfolders:
     python3 set_stereo_default.py file1.mkv file2.mp4
     python3 set_stereo_default.py /path/to/videos --ext mkv --no-recursive
@@ -1441,21 +1445,74 @@ def ask_about_existing_backups(count: int) -> str:
             return choices[answer]
 
 
+def _input_path(line: str, base: Path) -> str:
+    """One line of an --input-file as a path, relative to base if it isn't
+    absolute. Lists come written in different ways, so the line is tried as
+    it is first (a plain path, spaces and all, or a Windows path, whose
+    backslashes a shell would eat), then the way a shell would read it: in
+    single or double quotes, with '\\'' for an apostrophe (how ls shows names
+    on a terminal), or with backslash-escaped spaces. A leading ~ is your
+    home folder. The first reading that exists is used. If none does, the
+    path is returned anyway, unquoted if it was quoted, so the warning that
+    it doesn't exist names it the way you'd recognize it."""
+    readings = [line]
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        words = []
+    if len(words) == 1 and words[0] != line:
+        readings.append(words[0])
+    readings += [os.path.expanduser(r) for r in readings if r.startswith("~")]
+    candidates = [str(base / r) for r in readings]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+    quoted = line[0] in "'\"" and len(words) == 1
+    return candidates[1] if quoted else candidates[0]
+
+
+def read_input_file(name: str) -> list[str]:
+    """The paths listed in the file name, one per line in order, or on
+    standard input if name is "-" (see _input_path()). Relative paths are
+    taken from the file's folder, or the current folder for standard input,
+    so a list kept next to your videos can name them by their folders.
+    Blank lines and lines starting with # are skipped. The text is read as
+    UTF-8, ignoring a byte order mark and Windows line endings; a name that
+    isn't valid UTF-8 is kept byte for byte, so it still matches the file
+    on Linux. Raises OSError if the file can't be read."""
+    if name == "-":
+        data, base = sys.stdin.buffer.read(), Path.cwd()
+    else:
+        data, base = Path(name).read_bytes(), Path(name).parent
+    paths = []
+    for line in data.decode("utf-8-sig", "surrogateescape").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            paths.append(_input_path(line, base))
+    return paths
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse and check the command line (sys.argv's, unless argv is given).
     Invalid options exit with argparse's usage message and code 2.
 
-    At least one path is required, except in the Docker image, where it
-    defaults to DOCKER_VIDEOS, the folder the image documents mounting your
-    videos at. The image itself runs --help when given no arguments at all,
-    so a bare docker run never starts changing files."""
+    The paths to process are the ones given on the command line, then the
+    ones listed in --input-file (see read_input_file()). At least one is
+    needed, except in the Docker image, where with neither they default to
+    DOCKER_VIDEOS, the folder the image documents mounting your videos at.
+    The image itself runs --help when given no arguments at all, so a bare
+    docker run never starts changing files."""
     in_docker = _in_docker()
     paths_help = "Video files and folders to process"
-    if in_docker:
-        paths_help += f" (default: {DOCKER_VIDEOS})"
+    paths_help += f" (default: {DOCKER_VIDEOS})" if in_docker else " (or use --input-file)"
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("paths", nargs="*" if in_docker else "+", help=paths_help)
+    ap.add_argument("paths", nargs="*", help=paths_help)
+    ap.add_argument("--input-file", default=None, metavar="FILE",
+                    help="Also process the paths listed in FILE, one per line, in order "
+                         "(- reads them from standard input). Each path can be written as "
+                         "is or quoted as a shell would; a relative one is taken from FILE's "
+                         "folder. Blank lines and lines starting with # are skipped")
     ap.add_argument("--ext", default=None,
                     help="Comma-separated extensions to process, replacing the default list "
                          "(default: mkv,webm,mp4,m4v,mov,avi)")
@@ -1506,7 +1563,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "Above 1, only the overall progress bar is shown, and a file's "
                          "[i/N] header is repeated when its lines follow another file's")
     args = ap.parse_args(argv)
-    if not args.paths:
+    if args.input_file is not None:
+        try:
+            args.paths = [*args.paths, *read_input_file(args.input_file)]
+        except OSError as exc:
+            ap.error(f"couldn't read --input-file {args.input_file}: {exc.strerror or exc}")
+    elif not args.paths:
+        if not in_docker:
+            ap.error("give at least one path to process, or --input-file")
         args.paths = [DOCKER_VIDEOS]
 
     if args.jobs < 1:

@@ -2,6 +2,7 @@
 mkvmerge: anything that would call those tools is replaced with a stand-in,
 and subprocess behavior is exercised with small Python child processes."""
 
+import io
 import json
 import logging
 import os
@@ -287,7 +288,92 @@ def test_a_path_is_required_outside_the_docker_image(capsys):
         ssd.parse_args(["--dry-run"])
 
     assert exit_info.value.code == 2
-    assert "the following arguments are required: paths" in capsys.readouterr().err
+    assert "give at least one path to process, or --input-file" in capsys.readouterr().err
+
+
+SHOWS = ["Big Sky (2020)", "Billions", "Blue's Clues (1996)", "Black Bird", "Black Sails",
+         "Blue Planet II", "Bloodline"]
+"""Show folders for the --input-file tests, with the spaces, brackets and
+apostrophes real names have."""
+
+
+@pytest.fixture
+def shows(tmp_path):
+    """tmp_path/TV Shows/<each of SHOWS>, created. Returns the TV Shows folder."""
+    folder = tmp_path / "TV Shows"
+    for show in SHOWS:
+        (folder / show).mkdir(parents=True)
+    return folder
+
+
+def test_input_file_reads_a_path_however_its_written(shows, tmp_path, monkeypatch):
+    """Every way a list line can come: quoted as ls shows names on a
+    terminal (with '\\'' for an apostrophe), double quoted, plain with
+    spaces, plain with an apostrophe (which a shell would reject), with
+    backslash-escaped spaces, relative to the list's folder, from ~, and
+    with a missing path, which comes back unquoted so its warning is
+    recognizable. Blank lines and comments are skipped; the list has a byte
+    order mark and Windows line endings."""
+    root = shows.as_posix()
+    home = tmp_path / "home"
+    (home / "Bloodline").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    lines = [
+        "# Shows to fix",
+        f"'{root}/Big Sky (2020)'",
+        f'"{root}/Billions"',
+        f"'{root}/Blue'\\''s Clues (1996)'",
+        "",
+        f"   {shows / 'Black Bird'}   ",
+        "TV\\ Shows/Black\\ Sails",
+        "TV Shows/Blue Planet II",
+        str(shows / "Blue's Clues (1996)"),
+        "~/Bloodline",
+        f"'{root}/Missing Show'",
+    ]
+    listing = tmp_path / "shows.txt"
+    listing.write_bytes("﻿".encode() + "\r\n".join(lines).encode("utf-8") + b"\r\n")
+
+    found = [Path(p) for p in ssd.read_input_file(str(listing))]
+
+    assert found == [shows / "Big Sky (2020)", shows / "Billions", shows / "Blue's Clues (1996)",
+                     shows / "Black Bird", shows / "Black Sails", shows / "Blue Planet II",
+                     shows / "Blue's Clues (1996)", home / "Bloodline", shows / "Missing Show"]
+
+
+def test_input_file_from_standard_input_is_relative_to_the_current_folder(shows, monkeypatch):
+    monkeypatch.chdir(shows)
+    monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"Billions\n'Black Bird'\n")))
+
+    assert [Path(p) for p in ssd.read_input_file("-")] == [shows / "Billions", shows / "Black Bird"]
+
+
+def test_input_file_paths_come_after_the_command_lines(shows):
+    (shows / "shows.txt").write_text("Black Bird\nBillions\n", encoding="utf-8")
+
+    args = ssd.parse_args([str(shows / "Bloodline"), "--input-file", str(shows / "shows.txt")])
+
+    assert [Path(p) for p in args.paths] == [shows / "Bloodline", shows / "Black Bird",
+                                             shows / "Billions"]
+
+
+def test_an_input_file_that_cant_be_read_is_an_error(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.parse_args(["--input-file", str(tmp_path / "missing.txt")])
+
+    assert exit_info.value.code == 2
+    assert f"couldn't read --input-file {tmp_path / 'missing.txt'}" in capsys.readouterr().err
+
+
+def test_an_input_file_replaces_the_docker_default(shows, monkeypatch):
+    """With a list, only the list is processed, never the whole of /videos."""
+    monkeypatch.setenv(ssd.IN_DOCKER_VAR, "1")
+    (shows / "shows.txt").write_text("Billions\n", encoding="utf-8")
+
+    args = ssd.parse_args(["--input-file", str(shows / "shows.txt"), "--dry-run"])
+
+    assert [Path(p) for p in args.paths] == [shows / "Billions"]
 
 
 @pytest.mark.parametrize("value", ["english", "xx", "", "e"])

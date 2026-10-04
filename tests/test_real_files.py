@@ -567,6 +567,27 @@ def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path
     assert {p: digest(p) for p in tmp_path.rglob("*.m*")} == digests
 
 
+def test_input_file_fixes_each_listed_folder_in_order(tmp_path):
+    """The list names the shows in reverse alphabetical order, quoted the
+    way ls shows names on a terminal, including '\\'' for an apostrophe.
+    Both must be fixed, in the list's order."""
+    need("ffmpeg", "ffprobe")
+    shows = ["Blue's Clues (1996)", "Billions"]
+    for show in shows:
+        (tmp_path / show).mkdir()
+        make_video(tmp_path / show / "S01E01.mp4", [Track(6, default=True), Track(2)])
+    listing = tmp_path / "shows.txt"
+    listing.write_text("".join("'" + (tmp_path / s).as_posix().replace("'", "'\\''") + "'\n"
+                               for s in shows), encoding="utf-8")
+
+    code, output = run_script("--input-file", listing)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 2, output
+    headers = [line for line in output.splitlines() if line.startswith("[")]
+    assert [Path(h.split("] ", 1)[1]).parent.name for h in headers] == shows, output
+
+
 @pytest.mark.parametrize("skip", [False, True], ids=["default", "--skip-symlinks"])
 def test_a_symlinked_file_is_fixed_through_its_link(tmp_path, skip):
     """By default the file a link points to is fixed and the link survives.
