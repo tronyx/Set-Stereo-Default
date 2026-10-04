@@ -109,7 +109,6 @@ except ImportError:
     HAVE_TQDM = False
 
 
-
 def _optional_module(name: str) -> ModuleType | None:
     """Import a module that only some systems have, or return None."""
     try:

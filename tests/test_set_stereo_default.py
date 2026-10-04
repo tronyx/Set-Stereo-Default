@@ -60,6 +60,27 @@ def parse_pct_line(line):
     return int(line.split("=", 1)[1]) if line.startswith("pct=") else None
 
 
+def file_args(**overrides):
+    """The parsed options process_file() and the apply functions take, as a
+    --dry-run with no progress bar."""
+    values = {"prefer_lang": None, "avi_reorder": False, "force": False, "dry_run": True,
+              "backup": False, "keep_dates": False, "no_progress": True, "jobs": 1}
+    values.update(overrides)
+    return types.SimpleNamespace(**values)
+
+
+def make_videos(folder, count):
+    """Create count placeholder videos in folder: e00.mkv, e01.mkv, ... Only
+    their names matter, since the tests that use them replace
+    process_file()."""
+    for i in range(count):
+        (folder / f"e{i:02}.mkv").write_text("x")
+
+
+def not_permitted(*args):
+    """A stand-in for os.chown() on an NFS share that squashes root."""
+    raise PermissionError(1, "Operation not permitted")
+
 
 def test_choose_target_picks_the_only_stereo_track():
     target, note = ssd.choose_target([audio(1, 6), audio(2, 2)], None)
@@ -325,6 +346,23 @@ def test_probe_streams_reads_every_stream_and_the_commentary_flags(monkeypatch):
     assert duration == 60.0
 
 
+@pytest.mark.parametrize("returncode, stdout, logged", [
+    (1, "", "ffprobe failed on v.mkv: unreadable"),
+    (0, "not json", "Could not parse ffprobe output for v.mkv"),
+], ids=["ffprobe failed", "unreadable output"])
+def test_probe_streams_logs_why_it_couldnt_read_a_file(monkeypatch, caplog, returncode, stdout,
+                                                       logged):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=returncode, stdout=stdout, stderr="unreadable\n"))
+
+    assert ssd.probe_streams(Path("v.mkv")) == (None, None)
+    assert logged in caplog.text
+
+    caplog.clear()
+    assert ssd.probe_streams(Path("v.mkv"), report=False) == (None, None)
+    assert caplog.text == ""
+
+
 @pytest.mark.parametrize("tags, is_commentary", [
     ({"title": "Director's Commentary"}, True),
     ({"name": "Director's Commentary", "handler_name": "SoundHandler"}, True),
@@ -351,7 +389,6 @@ def test_commentary_is_found_by_any_track_name(monkeypatch, tags, is_commentary)
 def test_needs_change(defaults, expected):
     streams = [audio(1, 6, default=defaults[0]), audio(2, 2, default=defaults[1])]
     assert ssd.needs_change(streams, 2) is expected
-
 
 
 @pytest.fixture
@@ -386,6 +423,19 @@ def test_iter_files_non_recursive(library):
 def test_iter_files_respects_ext(library):
     found = ssd.iter_files([library], {".mp4"}, recursive=True)
     assert names(found, library) == ["b.MP4"]
+
+
+@pytest.mark.parametrize("ext, found", [
+    ("mkv", ["a.mkv"]),
+    ("mkv, .MP4", ["a.mkv", "b.MP4"]),
+    (".AVI,", ["c.avi"]),
+], ids=["one", "spaces, dots and capitals", "trailing comma"])
+def test_ext_takes_extensions_however_theyre_written(tmp_path, ext, found):
+    for name in ("a.mkv", "b.MP4", "c.avi", "d.webm"):
+        (tmp_path / name).write_bytes(b"x")
+    args = types.SimpleNamespace(paths=[str(tmp_path)], ext=ext, no_recursive=False,
+                                 skip_symlinks=False, follow_symlinks=False)
+    assert [p.name for p in ssd.find_files(args)] == found
 
 
 def test_iter_files_accepts_files_passed_directly(library):
@@ -462,6 +512,7 @@ def test_a_mistyped_path_is_reported_on_the_console_and_the_rest_still_run(tmp_p
     assert f"Skipping {typo}: no such file or directory" in capsys.readouterr().out
     assert sorted(processed) == ["e00.mkv", "e01.mkv"]
 
+
 @pytest.fixture
 def linked(tmp_path):
     """A library folder full of symlinks, next to the real files they point
@@ -532,7 +583,6 @@ def test_a_file_given_more_than_once_is_found_once(linked, monkeypatch):
 
     assert sorted(str(p.resolve()) for p in found) == [str(linked / "lib" / "own.mkv"),
                                                         str(linked / "real" / "movie.mkv")]
-
 
 
 def test_make_backup_hard_links_and_replaces_a_stale_backup(tmp_path):
@@ -728,7 +778,6 @@ def test_no_backup_question_without_existing_backups(backed_up):
     assert seen == ["number", "number"]
 
 
-
 @pytest.fixture
 def fake_ffprobe(monkeypatch):
     """Replace run() with a stand-in ffprobe. Set layouts[path] to the
@@ -751,7 +800,11 @@ def fake_ffprobe(monkeypatch):
 
 ORIGINAL_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 1, "eac3", 6, "eng"),
                    stream(2, "audio", 0, "aac", 2, "eng"), stream(3, "subtitle")]
+
+
 ORIGINAL_AUDIO = [audio(1, 6, "eac3", default=True), audio(2, 2, "aac")]
+
+
 REMUX = str(Path("v.mkv" + ssd.TMP_MARKER + ".mkv"))
 
 
@@ -1008,6 +1061,22 @@ def test_keep_dates_leaves_the_backup_with_the_original_dates(tmp_path):
     assert bak.stat().st_mtime_ns == video.stat().st_mtime_ns == OLD_TIMES_NS[1]
 
 
+def test_a_numbered_backup_is_announced(tmp_path, caplog):
+    """When <name>.bak is taken, the new backup's name is logged, so it can
+    be found."""
+    caplog.set_level("INFO")
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    (tmp_path / "v.mkv.bak").write_bytes(b"older backup")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+
+    ssd.swap_in(video, tmp, backup="number")
+
+    assert (tmp_path / "v.mkv.bak.1").read_bytes() == b"original"
+    assert "v.mkv: kept the original as v.mkv.bak.1" in caplog.text
+
+
 @pytest.fixture
 def nfs_owners(tmp_path, monkeypatch):
     """Makes every original look owned by tronyx:users (1000:100) and every
@@ -1053,8 +1122,6 @@ def test_swap_in_leaves_the_owner_alone_when_it_already_matches(tmp_path, monkey
     """e.g. an NFS share that maps every user to the media owner, where
     changing the owner fails but isn't needed, so there's nothing to warn
     about."""
-    def not_permitted(*args):
-        raise PermissionError(1, "Operation not permitted")
     monkeypatch.setattr(ssd.os, "chown", not_permitted, raising=False)
     monkeypatch.setattr(ssd, "_owner", lambda path: (1000, 100))
     video = tmp_path / "v.mkv"
@@ -1068,9 +1135,20 @@ def test_swap_in_leaves_the_owner_alone_when_it_already_matches(tmp_path, monkey
     assert "Couldn't give" not in caplog.text
 
 
-def not_permitted(*args):
-    """A stand-in for os.chown() on an NFS share that squashes root."""
-    raise PermissionError(1, "Operation not permitted")
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows only has a read-only flag, not Unix permissions")
+def test_copy_ownership_without_chown_still_copies_permissions(tmp_path, monkeypatch):
+    """Without os.chown (Windows), only the permissions can be copied."""
+    monkeypatch.delattr(ssd.os, "chown", raising=False)
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.write_bytes(b"x")
+    dst.write_bytes(b"x")
+    src.chmod(0o640)
+    dst.chmod(0o600)
+
+    ssd.copy_ownership(src, dst)
+
+    assert dst.stat().st_mode & 0o777 == 0o640
+    assert not ssd._ownership_failures
 
 
 def test_owner_failures_are_reported_once_at_the_end_with_a_list(nfs_owners, monkeypatch,
@@ -1158,6 +1236,20 @@ def test_nothing_is_reported_when_every_owner_was_kept(tmp_path, caplog):
 ], ids=["both named", "group has no name", "user has no name"])
 def test_owner_name(nfs_owners, uid, gid, described):
     assert ssd._owner_name(uid, gid) == described
+
+
+def test_optional_module_is_none_when_it_cant_be_imported():
+    """e.g. pwd and grp on Windows."""
+    assert ssd._optional_module("no_such_module_here") is None
+
+
+def test_owner_names_without_pwd_and_grp_fall_back_to_ids(monkeypatch):
+    """Windows has no user or group names to look up."""
+    monkeypatch.setattr(ssd, "pwd", None)
+    monkeypatch.setattr(ssd, "grp", None)
+    assert ssd._user_name(1000) is None
+    assert ssd._group_name(100) is None
+    assert ssd._owner_name(1000, 100) == "1000:100"
 
 
 def test_sudo_hint_uses_the_user_id_when_the_owner_has_no_name(nfs_owners, monkeypatch, caplog):
@@ -1425,15 +1517,6 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
     assert video.read_bytes() == b"original"
 
 
-def file_args(**overrides):
-    """The parsed options process_file() and the apply functions take, as a
-    --dry-run with no progress bar."""
-    values = {"prefer_lang": None, "avi_reorder": False, "force": False, "dry_run": True,
-              "backup": False, "keep_dates": False, "no_progress": True, "jobs": 1}
-    values.update(overrides)
-    return types.SimpleNamespace(**values)
-
-
 @pytest.fixture
 def probed(monkeypatch):
     """Replace probe_streams() so every file reports ORIGINAL_AUDIO;
@@ -1516,6 +1599,28 @@ def test_file_without_audio_is_skipped(tmp_path, monkeypatch, caplog):
     assert "v.mkv: no audio streams found, skipping" in caplog.text
 
 
+def test_an_unexpected_error_fails_only_that_file(tmp_path, monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise RuntimeError("something nobody expected")
+    monkeypatch.setattr(ssd, "_process_file", broken)
+
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "error"
+    assert "v.mkv: unexpected error, skipping rest of file (something nobody expected)" in caplog.text
+
+
+def test_a_file_ffprobe_cant_read_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: (None, None))
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "error"
+
+
+def test_a_file_with_no_track_to_pick_is_skipped_with_the_reason(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: ([audio(1, 6, default=True)], 100.0))
+
+    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
+    assert "v.mkv: SKIP (no 2-channel audio track found)" in caplog.text
+
+
 def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatch):
     def fake_run_with_progress(cmd, label, parse_pct, progress=None):
         for us in (25_000_000, 50_000_000, 100_000_000):
@@ -1554,6 +1659,27 @@ def test_ffmpeg_failure_message_leaves_out_progress_lines(tmp_path, monkeypatch,
     assert error.endswith("ffmpeg remux failed: [mp4 @ 0x5581] Could not find tag for codec")
     assert seen == ([50] if duration else [])
 
+
+@pytest.mark.parametrize("line, expected", [
+    ("#GUI#progress 42%", 42),
+    ("#GUI#progress 100%", 100),
+    ("#GUI#warning Something odd", None),
+    ("Progress: 42%", None),
+])
+def test_mkvmerge_pct(line, expected):
+    assert ssd._mkvmerge_pct(line) == expected
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("out_time_us=5000000", 50),
+    ("out_time_us=N/A", 0),
+    ("progress=continue", 0),
+    ("[mp4 @ 0x1] some warning", None),
+], ids=["halfway", "not known yet", "another key", "not a progress line"])
+def test_ffmpeg_pct(line, expected):
+    """ffmpeg reports out_time_us=N/A before its first packet, which is
+    still a progress line, just with no progress to show."""
+    assert ssd._ffmpeg_pct(10.0)(line) == expected
 
 
 def test_run_with_progress_reports_increases_and_finishes_at_100():
@@ -1799,6 +1925,24 @@ def test_log_file_counter_only_shows_on_a_terminal(tmp_path, monkeypatch, capsys
     assert ("\rProcessing 2/2..." in capsys.readouterr().out) is terminal
 
 
+def test_the_script_runs_without_tqdm(tmp_path):
+    """tqdm is optional: without it, the script must still import and run,
+    logging through a plain handler with no progress bars. Run in a separate
+    Python, where importing tqdm fails as if it weren't installed."""
+    code = ("import sys\n"
+            "sys.modules['tqdm'] = None\n"
+            f"sys.path.insert(0, {str(Path(ssd.__file__).parent)!r})\n"
+            "import set_stereo_default as ssd\n"
+            "print('HAVE_TQDM', ssd.HAVE_TQDM)\n"
+            f"sys.exit(ssd.main([{str(tmp_path)!r}]))\n")
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         encoding="utf-8", check=False)
+    assert "HAVE_TQDM False" in res.stdout, res.stdout + res.stderr
+    assert "No matching files found." in res.stdout + res.stderr
+    assert res.returncode == 1
+    assert "Traceback" not in res.stderr, res.stderr
+
+
 def test_run_with_progress_kills_its_subprocess_if_the_bar_cant_be_created(monkeypatch):
     started = []
     real_popen = subprocess.Popen
@@ -1904,6 +2048,30 @@ def test_a_quick_command_is_only_listed_while_it_runs():
     assert not ssd._active_procs
 
 
+def test_run_kills_its_subprocess_if_interrupted(monkeypatch):
+    """A stop (or any error) while waiting must not leave the tool running."""
+    class Interrupted:
+        returncode = None
+        killed = waited = False
+
+        def communicate(self):
+            raise KeyboardInterrupt
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            self.waited = True
+    proc = Interrupted()
+    monkeypatch.setattr(ssd.subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    with pytest.raises(KeyboardInterrupt):
+        ssd.run(["ffprobe", "x"])
+
+    assert proc.killed and proc.waited
+    assert not ssd._active_procs
+
+
 def test_a_file_stopped_while_being_checked_is_reported_as_cancelled(tmp_path, monkeypatch,
                                                                      caplog):
     """Not as "ffprobe failed": the command only failed because it was killed."""
@@ -1946,7 +2114,6 @@ def test_terminate_active_procs_waits_5s_in_total_not_per_process(monkeypatch):
     assert all(p.killed for p in procs)
 
 
-
 @pytest.mark.parametrize("jobs", ["1", "3"])
 def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
     pytest.importorskip("tqdm")
@@ -1976,14 +2143,6 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
 
     assert {round(0.25 * i, 2) for i in range(1, 13)} <= set(shown)
     assert max(shown) == 3.0
-
-
-def make_videos(folder, count):
-    """Create count placeholder videos in folder: e00.mkv, e01.mkv, ... Only
-    their names matter, since the tests that use them replace
-    process_file()."""
-    for i in range(count):
-        (folder / f"e{i:02}.mkv").write_text("x")
 
 
 def under_headers(lines):
@@ -2245,6 +2404,7 @@ def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, cap
     assert "Summary" not in out
     assert processed == []
 
+
 @pytest.mark.filterwarnings("error")
 def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     """Two files reporting 1% at a time used to add up to
@@ -2277,7 +2437,6 @@ def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     assert finals and set(finals) == {2}
 
 
-
 def test_log_file_gets_everything_but_the_console_only_warnings_and_errors(tmp_path, capsys):
     log_file = tmp_path / "run.log"
     ssd.setup_logging(str(log_file))
@@ -2291,144 +2450,6 @@ def test_log_file_gets_everything_but_the_console_only_warnings_and_errors(tmp_p
     assert "careful" in out and "broken" in out
     logged = log_file.read_text()
     assert "detail" in logged and "careful" in logged and "broken" in logged
-
-
-@pytest.mark.parametrize("make_files, expected", [
-    (lambda folder: None, "No matching files found."),
-    (lambda folder: (folder / "a.mp4").write_text("x"), "Missing required tool(s): ffmpeg, ffprobe"),
-], ids=["no files", "missing tools"])
-def test_fatal_errors_reach_the_console_with_a_log_file(tmp_path, monkeypatch, capsys,
-                                                         make_files, expected):
-    videos = tmp_path / "videos"
-    videos.mkdir()
-    make_files(videos)
-    monkeypatch.setattr(ssd.shutil, "which", lambda tool: None)
-    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(videos),
-                                      "--log-file", str(tmp_path / "run.log")])
-
-    assert ssd.main() == 1
-    assert expected in capsys.readouterr().out
-    assert expected in (tmp_path / "run.log").read_text()
-
-
-def test_optional_module_is_none_when_it_cant_be_imported():
-    """e.g. pwd and grp on Windows."""
-    assert ssd._optional_module("no_such_module_here") is None
-
-
-def test_owner_names_without_pwd_and_grp_fall_back_to_ids(monkeypatch):
-    """Windows has no user or group names to look up."""
-    monkeypatch.setattr(ssd, "pwd", None)
-    monkeypatch.setattr(ssd, "grp", None)
-    assert ssd._user_name(1000) is None
-    assert ssd._group_name(100) is None
-    assert ssd._owner_name(1000, 100) == "1000:100"
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows only has a read-only flag, not Unix permissions")
-def test_copy_ownership_without_chown_still_copies_permissions(tmp_path, monkeypatch):
-    """Without os.chown (Windows), only the permissions can be copied."""
-    monkeypatch.delattr(ssd.os, "chown", raising=False)
-    src, dst = tmp_path / "src", tmp_path / "dst"
-    src.write_bytes(b"x")
-    dst.write_bytes(b"x")
-    src.chmod(0o640)
-    dst.chmod(0o600)
-
-    ssd.copy_ownership(src, dst)
-
-    assert dst.stat().st_mode & 0o777 == 0o640
-    assert not ssd._ownership_failures
-
-
-def test_a_numbered_backup_is_announced(tmp_path, caplog):
-    """When <name>.bak is taken, the new backup's name is logged, so it can
-    be found."""
-    caplog.set_level("INFO")
-    video = tmp_path / "v.mkv"
-    video.write_bytes(b"original")
-    (tmp_path / "v.mkv.bak").write_bytes(b"older backup")
-    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
-    tmp.write_bytes(b"remuxed")
-
-    ssd.swap_in(video, tmp, backup="number")
-
-    assert (tmp_path / "v.mkv.bak.1").read_bytes() == b"original"
-    assert "v.mkv: kept the original as v.mkv.bak.1" in caplog.text
-
-
-@pytest.mark.parametrize("returncode, stdout, logged", [
-    (1, "", "ffprobe failed on v.mkv: unreadable"),
-    (0, "not json", "Could not parse ffprobe output for v.mkv"),
-], ids=["ffprobe failed", "unreadable output"])
-def test_probe_streams_logs_why_it_couldnt_read_a_file(monkeypatch, caplog, returncode, stdout,
-                                                       logged):
-    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
-        returncode=returncode, stdout=stdout, stderr="unreadable\n"))
-
-    assert ssd.probe_streams(Path("v.mkv")) == (None, None)
-    assert logged in caplog.text
-
-    caplog.clear()
-    assert ssd.probe_streams(Path("v.mkv"), report=False) == (None, None)
-    assert caplog.text == ""
-
-
-@pytest.mark.parametrize("line, expected", [
-    ("#GUI#progress 42%", 42),
-    ("#GUI#progress 100%", 100),
-    ("#GUI#warning Something odd", None),
-    ("Progress: 42%", None),
-])
-def test_mkvmerge_pct(line, expected):
-    assert ssd._mkvmerge_pct(line) == expected
-
-
-@pytest.mark.parametrize("line, expected", [
-    ("out_time_us=5000000", 50),
-    ("out_time_us=N/A", 0),
-    ("progress=continue", 0),
-    ("[mp4 @ 0x1] some warning", None),
-], ids=["halfway", "not known yet", "another key", "not a progress line"])
-def test_ffmpeg_pct(line, expected):
-    """ffmpeg reports out_time_us=N/A before its first packet, which is
-    still a progress line, just with no progress to show."""
-    assert ssd._ffmpeg_pct(10.0)(line) == expected
-
-
-def test_an_unexpected_error_fails_only_that_file(tmp_path, monkeypatch, caplog):
-    def broken(*args, **kwargs):
-        raise RuntimeError("something nobody expected")
-    monkeypatch.setattr(ssd, "_process_file", broken)
-
-    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "error"
-    assert "v.mkv: unexpected error, skipping rest of file (something nobody expected)" in caplog.text
-
-
-def test_a_file_ffprobe_cant_read_is_an_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(ssd, "probe_streams", lambda path: (None, None))
-    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "error"
-
-
-def test_a_file_with_no_track_to_pick_is_skipped_with_the_reason(tmp_path, monkeypatch, caplog):
-    caplog.set_level("INFO")
-    monkeypatch.setattr(ssd, "probe_streams", lambda path: ([audio(1, 6, default=True)], 100.0))
-
-    assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
-    assert "v.mkv: SKIP (no 2-channel audio track found)" in caplog.text
-
-
-@pytest.mark.parametrize("ext, found", [
-    ("mkv", ["a.mkv"]),
-    ("mkv, .MP4", ["a.mkv", "b.MP4"]),
-    (".AVI,", ["c.avi"]),
-], ids=["one", "spaces, dots and capitals", "trailing comma"])
-def test_ext_takes_extensions_however_theyre_written(tmp_path, ext, found):
-    for name in ("a.mkv", "b.MP4", "c.avi", "d.webm"):
-        (tmp_path / name).write_bytes(b"x")
-    args = types.SimpleNamespace(paths=[str(tmp_path)], ext=ext, no_recursive=False,
-                                 skip_symlinks=False, follow_symlinks=False)
-    assert [p.name for p in ssd.find_files(args)] == found
 
 
 def test_log_handler_reports_its_own_errors_instead_of_raising(monkeypatch):
@@ -2447,43 +2468,19 @@ def test_log_handler_reports_its_own_errors_instead_of_raising(monkeypatch):
     assert handled == [record]
 
 
-def test_run_kills_its_subprocess_if_interrupted(monkeypatch):
-    """A stop (or any error) while waiting must not leave the tool running."""
-    class Interrupted:
-        returncode = None
-        killed = waited = False
+@pytest.mark.parametrize("make_files, expected", [
+    (lambda folder: None, "No matching files found."),
+    (lambda folder: (folder / "a.mp4").write_text("x"), "Missing required tool(s): ffmpeg, ffprobe"),
+], ids=["no files", "missing tools"])
+def test_fatal_errors_reach_the_console_with_a_log_file(tmp_path, monkeypatch, capsys,
+                                                         make_files, expected):
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    make_files(videos)
+    monkeypatch.setattr(ssd.shutil, "which", lambda tool: None)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(videos),
+                                      "--log-file", str(tmp_path / "run.log")])
 
-        def communicate(self):
-            raise KeyboardInterrupt
-
-        def kill(self):
-            self.killed = True
-
-        def wait(self, timeout=None):
-            self.waited = True
-    proc = Interrupted()
-    monkeypatch.setattr(ssd.subprocess, "Popen", lambda *args, **kwargs: proc)
-
-    with pytest.raises(KeyboardInterrupt):
-        ssd.run(["ffprobe", "x"])
-
-    assert proc.killed and proc.waited
-    assert not ssd._active_procs
-
-
-def test_the_script_runs_without_tqdm(tmp_path):
-    """tqdm is optional: without it, the script must still import and run,
-    logging through a plain handler with no progress bars. Run in a separate
-    Python, where importing tqdm fails as if it weren't installed."""
-    code = ("import sys\n"
-            "sys.modules['tqdm'] = None\n"
-            f"sys.path.insert(0, {str(Path(ssd.__file__).parent)!r})\n"
-            "import set_stereo_default as ssd\n"
-            "print('HAVE_TQDM', ssd.HAVE_TQDM)\n"
-            f"sys.exit(ssd.main([{str(tmp_path)!r}]))\n")
-    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                         encoding="utf-8", check=False)
-    assert "HAVE_TQDM False" in res.stdout, res.stdout + res.stderr
-    assert "No matching files found." in res.stdout + res.stderr
-    assert res.returncode == 1
-    assert "Traceback" not in res.stderr, res.stderr
+    assert ssd.main() == 1
+    assert expected in capsys.readouterr().out
+    assert expected in (tmp_path / "run.log").read_text()
