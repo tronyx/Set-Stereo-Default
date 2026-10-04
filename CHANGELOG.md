@@ -14,6 +14,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - Progress bars are hidden automatically when the output isn't a terminal (cron, `docker run` without `-t`, `docker logs`, a pipe), instead of filling it with cursor codes. The same goes for the `Processing i/N...` counter shown with `--log-file`.
 
+### Project
+
+- CI builds the Docker image on every push, runs all the tests inside it, and runs it as a regular user to check its output.
+
 ## 2026-10-03 · [#8](https://github.com/tronyx/Set-Stereo-Default/pull/8)
 
 ### Project
