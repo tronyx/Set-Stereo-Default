@@ -253,9 +253,19 @@ jobs:
 
   # Builds the Docker image, runs every test inside it with the image's own
   # Python, ffmpeg and MKVToolNix, then runs the image the way people will.
+  # Once for each architecture the image is published for, each natively on
+  # its own runner, so an arm64-only problem fails here before it's published.
   docker:
-    name: Docker image
-    runs-on: ubuntu-latest
+    name: Docker image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     env:
       IMAGE: set-stereo-default:ci
     steps:
