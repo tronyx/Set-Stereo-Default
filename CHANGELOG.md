@@ -8,28 +8,30 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ### Added
 
-- **A Docker image** with the script, ffmpeg, MKVToolNix and tqdm, on Alpine (about 310 MB), for amd64 and arm64. It's published as `tronyx/set-stereo-default` on Docker Hub and `ghcr.io/tronyx/set-stereo-default`: `latest` from `master` (rebuilt weekly for Alpine's security fixes) and `develop` from `develop`. Inside it, the ownership warning suggests `docker run --user` instead of `sudo`. The README's new 🐳 Docker section covers mounting folders, running as the files' owner, keeping the log and running on a schedule.
+- **A Docker image** with the script, ffmpeg, MKVToolNix and tqdm, for amd64 and arm64, built on Alpine (about 310 MB). It's published as `tronyx/set-stereo-default` on Docker Hub and as `ghcr.io/tronyx/set-stereo-default`: `latest` from `master`, rebuilt weekly for Alpine's security fixes, and `develop` from `develop`. The README's new 🐳 Docker section covers mounting folders, running as the files' owner, keeping the log and running on a schedule.
 
 ### Changed
 
 - Progress bars are hidden automatically when the output isn't a terminal (cron, `docker run` without `-t`, `docker logs`, a pipe), instead of filling it with cursor codes. The same goes for the `Processing i/N...` counter shown with `--log-file`.
-- `--help` shows how to run the script with the Docker image, which runs `--help` when it's given no options.
+- `--help` shows how to run the script with the Docker image, which shows the help when it's given no options.
+- In the Docker image, the ownership warning suggests `docker run --user` instead of `sudo`.
 
 ### Fixed
 
-- Remuxing an MKV file with a recent mkvmerge (seen with 99; 82 and older don't do it) no longer changes the MIME type of attached fonts from the older `application/x-truetype-font` style to `font/ttf`, which ffmpeg, and players built on it, don't recognize as a font. Styled subtitles could otherwise lose their fonts.
-
-- The check before a remux replaces the original now compares every stream, not just how many there are: a changed codec or channel count, a changed language or a lost track name rejects the remux. So does a lost track flag in MKV files, which mkvmerge 52 and older drop (commentary, audio description, hearing impaired, original language); update MKVToolNix to 54 or newer to fix those files. ffmpeg can't write these flags to MP4, MOV or AVI files at all, so a flag lost there is now reported as a warning, where it used to go unnoticed.
+- **The check before a remux replaces the original now compares every stream**, not just how many there are. A changed codec or channel count, a changed language or a lost track name rejects the remux, and the original is kept.
+- **mkvmerge 52 and older drop four track flags** (commentary, audio description, hearing impaired and original language) when remuxing an MKV file. A remux that lost one is now rejected; update MKVToolNix to 54 or newer to fix those files.
+- ffmpeg can't write those flags to MP4, MOV or AVI files at all, so a flag lost there is now reported as a warning. It used to go unnoticed.
+- Recent mkvmerge versions (99 does; 82 and older don't) changed the MIME type of attached fonts from the older `application/x-truetype-font` to `font/ttf`, which ffmpeg, and players built on it, don't recognize as a font, so styled subtitles could lose their fonts. Font types now come through a remux unchanged.
 
 ### Project
 
-- CI lints the workflow (actionlint, with shellcheck), the `Dockerfile` (hadolint) and the Markdown files (markdownlint).
-- CI tests mkvmerge 45, the oldest the README lists, from MKVToolNix's AppImage archive.
+- The real-file tests check that subtitles, chapters, track names and languages, font attachments and cover art all come through a remux unchanged.
+- The real-file tests cover each common audio codec (AAC, E-AC3, DTS, TrueHD, FLAC and Opus, besides AC3) in MKV, and AAC, E-AC3 and Opus in MP4 and WebM.
 - The logic tests cover the last untested paths, including running without tqdm, an unreadable ffprobe result, an unexpected error in one file, and `--ext` written with spaces, dots or capitals. Coverage is up from 96% to 99%.
 - CI runs the logic and real-file tests on macOS too, with Homebrew's ffmpeg and MKVToolNix.
-- The real-file tests cover each common audio codec (AAC, E-AC3, DTS, TrueHD, FLAC and Opus, besides AC3) in MKV, and AAC, E-AC3 and Opus in MP4 and WebM.
-- The real-file tests check that subtitles, chapters, track names and languages, font attachments and cover art all come through a remux unchanged.
-- CI builds the Docker image on every push, for `amd64` and `arm64` on their own runners, runs all the tests inside it, and runs it as a regular user, as root (checking each file keeps its owner and permissions), and stopped with `docker stop` partway through a remux. The image that's published is that exact tested image, tagged once every test job has passed, never a separate rebuild.
+- CI tests mkvmerge 45, the oldest the README lists, from MKVToolNix's AppImage archive.
+- CI builds the Docker image on every push, for amd64 and arm64 on their own runners, and runs all the tests inside it. It then runs the image as a regular user, as root (checking each file keeps its owner and permissions), and stopped with `docker stop` partway through a remux. The image that's published is that exact tested image, tagged once every test job has passed, never a separate rebuild.
+- CI lints the workflow (actionlint, with shellcheck), the `Dockerfile` (hadolint) and the Markdown files (markdownlint).
 
 ## 2026-10-03 · [#8](https://github.com/tronyx/Set-Stereo-Default/pull/8)
 
