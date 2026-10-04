@@ -384,6 +384,38 @@ def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type
     assert contents(video) == before
 
 
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
+    """Laid out like a real release: video, stereo AAC, a subtitle, then
+    5.1 E-AC3, every track flagged default. mkvmerge writes subtitles after
+    all the audio unless told otherwise, so without --track-order the remux
+    came out reordered and was rejected. The order must come through."""
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
+    srt = tmp_path / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    video = tmp_path / f"video{ext}"
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1",
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-i", str(srt),
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+                    "-map", "0", "-map", "1", "-map", "2", "-map", "3",
+                    "-c:v", "mpeg4", "-c:a:0", "aac", "-c:a:1", "eac3",
+                    "-c:s", "mov_text" if ext == ".mp4" else "srt",
+                    "-disposition:a:0", "default", "-disposition:a:1", "default",
+                    "-disposition:s:0", "default", str(video)],
+                   check=True, capture_output=True, text=True)
+    before = contents(video)
+    assert [s["type"] for s in before["streams"]] == ["video", "audio", "subtitle", "audio"], before
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(2, True), (6, False)]
+    assert contents(video) == before
+
+
 AUDIO_CODECS = {
     "aac": (("aac",), "aac"),
     "e-ac3": (("eac3",), "eac3"),

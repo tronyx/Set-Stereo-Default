@@ -19,16 +19,22 @@ import pytest
 
 import set_stereo_default as ssd
 
-real_mkvmerge_audio_ids = ssd.mkvmerge_audio_ids
+real_mkvmerge_tracks = ssd.mkvmerge_tracks
 
 
 @pytest.fixture(autouse=True)
 def mkvmerge_ids(monkeypatch):
-    """mkvmerge never runs in these tests, so mkvmerge_audio_ids() reports
-    audio track IDs 1 and 2, the indexes the ffprobe stand-ins use. Set
-    mkvmerge_ids.value to report something else."""
+    """mkvmerge never runs in these tests, so mkvmerge_tracks() reports a
+    video track (ID 0) and audio tracks with IDs 1 and 2, the indexes the
+    ffprobe stand-ins use. Set mkvmerge_ids.value to other audio track IDs,
+    or to None to make mkvmerge fail to read the file."""
     stand_in = types.SimpleNamespace(value=[1, 2])
-    monkeypatch.setattr(ssd, "mkvmerge_audio_ids", lambda path: stand_in.value)
+
+    def tracks(path):
+        if stand_in.value is None:
+            return None
+        return [(0, "video"), *((i, "audio") for i in stand_in.value)]
+    monkeypatch.setattr(ssd, "mkvmerge_tracks", tracks)
     return stand_in
 
 
@@ -1985,6 +1991,22 @@ def test_mkvmerge_gets_its_own_track_ids_when_they_differ_from_ffprobes(tmp_path
     assert dry_run_flags(caplog) == ["2:no", "3:yes"]
 
 
+def test_mkvmerge_keeps_the_original_track_order(tmp_path, caplog, monkeypatch):
+    """mkvmerge writes video, then audio, then subtitles unless told
+    otherwise, so a subtitle between two audio tracks would move to the end
+    and the remux be rejected. --track-order lists every track as it was."""
+    caplog.set_level("INFO")
+    monkeypatch.setattr(ssd, "mkvmerge_tracks", lambda path: [
+        (0, "video"), (1, "audio"), (2, "subtitles"), (3, "audio")])
+    streams = [audio(1, 2, default=True), audio(3, 6, "eac3", default=True)]
+
+    assert ssd.apply_mkv(ssd.Plan(tmp_path / "v.mkv", streams, 1), file_args())
+
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    assert args[args.index("--track-order") + 1] == "0:0,0:1,0:2,0:3"
+    assert dry_run_flags(caplog) == ["1:yes", "3:no"]
+
+
 @pytest.mark.parametrize("ids, message", [
     ([1], "mkvmerge sees 1 audio track(s), but ffprobe sees 2"),
     ([], "mkvmerge sees 0 audio track(s), but ffprobe sees 2"),
@@ -2005,15 +2027,15 @@ def test_mkvmerge_and_ffprobe_disagreeing_leaves_the_file_alone(tmp_path, caplog
 @pytest.mark.parametrize("returncode, stdout, expected", [
     (0, json.dumps({"tracks": [{"id": 0, "type": "video"}, {"id": 1, "type": "audio"},
                                {"id": 2, "type": "subtitles"}, {"id": 3, "type": "audio"}]}),
-     [1, 3]),
+     [(0, "video"), (1, "audio"), (2, "subtitles"), (3, "audio")]),
     (0, json.dumps({"container": {"recognized": False}, "errors": []}), []),
     (2, "", None),
     (0, "not json", None),
-], ids=["audio tracks only", "unrecognized file", "mkvmerge failed", "bad output"])
-def test_mkvmerge_audio_ids(monkeypatch, returncode, stdout, expected):
+], ids=["every track in order", "unrecognized file", "mkvmerge failed", "bad output"])
+def test_mkvmerge_tracks(monkeypatch, returncode, stdout, expected):
     monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
         returncode=returncode, stdout=stdout, stderr=""))
-    assert real_mkvmerge_audio_ids(Path("v.mkv")) == expected
+    assert real_mkvmerge_tracks(Path("v.mkv")) == expected
 
 
 SLOW_CMD = python_cmd("import time\n"
@@ -2359,14 +2381,14 @@ def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys
     make_videos(tmp_path, 2)
     barrier = threading.Barrier(2, timeout=5)
 
-    def slow_ids(path):
+    def slow_tracks(path):
         barrier.wait()
-        return [1, 2]
+        return [(0, "video"), (1, "audio"), (2, "audio")]
 
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "probe_streams",
                         lambda path: (list(ORIGINAL_AUDIO), 100.0))
-    monkeypatch.setattr(ssd, "mkvmerge_audio_ids", slow_ids)
+    monkeypatch.setattr(ssd, "mkvmerge_tracks", slow_tracks)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
                                       "--jobs", "2", "--dry-run"])
     ssd.main()

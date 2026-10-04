@@ -14,6 +14,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - Paths are processed in the order you give them, each folder's files in alphabetical order, instead of every file from every path being sorted together. A file reached through more than one path is still processed once.
 
+### Fixed
+
+- MKV files with a subtitle between two audio tracks (common in some releases) were rejected with `post-remux check failed (stream#2 changed from subtitle subrip to audio ...)` and left unfixed. mkvmerge writes video, then audio, then subtitles unless told otherwise, so it moved the subtitle to the end. The script now tells it to keep every track where it was.
+
 ## 2026-10-04 · [#10](https://github.com/tronyx/Set-Stereo-Default/pull/10)
 
 ### Changed

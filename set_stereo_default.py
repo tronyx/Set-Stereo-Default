@@ -999,10 +999,11 @@ def check_and_swap_in(plan: Plan, reordered: bool, args: argparse.Namespace) -> 
         raise
 
 
-def mkvmerge_audio_ids(path: Path) -> list[int] | None:
-    """Return mkvmerge's track IDs for path's audio tracks, in file order, or
-    None if mkvmerge can't read it. mkvmerge -J exits 0 even for a file it
-    doesn't recognize, but then lists no tracks, so that gives []."""
+def mkvmerge_tracks(path: Path) -> list[tuple[int, str]] | None:
+    """Return every track in path as mkvmerge sees it, (ID, type) in file
+    order, e.g. [(0, "video"), (1, "audio"), (2, "subtitles")], or None if
+    mkvmerge can't read it. mkvmerge -J exits 0 even for a file it doesn't
+    recognize, but then lists no tracks, so that gives []."""
     res = run(["mkvmerge", "-J", str(path)])
     if res.returncode != 0:
         return None
@@ -1010,7 +1011,7 @@ def mkvmerge_audio_ids(path: Path) -> list[int] | None:
         tracks = json.loads(res.stdout).get("tracks", [])
     except (json.JSONDecodeError, AttributeError):
         return None
-    return [t["id"] for t in tracks if t.get("type") == "audio"]
+    return [(t["id"], t.get("type", "")) for t in tracks]
 
 
 @functools.cache
@@ -1133,9 +1134,13 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
     - It numbers tracks its own way, which usually matches ffprobe's stream
       indexes but not always: ffmpeg skips track types it doesn't know, so
       every later index shifts. So mkvmerge's own IDs are looked up
-      (mkvmerge_audio_ids()) and matched to ffprobe's audio streams by
+      (mkvmerge_tracks()) and matched to ffprobe's audio streams by
       position, since both list audio tracks in file order. If the two
       don't see the same number of audio tracks, the file is left alone.
+    - By default it writes video tracks first, then audio, then subtitles,
+      so a file with a subtitle between two audio tracks would come out
+      reordered (and fail verify_remux()). --track-order lists every
+      track in its original order, so the order is kept.
     - The flag is set with --default-track. mkvmerge 65 renamed it
       --default-track-flag but promises to keep accepting the old name,
       and older versions only know the old one.
@@ -1153,9 +1158,10 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
       but a file with both is rare, and the older types work everywhere.
     """
     path = plan.path
-    ids = mkvmerge_audio_ids(path)
-    if ids is None or len(ids) != len(plan.streams):
-        found = "couldn't read the file" if ids is None else f"sees {len(ids)} audio track(s)"
+    tracks = mkvmerge_tracks(path)
+    ids = [track_id for track_id, kind in tracks or [] if kind == "audio"]
+    if tracks is None or len(ids) != len(plan.streams):
+        found = "couldn't read the file" if tracks is None else f"sees {len(ids)} audio track(s)"
         _announce(plan.intro)
         log.error(f"    {path.name}: mkvmerge {found}, but ffprobe sees {len(plan.streams)}; "
                   f"leaving the file alone")
@@ -1165,7 +1171,8 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
     if (any(s.mimetype.lower() in LEGACY_FONT_MIME_TYPES for s in plan.layout)
             and mkvmerge_can_keep_legacy_font_types()):
         cmd.append("--enable-legacy-font-mime-types")
-    cmd += ["-o", str(plan.tmp_path)]
+    cmd += ["-o", str(plan.tmp_path),
+            "--track-order", ",".join(f"0:{track_id}" for track_id, _ in tracks)]
     for s, track_id in zip(plan.streams, ids, strict=True):
         flag = "yes" if s.index == plan.target_index else "no"
         cmd += ["--default-track", f"{track_id}:{flag}"]
