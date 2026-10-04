@@ -21,6 +21,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 ### Project
 
 - CI runs the logic and real-file tests on macOS too, with Homebrew's ffmpeg and MKVToolNix.
+- The real-file tests cover each common audio codec (AAC, E-AC3, DTS, TrueHD, FLAC and Opus, besides AC3) in MKV, and AAC, E-AC3 and Opus in MP4 and WebM.
 - The real-file tests check that subtitles, chapters, track names and languages, font attachments and cover art all come through a remux unchanged.
 - CI builds the Docker image on every push, for `amd64` and `arm64` on their own runners, runs all the tests inside it, and runs it as a regular user, as root (checking each file keeps its owner and permissions), and stopped with `docker stop` partway through a remux. The image that's published is that exact tested image, tagged once every test job has passed, never a separate rebuild.
 

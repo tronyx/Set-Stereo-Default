@@ -24,14 +24,29 @@ LAYOUTS = {2: "stereo", 6: "5.1"}
 """ffmpeg's channel layout name for each channel count make_video() supports."""
 
 
+def _unavailable(message):
+    """Skip the test, or with REQUIRE_MEDIA_TOOLS set, fail it."""
+    if os.environ.get("REQUIRE_MEDIA_TOOLS"):
+        pytest.fail(message)
+    pytest.skip(message)
+
+
 def need(*tools):
     """Skip (or, with REQUIRE_MEDIA_TOOLS set, fail) unless every tool is on PATH."""
     missing = [t for t in tools if shutil.which(t) is None]
     if missing:
-        message = "not installed: " + ", ".join(missing)
-        if os.environ.get("REQUIRE_MEDIA_TOOLS"):
-            pytest.fail(message)
-        pytest.skip(message)
+        _unavailable("not installed: " + ", ".join(missing))
+
+
+def need_encoders(*encoders):
+    """Skip (or, with REQUIRE_MEDIA_TOOLS set, fail) unless this ffmpeg can
+    encode with every one of encoders, named as ffmpeg -encoders lists them."""
+    res = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], check=True,
+                         capture_output=True, text=True)
+    have = {line.split()[1] for line in res.stdout.splitlines() if len(line.split()) > 1}
+    missing = [e for e in encoders if e not in have]
+    if missing:
+        _unavailable("ffmpeg can't encode with: " + ", ".join(missing))
 
 
 @dataclass
@@ -46,10 +61,12 @@ class Track:
     visual_impaired: bool = False
 
 
-def make_video(path, tracks, seconds=1):
+def make_video(path, tracks, seconds=1, audio_codec=("ac3",)):
     """Write a video of the given length at path with one audio stream per
     Track. Video and audio use encoders built into every ffmpeg (mpeg4,
-    ac3), and the audio is silence, so each file is a few KB per second. A
+    ac3), except that WebM needs VP8 video, and the audio is silence, so
+    each file is a few KB per second. audio_codec is the ffmpeg arguments
+    after -c:a, for another audio codec (see AUDIO_CODECS). A
     track's title is set both as "title" (what MKV uses for a track name)
     and "handler_name" (what MP4 uses). MP4 files get their index at the
     front, so a truncated copy can still be read."""
@@ -61,7 +78,8 @@ def make_video(path, tracks, seconds=1):
     cmd += ["-map", "0:v"]
     for i in range(len(tracks)):
         cmd += ["-map", f"{i + 1}:a"]
-    cmd += ["-c:v", "mpeg4", "-c:a", "ac3", "-disposition:v:0", "default"]
+    cmd += ["-c:v", "libvpx" if path.suffix == ".webm" else "mpeg4", "-c:a", *audio_codec,
+            "-disposition:v:0", "default"]
     for i, t in enumerate(tracks):
         flags = [name for name, on in (("default", t.default), ("comment", t.comment),
                                        ("visual_impaired", t.visual_impaired)) if on]
@@ -331,6 +349,43 @@ def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type
     assert kinds.count("audio") == 2 and kinds.count("subtitle") == 2, before
     assert kinds.count("attachment" if ext == ".mkv" else "video") == (1 if ext == ".mkv" else 2), before
     assert audio_defaults(video) == [(6, True), (2, False)]
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert contents(video) == before
+
+
+AUDIO_CODECS = {
+    "aac": (("aac",), "aac"),
+    "e-ac3": (("eac3",), "eac3"),
+    "dts": (("dca", "-strict", "-2"), "dts"),
+    "truehd": (("truehd", "-strict", "-2"), "truehd"),
+    "flac": (("flac",), "flac"),
+    "opus": (("libopus",), "opus"),
+}
+"""The common audio codecs besides AC3, each as (ffmpeg arguments after
+-c:a, the name ffprobe reports). ffmpeg calls its DTS and TrueHD encoders
+experimental, hence -strict -2."""
+
+CODEC_CASES = [(".mkv", codec) for codec in AUDIO_CODECS] + [
+    (".mp4", "aac"), (".mp4", "e-ac3"), (".webm", "opus")]
+"""Each codec in MKV, and the usual ones in MP4 and WebM."""
+
+
+@pytest.mark.parametrize("ext, codec", CODEC_CASES, ids=[f"{e[1:]} {c}" for e, c in CODEC_CASES])
+def test_every_common_audio_codec_is_remuxed_untouched(tmp_path, ext, codec):
+    """Both audio tracks use the codec. The remux must flip the default
+    flags and nothing else, so the audio is copied, never re-encoded."""
+    encoder_args, probed_as = AUDIO_CODECS[codec]
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext in (".mkv", ".webm") else []))
+    need_encoders(encoder_args[0], *(["libvpx"] if ext == ".webm" else []))
+    video = make_video(tmp_path / f"video{ext}", [Track(6, default=True), Track(2)],
+                       audio_codec=encoder_args)
+    before = contents(video)
+    assert [s["codec"] for s in before["streams"] if s["type"] == "audio"] == [probed_as] * 2
 
     code, output = run_script(video)
 
