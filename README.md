@@ -118,7 +118,7 @@ On Windows, type `py` instead of `python3`.
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](#-changing-the-file)) |
 | `--force` | Remux even files that are already correct, e.g. to restore thumbnails (see [Troubleshooting](#-troubleshooting)) |
 | `--keep-dates` | Give each changed file the original's modification date, so it doesn't look newly changed (see [File dates](#-file-dates)) |
-| `--no-progress` | Hide the progress bars, e.g. for cron or CI logs |
+| `--no-progress` | Hide the progress bars. They're already hidden when the output isn't a terminal (cron, `docker run` without `-t`, a pipe) |
 
 > [!TIP]
 > **Choosing `--jobs`:** the work is limited by disk speed, not CPU, so pick a number your storage can keep up with rather than your core count. Above `1`, you'll see only the overall progress bar. Lines from different files print as they happen, so when a file's line follows another file's, its `[i/N]` header is printed again first to show which file it belongs to.

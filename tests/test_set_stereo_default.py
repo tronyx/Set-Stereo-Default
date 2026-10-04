@@ -1632,6 +1632,35 @@ def test_run_with_progress_kills_its_subprocess_on_an_exception(monkeypatch):
     assert not ssd._active_procs
 
 
+@pytest.mark.parametrize("have_tqdm, no_progress, terminal, shown", [
+    (True, False, True, True),
+    (True, False, False, False),
+    (True, True, True, False),
+    (False, False, True, False),
+], ids=["terminal", "no terminal", "--no-progress", "no tqdm"])
+def test_bars_need_tqdm_a_terminal_and_no_no_progress(monkeypatch, have_tqdm, no_progress,
+                                                      terminal, shown):
+    monkeypatch.setattr(ssd, "HAVE_TQDM", have_tqdm)
+    monkeypatch.setattr(ssd.sys, "stderr", types.SimpleNamespace(isatty=lambda: terminal))
+    assert ssd._show_bars(file_args(no_progress=no_progress)) is shown
+
+
+@pytest.mark.parametrize("terminal", [True, False], ids=["terminal", "no terminal"])
+def test_log_file_counter_only_shows_on_a_terminal(tmp_path, monkeypatch, capsys, terminal):
+    """The counter redraws itself with a carriage return, which only works
+    on a terminal; in a log it would run every count into one line."""
+    monkeypatch.setattr(ssd, "_show_bars", lambda args: False)
+    monkeypatch.setattr(ssd, "process_file", lambda path, args, **kwargs: "unchanged")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: terminal)
+    stats = {}
+
+    ssd.process_all([tmp_path / "a.mkv", tmp_path / "b.mkv"],
+                    file_args(log_file=str(tmp_path / "run.log")), stats)
+
+    assert stats == {"unchanged": 2}
+    assert ("\rProcessing 2/2..." in capsys.readouterr().out) is terminal
+
+
 def test_run_with_progress_kills_its_subprocess_if_the_bar_cant_be_created(monkeypatch):
     started = []
     real_popen = subprocess.Popen
@@ -1802,6 +1831,7 @@ def test_overall_bar_moves_during_each_file(tmp_path, monkeypatch, jobs):
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
+    monkeypatch.setattr(ssd, "_show_bars", lambda args: True)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--jobs", jobs])
 
     ssd.main()
@@ -2099,6 +2129,7 @@ def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
     monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
+    monkeypatch.setattr(ssd, "_show_bars", lambda args: True)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path)])
 
     ssd.main()

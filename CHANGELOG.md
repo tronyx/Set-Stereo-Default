@@ -10,6 +10,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - A `Dockerfile` that packages the script with ffmpeg, MKVToolNix and tqdm on Alpine (about 310 MB, for amd64 and arm64). Inside it, the ownership warning suggests `docker run --user` instead of `sudo`.
 
+### Changed
+
+- Progress bars are hidden automatically when the output isn't a terminal (cron, `docker run` without `-t`, `docker logs`, a pipe), instead of filling it with cursor codes. The same goes for the `Processing i/N...` counter shown with `--log-file`.
+
 ## 2026-10-03 · [#8](https://github.com/tronyx/Set-Stereo-Default/pull/8)
 
 ### Project

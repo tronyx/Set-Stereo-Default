@@ -1171,7 +1171,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
                 intro=f"  {path.name}: {action} stream#{target.index} "
                       f"({target.language or 'und'}, {target.codec}) {outcome}{fallback}",
                 layout=layout)
-    progress = Progress(show=HAVE_TQDM and not args.no_progress and args.jobs == 1,
+    progress = Progress(show=_show_bars(args) and args.jobs == 1,
                         position=position, on_progress=on_progress)
     apply = apply_mkv if ext in MKV_EXTS else apply_remux
     return "changed" if apply(plan, args, progress) else "error"
@@ -1371,7 +1371,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Write the details to this file instead of the console; warnings, "
                          "errors, the progress bar and the summary still show on the console")
     ap.add_argument("--no-progress", action="store_true",
-                    help="Hide the progress bars (useful for logs from cron or CI)")
+                    help="Hide the progress bars. They're already hidden when the output "
+                         "isn't a terminal (cron, docker run without -t, a pipe)")
     ap.add_argument("--jobs", type=int, default=1, metavar="N",
                     help="Remux up to N files at once (default: 1). The work is limited by "
                          "disk speed, not CPU, so choose N for what your storage can handle. "
@@ -1427,6 +1428,14 @@ def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:
     return "number"
 
 
+def _show_bars(args: argparse.Namespace) -> bool:
+    """True if progress bars should be drawn: tqdm is installed, --no-progress
+    wasn't given, and the bars' output (stderr) is a terminal. Anywhere else
+    (cron, docker run without -t, docker logs, a pipe), the codes that move
+    the cursor to redraw a bar would land in the output as junk."""
+    return HAVE_TQDM and not args.no_progress and sys.stderr.isatty()
+
+
 def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, int]) -> None:
     """Process every file, adding each outcome to stats ("changed": 3, ...).
     A stop (Ctrl+C, SIGTERM) comes out as KeyboardInterrupt, with the
@@ -1437,7 +1446,8 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
       current file above the overall one. --jobs N > 1 handles N at once in
       threads (the work waits on disk, not CPU) and shows only the overall
       bar. With --log-file and no bars, a "Processing i/N..." counter takes
-      their place.
+      their place on a terminal. Without one, there are no bars or counter
+      (see _show_bars()).
     - The overall bar counts fractions of files, so it keeps moving during
       a long remux. Its count is rounded and capped at the total, because
       adding up many small steps can drift just past it, which makes tqdm
@@ -1450,8 +1460,8 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
       (_FileHeaderFilter).
     - Once a stop is requested, files still waiting their turn return
       "cancelled" straight away instead of starting."""
-    use_bar = HAVE_TQDM and not args.no_progress
-    counter = args.log_file and not use_bar
+    use_bar = _show_bars(args)
+    counter = args.log_file and not use_bar and sys.stdout.isatty()
     bars, overall = [], None
     if use_bar:
         first_row = 1 if args.jobs == 1 else 0
