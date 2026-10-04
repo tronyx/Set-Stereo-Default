@@ -130,6 +130,10 @@ AVI_EXTS = {".avi"}
 MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
 """Remuxed with -movflags +faststart, keeping the index at the front of the file."""
 
+IN_DOCKER_VAR = "SET_STEREO_DEFAULT_IN_DOCKER"
+"""Set to "1" by the project's Docker image, so advice can show docker
+commands instead of ones for running the script directly."""
+
 TMP_MARKER = ".tmp_remux"
 """Marks a file's temp copy while it's remuxed, e.g. "movie.mkv.tmp_remux.mkv"."""
 
@@ -793,15 +797,22 @@ def report_ownership_failures(folder: Path | str = ".") -> None:
     It's one warning at the end of the run, just before the summary, because
     the cause (usually running as root on an NFS share) affects the whole
     run, not one file. Shown under whichever file happened to fail first,
-    it looked like that file's problem."""
+    it looked like that file's problem.
+
+    In the Docker image (see IN_DOCKER_VAR), the fix is a docker run
+    --user with the owner's IDs instead of sudo: sudo isn't there, and the
+    owner's name usually isn't either."""
     if not _ownership_failures:
         return
     path, wanted, got, reason = _ownership_failures[0]
     count = len(_ownership_failures)
-    user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
+    if os.environ.get(IN_DOCKER_VAR) == "1":
+        how = f"the container as the files' owner instead (docker run --user {wanted[0]}:{wanted[1]} ...)"
+    else:
+        user = _user_name(wanted[0]) or f"'#{wanted[0]}'"
+        how = f"the script as the files' owner instead (sudo -u {user} python3 ...)"
     advice = (f"Permissions were still copied. Changing a file's owner needs root, and NFS "
-              f"shares usually turn root into 'nobody'. Run the script as the files' owner "
-              f"instead (sudo -u {user} python3 ...).")
+              f"shares usually turn root into 'nobody'. Run {how}.")
     if count == 1:
         log.warning(f"\nCouldn't give {path} its original owner ({reason}).\n\n"
                     f"It should belong to {_owner_name(*wanted)} but belongs to "

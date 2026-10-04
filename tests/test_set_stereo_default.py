@@ -1093,6 +1093,19 @@ def test_sudo_hint_uses_the_user_id_when_the_owner_has_no_name(nfs_owners, monke
     assert not list(video.parent.glob("set_stereo_default-owners-*.log"))
 
 
+def test_hint_in_the_docker_image_is_a_docker_run_user(nfs_owners, monkeypatch, tmp_path, caplog):
+    """The image has no sudo, and usually no name for the owner's IDs."""
+    monkeypatch.setenv(ssd.IN_DOCKER_VAR, "1")
+    ssd._ownership_failures.append((str(tmp_path / "v.mkv"), (1000, 100), (65534, 65534),
+                                    "Operation not permitted"))
+
+    ssd.report_ownership_failures(tmp_path)
+
+    assert ("Run the container as the files' owner instead (docker run --user 1000:100 ...)."
+            in caplog.text)
+    assert "sudo" not in caplog.text
+
+
 def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, monkeypatch,
                                                                         capsys):
     """The run from the bug report: with --jobs, the warning used to appear

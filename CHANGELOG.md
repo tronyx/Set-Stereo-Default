@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- A `Dockerfile` that packages the script with ffmpeg, MKVToolNix and tqdm on Alpine (about 310 MB, for amd64 and arm64). Inside it, the ownership warning suggests `docker run --user` instead of `sudo`.
 
 ## 2026-10-03 · [#8](https://github.com/tronyx/Set-Stereo-Default/pull/8)
 
