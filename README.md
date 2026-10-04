@@ -112,9 +112,9 @@ To work through many shows or movies, list their folders in a text file, one per
 
 ```text
 # Shows to fix this week
-/mnt/data/media/Videos/TV Shows/Big Sky (2020)
-'/mnt/data/media/Videos/TV Shows/Blue'\''s Clues (1996)'
-TV Shows/Billions
+/mnt/data/media/Videos/TV Shows/Awesome Show 1 (2020)
+'/mnt/data/media/Videos/TV Shows/Someone'\''s Awesome Show (1996)'
+TV Shows/Cartoons
 ```
 
 ```bash
