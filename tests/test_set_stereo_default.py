@@ -1596,7 +1596,7 @@ def test_file_without_audio_is_skipped(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(ssd, "probe_streams", lambda path: ([], 100.0))
 
     assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
-    assert "v.mkv: no audio streams found, skipping" in caplog.text
+    assert "v.mkv: SKIP (no audio streams found)" in caplog.text
 
 
 def test_an_unexpected_error_fails_only_that_file(tmp_path, monkeypatch, caplog):

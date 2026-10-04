@@ -1243,7 +1243,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
         return "error"
     streams = [s for s in layout if s.type == "audio"]
     if not streams:
-        log.info(f"  {path.name}: no audio streams found, skipping")
+        log.info(f"  {path.name}: SKIP (no audio streams found)")
         return "skipped"
 
     target, note = choose_target(streams, args.prefer_lang)

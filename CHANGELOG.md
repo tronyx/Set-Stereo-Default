@@ -15,6 +15,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 - Progress bars are hidden automatically when the output isn't a terminal (cron, `docker run` without `-t`, `docker logs`, a pipe), instead of filling it with cursor codes. The same goes for the `Processing i/N...` counter shown with `--log-file`.
 - `--help` shows how to run the script with the Docker image, which shows the help when it's given no options.
 - In the Docker image, the ownership warning suggests `docker run --user` instead of `sudo`.
+- A file with no audio says `SKIP (no audio streams found)`, like every other skipped file, so searching a log for `SKIP` finds them all.
 
 ### Fixed
 
