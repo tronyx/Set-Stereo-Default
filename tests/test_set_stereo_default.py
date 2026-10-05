@@ -1128,17 +1128,49 @@ def test_verify_remux_rejects_a_flag_lost_from_an_mkv_file(fake_ffprobe):
         "to 54 or newer")
 
 
-def test_verify_remux_warns_about_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
+def test_verify_remux_notes_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
     """ffmpeg can't write the flag to MP4 files at all, so rejecting the
-    remux would leave the file unfixable: it's used, with a warning."""
+    remux would leave the file unfixable: it passes, with a note for the
+    warning. The check itself logs nothing, since a later step could still
+    reject the remux."""
     plan, remux = rich_plan("v.mp4")
     fake_ffprobe[remux] = rich_layout(
         stream3=described(3, "audio", "aac", 0, 2, title="Director"),
         stream4=described(4, "subtitle", "subrip", title="Signs"))
-    assert ssd.verify_remux(plan, reordered=False) is None
-    assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == [
+    notes = []
+
+    assert ssd.verify_remux(plan, reordered=False, notes=notes) is None
+
+    assert notes == [
         "    v.mp4: stream#3 lost its comment flag, which ffmpeg can't write to .mp4 files",
         "    v.mp4: stream#4 lost its forced flag, which ffmpeg can't write to .mp4 files"]
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+@pytest.mark.parametrize("default_on, kept", [(2, True), (1, False)],
+                         ids=["remux kept", "remux rejected"])
+def test_a_lost_mp4_flag_is_only_warned_about_if_the_remux_is_kept(fake_ffprobe, tmp_path,
+                                                                   monkeypatch, caplog,
+                                                                   default_on, kept):
+    """The warning says the file was fixed but lost a flag. If a later check
+    rejects the remux (here, the default flag stayed on the 5.1 track), the
+    file wasn't changed, so only the rejection may be reported."""
+    monkeypatch.chdir(tmp_path)
+    plan, remux = rich_plan("v.mp4")
+    plan.path.write_bytes(b"original")
+    Path(remux).write_bytes(b"remuxed")
+    fake_ffprobe[remux] = rich_layout(
+        stream1=described(1, "audio", "eac3", int(default_on == 1), 6, title="Surround"),
+        stream2=described(2, "audio", "aac", int(default_on == 2), 2, title="Stereo"),
+        stream3=described(3, "audio", "aac", 0, 2, title="Director"))
+
+    assert ssd.check_and_swap_in(plan, False, file_args(dry_run=False)) is kept
+
+    warned = "stream#3 lost its comment flag, which ffmpeg can't write" in caplog.text
+    assert warned is kept
+    assert plan.path.read_bytes() == (b"remuxed" if kept else b"original")
+    if not kept:
+        assert "post-remux check failed (default flag is on stream#1" in caplog.text
 
 
 def test_stream_info_reads_every_flag_but_default():
