@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-04 · [#11](https://github.com/tronyx/Set-Stereo-Default/pull/11)
+
 ### Added
 
 - **`--input-file FILE`** processes the paths listed in a file, one per line, in the list's order; `--input-file -` reads them from a pipe. Each line can be a plain path, a path quoted the way a shell or `ls` shows it (including `'\''` for an apostrophe and backslash-escaped spaces), a path relative to the list's folder, or one starting with `~`. Blank lines and `#` comments are skipped. In the Docker image, a list replaces the `/videos` default.
@@ -20,7 +24,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ### Project
 
-- CI finds the newest ffmpeg build again after BtbN, which publishes the builds the static-build and Windows jobs use, changed how it names and releases them.
+- The static-build and Windows CI jobs find the newest ffmpeg build however BtbN, which publishes those builds, names and releases them. A brief change there had stopped both jobs from finding one.
 
 ## 2026-10-04 · [#10](https://github.com/tronyx/Set-Stereo-Default/pull/10)
 
