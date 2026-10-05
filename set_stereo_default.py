@@ -659,8 +659,9 @@ def _stream_loss(was: Stream, now: Stream) -> str | None:
     """What a remux changed about one stream (was, before; now, after), as a
     short reason, or None if nothing it must keep. Its type, codec and
     channel count must match, a known language mustn't change, and every
-    name it had must still be there. Flags are checked by verify_remux(),
-    since whether losing one is acceptable depends on the container.
+    name it had must still be there. Flags are checked by
+    _streams_problem(), since whether losing one is acceptable depends on
+    the container.
 
     Only losses count. A tool may add a name (ffmpeg names MP4 tracks
     "SoundHandler" when they have none) or fill in "und" for a missing
@@ -681,42 +682,16 @@ def _stream_loss(was: Stream, now: Stream) -> str | None:
     return None
 
 
-def verify_remux(plan: Plan, reordered: bool) -> str | None:
-    """Check the finished remux at plan.tmp_path before it replaces the
-    original. Returns None if it looks right, otherwise a short reason why
-    not. The original isn't probed again: plan.layout and plan.duration
-    already describe it.
-
-    The new file must have as many streams as the original, so nothing was
-    lost, and must not be shorter than the original by more than
-    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds). A much
-    shorter result means the original contains less than its header
-    claims, e.g. an incomplete download, so it's left alone for a person
-    to look at. A longer one is fine: the original's header just
-    understated it. The check is skipped if either duration is unknown.
-
-    Every stream must then come through as it was (see _stream_loss()):
-    same type, codec and channels, no known language changed and no name
-    lost. Its flags (forced, commentary, hearing impaired, ...) must all
-    survive in MKV files: mkvmerge 54 and newer keep every one, but 52 and
-    older drop the commentary, audio-description, hearing-impaired and
-    original-language flags, which players use to label and choose tracks.
-    ffmpeg can't write any of these
-    flags to MP4, MOV or AVI files, so a flag lost there is unavoidable: it's
-    logged as a warning, and the remux is still used.
-
-    Then the target must be the only audio track flagged default. A
-    remux keeps audio tracks in order, so the target is found by its
-    position among them. After an AVI reorder (reordered=True) there's no
-    flag to check, so the first audio track must instead match the
-    target's codec, channel count and language (compared after
-    normalize_language(), as everywhere else). The streams are then in
-    apply_remux()'s order: video, the target, the other audio tracks,
-    subtitles, data."""
-    after, after_duration = probe_streams(plan.tmp_path, report=False)
-    if after is None:
-        return "ffprobe couldn't read the file"
-    before, before_duration, streams = plan.layout, plan.duration, plan.streams
+def _content_problem(plan: Plan, after: list[Stream], after_duration: float | None) -> str | None:
+    """Whether the remux (after, after_duration) lost anything outright: it
+    must have as many streams, and as many audio tracks, as the original,
+    and mustn't be shorter by more than MAX_DURATION_LOSS (and at least
+    MIN_DURATION_LOSS seconds). A much shorter result means the original
+    contains less than its header claims, e.g. an incomplete download, so
+    it's left alone for a person to look at. A longer one is fine: the
+    original's header just understated it. The duration check is skipped
+    if either duration is unknown."""
+    before, before_duration = plan.layout, plan.duration
     if len(after) != len(before):
         return f"stream count changed from {len(before)} to {len(after)}"
     if before_duration and after_duration is not None:
@@ -724,24 +699,53 @@ def verify_remux(plan: Plan, reordered: bool) -> str | None:
         if after_duration < before_duration - allowed:
             return (f"duration dropped from {before_duration:.1f}s to {after_duration:.1f}s; "
                     f"the original may be incomplete")
-
     audio = [s for s in after if s.type == "audio"]
-    if len(audio) != len(streams):
-        return f"expected {len(streams)} audio tracks, found {len(audio)}"
+    if len(audio) != len(plan.streams):
+        return f"expected {len(plan.streams)} audio tracks, found {len(audio)}"
+    return None
 
-    target = next(s for s in streams if s.index == plan.target_index)
-    if reordered:
-        first = audio[0]
-        if (first.codec != target.codec or first.channels != target.channels
-                or (target.language and normalize_language(first.language)
-                    != normalize_language(target.language))):
-            return "target audio track didn't end up first"
-        of_type = {t: [s for s in before if s.type == t] for t in ("video", "audio", "subtitle", "data")}
-        moved = next(s for s in of_type["audio"] if s.index == plan.target_index)
-        order = (of_type["video"] + [moved] + [s for s in of_type["audio"] if s is not moved]
-                 + of_type["subtitle"] + of_type["data"] + [s for s in before if s.type not in of_type])
-    else:
-        order = before
+
+def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
+    """After an AVI reorder, whether the target failed to end up as the
+    first audio track (audio, the remux's audio tracks). AVI has no default
+    flag to check, so the first track must match the target's codec,
+    channel count and language (compared after normalize_language(), as
+    everywhere else)."""
+    target = next(s for s in plan.streams if s.index == plan.target_index)
+    first = audio[0]
+    if (first.codec != target.codec or first.channels != target.channels
+            or (target.language and normalize_language(first.language)
+                != normalize_language(target.language))):
+        return "target audio track didn't end up first"
+    return None
+
+
+def _expected_order(plan: Plan, reordered: bool) -> list[Stream]:
+    """The original's streams in the order the remux should have them. A
+    remux keeps the order (mkvmerge is told to; see apply_mkv()), except
+    that an AVI reorder writes apply_remux()'s order: video, the target,
+    the other audio tracks, subtitles, data, then anything else."""
+    before = plan.layout
+    if not reordered:
+        return before
+    of_type = {t: [s for s in before if s.type == t] for t in ("video", "audio", "subtitle", "data")}
+    moved = next(s for s in of_type["audio"] if s.index == plan.target_index)
+    return (of_type["video"] + [moved] + [s for s in of_type["audio"] if s is not moved]
+            + of_type["subtitle"] + of_type["data"] + [s for s in before if s.type not in of_type])
+
+
+def _streams_problem(plan: Plan, order: list[Stream], after: list[Stream]) -> str | None:
+    """Whether a stream failed to come through the remux as it was: each of
+    order (see _expected_order()) against the remux's stream in the same
+    place, by _stream_loss() and then by its flags (forced, commentary,
+    hearing impaired, ...).
+
+    In MKV files every flag must survive: mkvmerge 54 and newer keep every
+    one, but 52 and older drop the commentary, audio-description,
+    hearing-impaired and original-language flags, which players use to
+    label and choose tracks. ffmpeg can't write any of these flags to MP4,
+    MOV or AVI files, so a flag lost there is unavoidable: it's logged as a
+    warning, and the remux is still used."""
     is_mkv = plan.path.suffix.lower() in MKV_EXTS
     for was, now in zip(order, after, strict=True):
         loss = _stream_loss(was, now)
@@ -755,15 +759,50 @@ def verify_remux(plan: Plan, reordered: bool) -> str | None:
             return f"{what}; mkvmerge 52 and older drop it, so update MKVToolNix to 54 or newer"
         log.warning(f"    {plan.path.name}: {what}, which ffmpeg can't write to "
                     f"{plan.path.suffix.lower()} files")
-    if reordered:
-        return None
+    return None
 
-    expected = audio[streams.index(target)].index
+
+def _default_flag_problem(plan: Plan, audio: list[Stream]) -> str | None:
+    """Whether anything but the target is flagged default among the remux's
+    audio tracks (audio). A remux keeps audio tracks in order, so the
+    target is found by its position among them."""
+    target = next(s for s in plan.streams if s.index == plan.target_index)
+    expected = audio[plan.streams.index(target)].index
     defaults = [s.index for s in audio if s.default]
     if defaults != [expected]:
         found = ", ".join(f"stream#{i}" for i in defaults) or "no track"
         return f"default flag is on {found}, expected only stream#{expected}"
     return None
+
+
+def verify_remux(plan: Plan, reordered: bool) -> str | None:
+    """Check the finished remux at plan.tmp_path before it replaces the
+    original. Returns None if it looks right, otherwise a short reason why
+    not. The original isn't probed again: plan.layout and plan.duration
+    already describe it.
+
+    The checks run in this order, each only once the ones before it have
+    passed, and the first problem found is the one reported:
+    - nothing lost outright: streams, audio tracks, duration
+      (_content_problem());
+    - after an AVI reorder (reordered=True), the target is the first audio
+      track (_first_audio_problem());
+    - every stream came through as it was, in the expected order
+      (_expected_order(), _streams_problem());
+    - except after an AVI reorder, which has no default flag, the target
+      is the only audio track flagged default (_default_flag_problem())."""
+    after, after_duration = probe_streams(plan.tmp_path, report=False)
+    if after is None:
+        return "ffprobe couldn't read the file"
+    audio = [s for s in after if s.type == "audio"]
+    problem = _content_problem(plan, after, after_duration)
+    if problem is None and reordered:
+        problem = _first_audio_problem(plan, audio)
+    if problem is None:
+        problem = _streams_problem(plan, _expected_order(plan, reordered), after)
+    if problem is None and not reordered:
+        problem = _default_flag_problem(plan, audio)
+    return problem
 
 
 def backup_path(path: Path, replace: bool) -> Path:

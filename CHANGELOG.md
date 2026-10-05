@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Project
+
+- The check before a remux replaces the original is split into one small function per rule, with no change in behavior, so it's easier to read and to change safely. Its complexity score went from E (36) to B (9).
 
 ## 2026-10-04 · [#11](https://github.com/tronyx/Set-Stereo-Default/pull/11)
 
