@@ -1077,7 +1077,7 @@ def plan_to_check(duration=None):
         "unreadable"])
 def test_verify_remux(fake_ffprobe, remuxed, expected):
     fake_ffprobe[REMUX] = remuxed
-    problem = ssd.verify_remux(plan_to_check(), reordered=False)
+    problem = ssd.verify_remux(plan_to_check(), reordered=False).problem
     if expected is None:
         assert problem is None
     else:
@@ -1087,10 +1087,10 @@ def test_verify_remux(fake_ffprobe, remuxed, expected):
 def test_verify_remux_avi_reorder(fake_ffprobe):
     fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, "eng"),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
-    assert ssd.verify_remux(plan_to_check(), reordered=True) is None
+    assert ssd.verify_remux(plan_to_check(), reordered=True).problem is None
 
     fake_ffprobe[REMUX] = ORIGINAL_LAYOUT
-    assert "didn't end up first" in ssd.verify_remux(plan_to_check(), reordered=True)
+    assert "didn't end up first" in ssd.verify_remux(plan_to_check(), reordered=True).problem
 
 
 @pytest.mark.parametrize("tagged, accepted", [("en", True), ("ENG", True), ("spa", False)])
@@ -1100,7 +1100,7 @@ def test_verify_remux_avi_reorder_compares_languages_however_theyre_written(fake
     language another way."""
     fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, tagged),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
-    problem = ssd.verify_remux(plan_to_check(), reordered=True)
+    problem = ssd.verify_remux(plan_to_check(), reordered=True).problem
     assert (problem is None) is accepted
 
 
@@ -1159,7 +1159,7 @@ def rich_plan(name):
 def test_verify_remux_checks_every_stream_came_through(fake_ffprobe, remuxed, problem):
     plan, remux = rich_plan("v.mkv")
     fake_ffprobe[remux] = remuxed
-    assert ssd.verify_remux(plan, reordered=False) == problem
+    assert ssd.verify_remux(plan, reordered=False).problem == problem
 
 
 def test_verify_remux_rejects_a_flag_lost_from_an_mkv_file(fake_ffprobe):
@@ -1167,7 +1167,7 @@ def test_verify_remux_rejects_a_flag_lost_from_an_mkv_file(fake_ffprobe):
     newer keep, so the remux is rejected and the fix named."""
     plan, remux = rich_plan("v.mkv")
     fake_ffprobe[remux] = rich_layout(stream3=described(3, "audio", "aac", 0, 2, title="Director"))
-    assert ssd.verify_remux(plan, reordered=False) == (
+    assert ssd.verify_remux(plan, reordered=False).problem == (
         "stream#3 lost its comment flag; mkvmerge 52 and older drop it, so update MKVToolNix "
         "to 54 or newer")
 
@@ -1181,14 +1181,28 @@ def test_verify_remux_notes_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
     fake_ffprobe[remux] = rich_layout(
         stream3=described(3, "audio", "aac", 0, 2, title="Director"),
         stream4=described(4, "subtitle", "subrip", title="Signs"))
-    notes = []
 
-    assert ssd.verify_remux(plan, reordered=False, notes=notes) is None
+    checked = ssd.verify_remux(plan, reordered=False)
 
-    assert notes == [
+    assert checked.problem is None
+    assert checked.notes == (
         "    v.mp4: stream#3 lost its comment flag, which ffmpeg can't write to .mp4 files",
-        "    v.mp4: stream#4 lost its forced flag, which ffmpeg can't write to .mp4 files"]
+        "    v.mp4: stream#4 lost its forced flag, which ffmpeg can't write to .mp4 files")
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_rejected_remux_carries_no_notes(fake_ffprobe):
+    """A note says the file was fixed but lost a flag, so a remux rejected
+    by a later check must come back without any, whatever a stream lost."""
+    plan, remux = rich_plan("v.mp4")
+    fake_ffprobe[remux] = rich_layout(
+        stream2=described(2, "audio", "aac", 0, 2, title="Stereo"),
+        stream3=described(3, "audio", "aac", 0, 2, title="Director"))
+
+    checked = ssd.verify_remux(plan, reordered=False)
+
+    assert checked.problem == "default flag is on no track, expected only stream#2"
+    assert checked.notes == ()
 
 
 @pytest.mark.parametrize("default_on, kept", [(2, True), (1, False)],
@@ -1244,7 +1258,7 @@ def test_verify_remux_rejects_a_remux_much_shorter_than_the_original(fake_ffprob
                                                                      rejected):
     fake_ffprobe[REMUX] = (REMUXED_LAYOUT, after)
 
-    problem = ssd.verify_remux(plan_to_check(before), reordered=False)
+    problem = ssd.verify_remux(plan_to_check(before), reordered=False).problem
 
     if rejected:
         assert problem == (f"duration dropped from {before:.1f}s to {after:.1f}s; "
@@ -1670,7 +1684,7 @@ def remux(request, tmp_path, monkeypatch):
         return results[outcome["run"]]
 
     monkeypatch.setattr(ssd, "run_with_progress", fake_run_with_progress)
-    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: outcome["verify"])
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification(outcome["verify"]))
 
     def set_outcome(value):
         if value in ("fail", "warn", "interrupt"):
@@ -1716,7 +1730,7 @@ def test_a_file_changed_during_its_remux_is_left_as_it_is_now(tmp_path, monkeypa
             video.unlink()
         return 0, ""
     monkeypatch.setattr(ssd, "run_with_progress", remux_while_something_else_happens)
-    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
 
     result = apply(plan, file_args(dry_run=False, backup=True))
 
@@ -1771,7 +1785,7 @@ def test_a_file_replaced_during_its_backup_is_left_as_it_is_now(tmp_path, monkey
         monkeypatch.setattr(ssd.os, "link", no_hard_links)
         monkeypatch.setattr(ssd.shutil, "copystat", copy_then_upgrade)
     monkeypatch.setattr(ssd, "run_with_progress", write_remux)
-    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
     plan = ssd.Plan(video, ORIGINAL_AUDIO, 2, snapshot=ssd._snapshot(video))
 
     assert ssd.apply_mkv(plan, file_args(dry_run=False, backup=True)) is False
@@ -1813,7 +1827,7 @@ def test_a_symlink_planted_at_the_temp_name_is_removed_before_the_remux(tmp_path
         next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
         return 0, ""
     monkeypatch.setattr(ssd, "run_with_progress", write_remux)
-    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
 
     assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is True
 
@@ -1840,7 +1854,7 @@ def test_a_remux_that_isnt_a_regular_file_is_never_swapped_in(tmp_path, monkeypa
         tmp.write_bytes(b"remuxed")
         return 0, ""
     monkeypatch.setattr(ssd, "run_with_progress", remux_through_a_planted_symlink)
-    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
 
     assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is False
 
@@ -1926,7 +1940,7 @@ def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypat
         next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
         return 1, output
     monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
-    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")
 

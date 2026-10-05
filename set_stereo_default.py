@@ -756,33 +756,35 @@ def _expected_order(plan: Plan, reordered: bool) -> list[Stream]:
             + of_type["subtitle"] + of_type["data"] + [s for s in before if s.type not in of_type])
 
 
-def _streams_problem(plan: Plan, order: list[Stream], after: list[Stream],
-                     notes: list[str]) -> str | None:
+def _streams_problem(plan: Plan, order: list[Stream],
+                     after: list[Stream]) -> tuple[str | None, tuple[str, ...]]:
     """Whether a stream failed to come through the remux as it was: each of
     order (see _expected_order()) against the remux's stream in the same
     place, by _stream_loss() and then by its flags (forced, commentary,
-    hearing impaired, ...).
+    hearing impaired, ...). Returns (problem, notes): the first problem
+    found, or None and the warnings to log if the remux is used.
 
     In MKV files every flag must survive: mkvmerge 54 and newer keep every
     one, but 52 and older drop the commentary, audio-description,
     hearing-impaired and original-language flags, which players use to
     label and choose tracks. ffmpeg can't write any of these flags to MP4,
-    MOV or AVI files, so a flag lost there is unavoidable: it's added to
-    notes as a warning, and the remux is still used."""
+    MOV or AVI files, so a flag lost there is unavoidable: it becomes a
+    note, and the remux is still used."""
     is_mkv = plan.path.suffix.lower() in MKV_EXTS
+    notes: list[str] = []
     for was, now in zip(order, after, strict=True):
         loss = _stream_loss(was, now)
         if loss:
-            return loss
+            return loss, ()
         lost = sorted(was.flags - now.flags)
         if not lost:
             continue
         what = f"stream#{was.index} lost its {', '.join(lost)} flag{'s' if len(lost) > 1 else ''}"
         if is_mkv:
-            return f"{what}; mkvmerge 52 and older drop it, so update MKVToolNix to 54 or newer"
+            return f"{what}; mkvmerge 52 and older drop it, so update MKVToolNix to 54 or newer", ()
         notes.append(f"    {plan.path.name}: {what}, which ffmpeg can't write to "
                      f"{plan.path.suffix.lower()} files")
-    return None
+    return None, tuple(notes)
 
 
 def _default_flag_problem(plan: Plan, audio: list[Stream]) -> str | None:
@@ -798,16 +800,25 @@ def _default_flag_problem(plan: Plan, audio: list[Stream]) -> str | None:
     return None
 
 
-def verify_remux(plan: Plan, reordered: bool, notes: list[str] | None = None) -> str | None:
-    """Check the finished remux at plan.tmp_path before it replaces the
-    original. Returns None if it looks right, otherwise a short reason why
-    not. The original isn't probed again: plan.layout and plan.duration
-    already describe it.
+@dataclass(frozen=True)
+class Verification:
+    """verify_remux()'s result: problem, why the remux must be rejected (None
+    if it passed), and notes, warnings to log if the remux is then used (a
+    flag ffmpeg can't write; see _streams_problem()). A rejected remux
+    never carries notes, since they'd describe a change that isn't made."""
+    problem: str | None = None
+    notes: tuple[str, ...] = ()
 
-    Warnings worth giving if the remux is used (a flag ffmpeg can't write;
-    see _streams_problem()) are added to notes rather than logged, since a
-    later check can still reject the remux. check_and_swap_in() logs them
-    once the remux has replaced the original.
+
+def verify_remux(plan: Plan, reordered: bool) -> Verification:
+    """Check the finished remux at plan.tmp_path before it replaces the
+    original. Returns a Verification: no problem if it looks right,
+    otherwise a short reason why not. The original isn't probed again:
+    plan.layout and plan.duration already describe it.
+
+    Warnings worth giving if the remux is used come back as notes rather
+    than being logged, since a later check can still reject the remux.
+    check_and_swap_in() logs them once the remux has replaced the original.
 
     The checks run in this order, each only once the ones before it have
     passed, and the first problem found is the one reported:
@@ -821,17 +832,17 @@ def verify_remux(plan: Plan, reordered: bool, notes: list[str] | None = None) ->
       is the only audio track flagged default (_default_flag_problem())."""
     after, after_duration = probe_streams(plan.tmp_path, report=False)
     if after is None:
-        return "ffprobe couldn't read the file"
+        return Verification("ffprobe couldn't read the file")
     audio = [s for s in after if s.type == "audio"]
+    notes: tuple[str, ...] = ()
     problem = _content_problem(plan, after, after_duration)
     if problem is None and reordered:
         problem = _first_audio_problem(plan, audio)
     if problem is None:
-        problem = _streams_problem(plan, _expected_order(plan, reordered), after,
-                                   notes if notes is not None else [])
+        problem, notes = _streams_problem(plan, _expected_order(plan, reordered), after)
     if problem is None and not reordered:
         problem = _default_flag_problem(plan, audio)
-    return problem
+    return Verification(problem, notes if problem is None else ())
 
 
 def backup_path(path: Path, replace: bool) -> Path:
@@ -1148,16 +1159,16 @@ def check_and_swap_in(plan: Plan, reordered: bool, opts: Options) -> bool:
     (Ctrl+C, SIGTERM, an unexpected error), so it's never left behind. After
     a successful swap there's no temp file left to remove."""
     path, tmp_path = plan.path, plan.tmp_path
-    notes: list[str] = []
     try:
         if not stat.S_ISREG(os.lstat(tmp_path).st_mode):
             log.error(f"    {path.name}: {tmp_path.name} isn't a regular file, "
                       f"keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        problem = verify_remux(plan, reordered, notes)
-        if problem:
-            log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
+        checked = verify_remux(plan, reordered)
+        if checked.problem:
+            log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
+                      f"keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
         swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
@@ -1169,7 +1180,7 @@ def check_and_swap_in(plan: Plan, reordered: bool, opts: Options) -> bool:
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
-    for note in notes:
+    for note in checked.notes:
         log.warning(note)
     return True
 
