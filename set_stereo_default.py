@@ -95,6 +95,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -858,7 +859,11 @@ def make_backup(path: Path, replace: bool = False) -> Path:
     fails partway (a full disk, a dropped share) never leaves a partial
     backup that looks whole, nor removes the <name>.bak it was replacing.
     The staging file is removed if anything goes wrong, and if the run is
-    killed outright, the next run reports it as a leftover temp file."""
+    killed outright, the next run reports it as a leftover temp file.
+
+    Whatever already has the staging name is removed first, and the copy
+    only ever writes a new file (see _copy_new()), so a symlink someone put
+    at that name is never written through."""
     bak_path = backup_path(path, replace)
     staging = bak_path.with_name(bak_path.name + TMP_MARKER + path.suffix)
     staging.unlink(missing_ok=True)
@@ -866,12 +871,21 @@ def make_backup(path: Path, replace: bool = False) -> Path:
         try:
             os.link(path, staging)
         except OSError:
-            shutil.copy2(path, staging)
+            _copy_new(path, staging)
         os.replace(staging, bak_path)
     except BaseException:
         staging.unlink(missing_ok=True)
         raise
     return bak_path
+
+
+def _copy_new(src: Path, dst: Path) -> None:
+    """Copy src to dst, with its permissions and dates, like shutil.copy2(),
+    except that dst must not exist yet: copy2() opens whatever is there,
+    following a symlink to wherever it points, while this fails instead."""
+    with open(src, "rb") as source, open(dst, "xb") as target:
+        shutil.copyfileobj(source, target, 1024 * 1024)
+    shutil.copystat(src, dst)
 
 
 def _owner(path: Path) -> tuple[int, int]:
@@ -1098,12 +1112,22 @@ def check_and_swap_in(plan: Plan, reordered: bool, opts: Options) -> bool:
     upgrade a media manager imported. The file is left as it is now, to be
     fixed on the next run.
 
+    Nor is it swapped in unless it's a regular file. _remux_and_swap()
+    removes whatever has the temp name before the remux, but a symlink
+    planted there after that would have been written through by the tool,
+    and renaming it over the original would turn the video into a link.
+
     The temp file is removed if the check fails or anything interrupts this
     (Ctrl+C, SIGTERM, an unexpected error), so it's never left behind. After
     a successful swap there's no temp file left to remove."""
     path, tmp_path = plan.path, plan.tmp_path
     notes: list[str] = []
     try:
+        if not stat.S_ISREG(os.lstat(tmp_path).st_mode):
+            log.error(f"    {path.name}: {tmp_path.name} isn't a regular file, "
+                      f"keeping original untouched")
+            tmp_path.unlink(missing_ok=True)
+            return False
         problem = verify_remux(plan, reordered, notes)
         if problem:
             log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
@@ -1212,14 +1236,17 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     also exit with that code (mkvmerge on Windows), so it only counts as
     finished if no stop was requested.
 
-    The temp file is removed whatever stops the remux: a failure, a stop
-    (Ctrl+C, SIGTERM) or an unexpected error. Until check_and_swap_in()
-    has checked it, the original isn't touched."""
+    Whatever already has the temp name is removed before the remux, so the
+    tool writes a new file rather than through a symlink someone left there
+    (see check_and_swap_in()). The temp file is removed whatever stops the
+    remux: a failure, a stop (Ctrl+C, SIGTERM) or an unexpected error. Until
+    check_and_swap_in() has checked it, the original isn't touched."""
     path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
     if opts.dry_run:
         _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
         return True
     _announce(plan.intro)
+    tmp_path.unlink(missing_ok=True)
 
     try:
         returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)

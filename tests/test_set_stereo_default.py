@@ -809,11 +809,11 @@ def test_a_backup_copy_that_fails_partway_leaves_no_partial_backup(tmp_path, mon
     def no_hard_links(*args):
         raise OSError("hard links not supported")
 
-    def disk_fills_up(src, dst):
-        Path(dst).write_bytes(b"orig")
+    def disk_fills_up(src, dst, length=None):
+        dst.write(b"orig")
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(ssd.os, "link", no_hard_links)
-    monkeypatch.setattr(ssd.shutil, "copy2", disk_fills_up)
+    monkeypatch.setattr(ssd.shutil, "copyfileobj", disk_fills_up)
 
     with pytest.raises(OSError, match="No space left"):
         ssd.make_backup(video, replace=replace)
@@ -821,6 +821,33 @@ def test_a_backup_copy_that_fails_partway_leaves_no_partial_backup(tmp_path, mon
     assert sorted(p.name for p in tmp_path.iterdir()) == ["v.mkv", "v.mkv.bak"]
     assert (tmp_path / "v.mkv.bak").read_bytes() == b"old backup"
     assert video.read_bytes() == b"original"
+
+
+def test_a_symlink_planted_at_the_backup_staging_name_is_never_written_through(tmp_path,
+                                                                               monkeypatch):
+    """make_backup() clears its staging name first, but something could be
+    put there again before the copy starts. The copy must then fail rather
+    than write through a symlink, and leave nothing of itself behind."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_bytes(b"keep me")
+    staging = tmp_path / ("v.mkv.bak" + ssd.TMP_MARKER + ".mkv")
+
+    def plant_a_symlink_then_fail(src, dst):
+        try:
+            Path(dst).symlink_to(elsewhere)
+        except OSError as exc:
+            pytest.skip(f"can't create symlinks here: {exc}")
+        raise OSError("hard links not supported")
+    monkeypatch.setattr(ssd.os, "link", plant_a_symlink_then_fail)
+
+    with pytest.raises(FileExistsError):
+        ssd.make_backup(video)
+
+    assert elsewhere.read_bytes() == b"keep me"
+    assert not staging.is_symlink() and not staging.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere.txt", "v.mkv"]
 
 
 def test_a_backup_left_half_made_is_reported_as_a_leftover(tmp_path, caplog):
@@ -1700,6 +1727,62 @@ def test_process_file_snapshots_the_file_before_probing_it(tmp_path, probed, mon
     assert ssd.process_file(video, file_args()) == "changed"
 
     assert plans[0].snapshot == (st.st_size, st.st_mtime_ns)
+
+
+def test_a_symlink_planted_at_the_temp_name_is_removed_before_the_remux(tmp_path, monkeypatch):
+    """A symlink at <name>.tmp_remux.<ext> would be written through by the
+    tool (mkvmerge -o and ffmpeg -y both follow one), and the swap would
+    then rename the link over the original. It must be removed first, so
+    the tool writes a new file and whatever the link pointed at is never
+    touched."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_bytes(b"keep me")
+    tmp = video.with_name(video.name + ssd.TMP_MARKER + ".mkv")
+    try:
+        tmp.symlink_to(elsewhere)
+    except OSError as exc:
+        pytest.skip(f"can't create symlinks here: {exc}")
+
+    def write_remux(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        return 0, ""
+    monkeypatch.setattr(ssd, "run_with_progress", write_remux)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is True
+
+    assert elsewhere.read_bytes() == b"keep me"
+    assert not video.is_symlink() and video.read_bytes() == b"remuxed"
+    assert not leftover_temp_files(video)
+
+
+def test_a_remux_that_isnt_a_regular_file_is_never_swapped_in(tmp_path, monkeypatch, caplog):
+    """If a symlink lands at the temp name after it was cleared, the tool
+    writes through it. Renaming that over the original would turn the video
+    into a link, so the swap must be refused and the link removed."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_bytes(b"keep me")
+
+    def remux_through_a_planted_symlink(cmd, *args, **kwargs):
+        tmp = next(Path(c) for c in cmd if ssd.TMP_MARKER in c)
+        try:
+            tmp.symlink_to(elsewhere)
+        except OSError as exc:
+            pytest.skip(f"can't create symlinks here: {exc}")
+        tmp.write_bytes(b"remuxed")
+        return 0, ""
+    monkeypatch.setattr(ssd, "run_with_progress", remux_through_a_planted_symlink)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is False
+
+    assert "v.mkv.tmp_remux.mkv isn't a regular file, keeping original untouched" in caplog.text
+    assert not video.is_symlink() and video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
 
 
 def test_successful_remux_replaces_the_original_and_backs_it_up(remux):

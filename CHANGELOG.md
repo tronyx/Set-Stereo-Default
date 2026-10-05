@@ -14,6 +14,8 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 - The list of files that couldn't keep their owner could overwrite another list made in the same second, and, when written to a shared temp folder by a run as root, follow a symlink someone had planted at its name and overwrite the file it pointed to. The list is now always created as a new file, never over or through anything already at that name, and its name includes the process ID (`set_stereo_default-owners-<date>-<time>-<process ID>.log`).
 - An MP4, MOV or AVI remux that lost a flag ffmpeg can't write (e.g. "commentary") and then failed a later check got both the `lost its ... flag` warning, which means the file was fixed, and the `post-remux check failed` error saying it was left untouched. The warning now only appears when the file really was fixed.
 
+- A symlink that someone had put at a file's temp name (`<name>.tmp_remux.<ext>`), or at a backup's staging name, was written through by mkvmerge, ffmpeg or the backup copy, and the link was then renamed over the original or into `.bak`, so the video itself became a symlink to wherever the link pointed. Whatever has the temp name is now removed before the remux, a remux that isn't a regular file is never swapped in, and a backup copy only ever writes a new file.
+
 ### Project
 
 - The check before a remux replaces the original is split into one small function per rule, with no change in behavior, so it's easier to read and to change safely. Its complexity score went from E (36) to B (9).
