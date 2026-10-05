@@ -1345,8 +1345,13 @@ def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> 
                            progress or Progress(), reordered=reordered)
 
 
+Outcome = Literal["changed", "unchanged", "skipped", "error", "cancelled"]
+"""What happened to one file. print_summary() gives each but "cancelled" its
+own line, and counts cancelled files only in a stopped run."""
+
+
 def process_file(path: Path, opts: Options,
-                 on_progress: Callable[[int], None] | None = None) -> str:
+                 on_progress: Callable[[int], None] | None = None) -> Outcome:
     """Check one file, fix it if needed, and return "changed", "unchanged",
     "skipped" or "error", or "cancelled" if a stop interrupted it (see
     Cancelled). An unexpected error is logged and returned as "error" so
@@ -1365,7 +1370,7 @@ def process_file(path: Path, opts: Options,
 
 
 def _process_file(path: Path, opts: Options,
-                  on_progress: Callable[[int], None] | None = None) -> str:
+                  on_progress: Callable[[int], None] | None = None) -> Outcome:
     """The work behind process_file(). For AVI files with --avi-reorder,
     "already correct" means the target is already the first audio track.
     --force remuxes even files that are already correct. When --prefer-lang
@@ -1817,7 +1822,7 @@ def _show_bars(opts: Options) -> bool:
     return HAVE_TQDM and not opts.no_progress and sys.stderr.isatty()
 
 
-def process_all(files: list[Path], opts: Options, stats: dict[str, int]) -> None:
+def process_all(files: list[Path], opts: Options, stats: dict[Outcome, int]) -> None:
     """Process every file, adding each outcome to stats ("changed": 3, ...).
     A stop (Ctrl+C, SIGTERM) comes out as KeyboardInterrupt, with the
     progress bars closed and stats holding the files that finished.
@@ -1862,7 +1867,7 @@ def process_all(files: list[Path], opts: Options, stats: dict[str, int]) -> None
             overall.n = min(round(overall.n + delta, 6), overall.total)
             overall.refresh()
 
-    def run_one(i: int, f: Path) -> str:
+    def run_one(i: int, f: Path) -> Outcome:
         """Process file number i, keeping the overall bar in step."""
         if _cancelled.is_set():
             return "cancelled"
@@ -1907,7 +1912,7 @@ def process_all(files: list[Path], opts: Options, stats: dict[str, int]) -> None
         print()
 
 
-def print_summary(stats: dict[str, int], opts: Options, partial: bool = False,
+def print_summary(stats: dict[Outcome, int], opts: Options, partial: bool = False,
                   cancelled: int = 0) -> None:
     """Log the counts, printing them too with --log-file (see _tell()). In a
     dry run nothing was changed, so the heading says so and "Changed" reads
@@ -1920,7 +1925,8 @@ def print_summary(stats: dict[str, int], opts: Options, partial: bool = False,
     heading = "Summary" + (f" ({note[:1].upper()}{note[1:]})" if note else "")
     _tell(opts, "")
     _tell(opts, f"----- {heading} -----")
-    for k in ("changed", "unchanged", "skipped", "error"):
+    lines: tuple[Outcome, ...] = ("changed", "unchanged", "skipped", "error")
+    for k in lines:
         name = "would change" if k == "changed" and opts.dry_run else k
         _tell(opts, f"{name.capitalize()}: {stats[k]}")
     if cancelled:
@@ -1979,7 +1985,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         opts = dataclasses.replace(opts, existing_backups=answer)
 
-    stats = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
+    stats: dict[Outcome, int] = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
     list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
     try:
         process_all(files, opts, stats)
