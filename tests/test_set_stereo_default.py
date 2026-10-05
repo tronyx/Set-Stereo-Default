@@ -1542,6 +1542,65 @@ def leftover_temp_files(video):
     return list(video.parent.glob("*" + ssd.TMP_MARKER + "*"))
 
 
+@pytest.mark.parametrize("apply, filename", [(ssd.apply_mkv, "v.mkv"), (ssd.apply_remux, "v.mp4")],
+                         ids=["mkvmerge", "ffmpeg"])
+@pytest.mark.parametrize("meanwhile", [None, "replaced", "edited", "removed"])
+def test_a_file_changed_during_its_remux_is_left_as_it_is_now(tmp_path, monkeypatch, caplog,
+                                                              apply, filename, meanwhile):
+    """Another program (e.g. Sonarr importing an upgrade) replaced, edited
+    or removed the file while it was being remuxed. Swapping the remux in
+    would undo that, so the file must be left as it is now, with no backup
+    made and no temp file left. Untouched, the remux is swapped in."""
+    video = tmp_path / filename
+    video.write_bytes(b"original")
+    old_ns = 1_577_890_000_000_000_000
+    os.utime(video, ns=(old_ns, old_ns))
+    plan = ssd.Plan(video, ORIGINAL_AUDIO, 2, duration=100.0, snapshot=ssd._snapshot(video))
+
+    def remux_while_something_else_happens(cmd, *args, **kwargs):
+        """Write the remux, and meanwhile change the original."""
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        if meanwhile == "replaced":
+            upgrade = tmp_path / "upgrade.part"
+            upgrade.write_bytes(b"new download")
+            os.replace(upgrade, video)
+        elif meanwhile == "edited":
+            video.write_bytes(b"retagged")
+            os.utime(video, ns=(old_ns, old_ns + 1))
+        elif meanwhile == "removed":
+            video.unlink()
+        return 0, ""
+    monkeypatch.setattr(ssd, "run_with_progress", remux_while_something_else_happens)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+
+    result = apply(plan, file_args(dry_run=False, backup=True))
+
+    assert not leftover_temp_files(video)
+    if meanwhile is None:
+        assert result is True
+        assert video.read_bytes() == b"remuxed"
+        return
+    assert result is False
+    assert f"{filename}: changed by another program during the remux" in caplog.text
+    assert not video.with_name(video.name + ".bak").exists()
+    if meanwhile == "removed":
+        assert not video.exists()
+    else:
+        assert video.read_bytes() == {"replaced": b"new download", "edited": b"retagged"}[meanwhile]
+
+
+def test_process_file_snapshots_the_file_before_probing_it(tmp_path, probed, monkeypatch):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    st = video.stat()
+    plans = []
+    monkeypatch.setattr(ssd, "apply_mkv", lambda plan, *a, **k: plans.append(plan) or True)
+
+    assert ssd.process_file(video, file_args()) == "changed"
+
+    assert plans[0].snapshot == (st.st_size, st.st_mtime_ns)
+
+
 def test_successful_remux_replaces_the_original_and_backs_it_up(remux):
     apply, video, _ = remux
     assert apply() is True

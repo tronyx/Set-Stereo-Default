@@ -352,6 +352,8 @@ Every change is a **remux**: the audio and video are copied as-is into a new fil
 
 If the check fails, the original is kept and the file is counted as an `Error`. The one exception is a flag such as "commentary" in an MP4, MOV or AVI file: ffmpeg can't write those flags to these formats at all, so losing one is a warning rather than an error (see [Troubleshooting](#-troubleshooting)).
 
+The new file also isn't used if the original changed while it was being made, for example because Sonarr or Radarr imported an upgrade over it. Swapping it in would undo that change, so the file is left as it is now and counted as an `Error`; the next run fixes the new version.
+
 > [!NOTE]
 > A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
 

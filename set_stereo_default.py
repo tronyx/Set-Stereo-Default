@@ -991,20 +991,40 @@ class Plan:
     """What's going to happen to one file, as decided by _process_file():
     its audio streams, the index of the one to make default, its duration
     in seconds (None if unknown), intro, the "setting stream#N ..." line
-    logged as the remux starts (see _announce()), and layout, every stream
-    in the file, which verify_remux() compares the remux against. The
-    streams, duration and layout all come from one probe_streams() call."""
+    logged as the remux starts (see _announce()), layout, every stream in
+    the file, which verify_remux() compares the remux against, and
+    snapshot, the file's _snapshot() from before it was probed, which
+    check_and_swap_in() compares again before the swap (None skips that).
+    The streams, duration and layout all come from one probe_streams()
+    call."""
     path: Path
     streams: list[Stream]
     target_index: int
     duration: float | None = None
     intro: str | None = None
     layout: list[Stream] = field(default_factory=list)
+    snapshot: tuple[int, int] | None = None
 
     @property
     def tmp_path(self) -> Path:
         """Where the remux is written before it replaces the original."""
         return self.path.with_name(self.path.name + TMP_MARKER + self.path.suffix)
+
+
+def _snapshot(path: Path) -> tuple[int, int] | None:
+    """path's size and modification time (in nanoseconds), or None if it's
+    gone. If these differ by the time a remux is ready to replace the file,
+    another program replaced, edited or removed it in the meantime, e.g.
+    Sonarr or Radarr importing an upgrade.
+
+    The file's inode isn't compared: some network and FUSE file systems
+    don't keep it stable, which would make every file look replaced. A
+    replacement or an edit changes the size or modification time anyway."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return st.st_size, st.st_mtime_ns
 
 
 @dataclass
@@ -1021,6 +1041,12 @@ def check_and_swap_in(plan: Plan, reordered: bool, args: argparse.Namespace) -> 
     Returns True if the original was replaced, False if the check failed
     (already logged).
 
+    It's also not swapped in if the original changed since it was probed
+    (see _snapshot()): the remux was made from the old version, and
+    swapping it in would silently undo whatever replaced it, such as an
+    upgrade a media manager imported. The file is left as it is now, to be
+    fixed on the next run.
+
     The temp file is removed if the check fails or anything interrupts this
     (Ctrl+C, SIGTERM, an unexpected error), so it's never left behind. After
     a successful swap there's no temp file left to remove."""
@@ -1029,6 +1055,11 @@ def check_and_swap_in(plan: Plan, reordered: bool, args: argparse.Namespace) -> 
         problem = verify_remux(plan, reordered)
         if problem:
             log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
+            tmp_path.unlink(missing_ok=True)
+            return False
+        if plan.snapshot is not None and _snapshot(path) != plan.snapshot:
+            log.error(f"    {path.name}: changed by another program during the remux, so it's "
+                      f"left as it is now; run the script again to fix the new version")
             tmp_path.unlink(missing_ok=True)
             return False
         swap_in(path, tmp_path, args.backup, args.keep_dates)
@@ -1299,6 +1330,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
                  f"with --avi-reorder to reorder streams instead, or convert to mkv)")
         return "skipped"
 
+    snapshot = _snapshot(path)
     layout, duration = probe_streams(path)
     if layout is None:
         return "error"
@@ -1328,7 +1360,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
     plan = Plan(path, streams, target.index, duration,
                 intro=f"  {path.name}: {action} stream#{target.index} "
                       f"({target.language or 'und'}, {target.codec}) {outcome}{fallback}",
-                layout=layout)
+                layout=layout, snapshot=snapshot)
     progress = Progress(show=_show_bars(args) and args.jobs == 1,
                         position=position, on_progress=on_progress)
     apply = apply_mkv if ext in MKV_EXTS else apply_remux
