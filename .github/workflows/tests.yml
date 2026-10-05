@@ -13,6 +13,11 @@ on:
 # Every job can only read the repository, except the three that need more:
 # coverage-badge (writes the badges branch), and docker and publish (push
 # the image to the GitHub Container Registry).
+#
+# Actions from anyone but GitHub are pinned to a commit, not a tag, since a
+# tag can be moved to other code: docker and publish hand them the Docker Hub
+# token. The comment after each pin is its version, which Dependabot reads
+# and updates along with the commit.
 permissions:
   contents: read
 
@@ -76,21 +81,22 @@ jobs:
       - run: python -m mypy --platform linux
       - run: python -m mypy --platform win32
       # This workflow, including shellcheck on its scripts. Pinned, so a new
-      # release with new checks can't suddenly fail the job.
+      # release with new checks can't suddenly fail the job, and to its digest,
+      # since an image tag can be moved too. Dependabot doesn't update images
+      # used this way, so update the tag and digest by hand.
       - name: Lint the workflow
-        uses: docker://rhysd/actionlint:1.7.12
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
           args: -color
-      # hadolint only tags full versions (v3.5.0), not v3 on its own.
       - name: Lint the Dockerfile
-        uses: hadolint/hadolint-action@v3.5.0
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: Dockerfile
           config: .hadolint.yaml
       # The README, the changelog and everything in .github, with the
       # settings in .markdownlint.json.
       - name: Lint the Markdown files
-        uses: DavidAnson/markdownlint-cli2-action@v24
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
         with:
           globs: "**/*.md"
 
@@ -344,14 +350,14 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - if: env.PUBLISH == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - if: env.PUBLISH == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -360,7 +366,7 @@ jobs:
       # below, and (when publishing) pushed by digest. No cache, and a fresh
       # pull of alpine, so every build gets the newest Alpine packages.
       - id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           pull: true
@@ -501,12 +507,12 @@ jobs:
           pattern: digest-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
