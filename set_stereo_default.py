@@ -238,7 +238,12 @@ class TqdmLoggingHandler(logging.Handler):
 def setup_logging(log_file: str | None) -> None:
     """Send log messages to the console, or with --log-file to that file.
     With a log file, warnings and errors still reach the console too, so a
-    failed run (e.g. a missing tool) never ends without saying why."""
+    failed run (e.g. a missing tool) never ends without saying why. Handlers
+    from an earlier call are closed and replaced, so a second run in the
+    same process doesn't print every line twice."""
+    for old in log.handlers[:]:
+        log.removeHandler(old)
+        old.close()
     log.setLevel(logging.INFO)
     log.propagate = False
     console = TqdmLoggingHandler() if HAVE_TQDM else logging.StreamHandler(sys.stdout)
@@ -325,6 +330,21 @@ by report_ownership_failures()."""
 
 _ownership_lock = threading.Lock()
 """Guards _ownership_failures, which several --jobs threads add to at once."""
+
+
+def _reset_run_state() -> None:
+    """Forget what an earlier run in this process left behind, so main() can
+    run more than once, e.g. when called from other Python code: a stop
+    request (which would cancel every file), files that couldn't keep their
+    owner (which would be reported again), the header printed last, and
+    whether this mkvmerge can keep legacy font types. No remux outlives its
+    run, so _active_procs is already empty."""
+    _cancelled.clear()
+    with _ownership_lock:
+        _ownership_failures.clear()
+    _last_header[0] = None
+    _file_context.header = None
+    mkvmerge_can_keep_legacy_font_types.cache_clear()
 
 
 def _terminate_active_procs() -> None:
@@ -1929,6 +1949,7 @@ def main(argv: list[str] | None = None) -> int:
     a copy of opts (Options is frozen), so the rest of the run reads it from
     opts.backup_mode like any other option.
     """
+    _reset_run_state()
     opts = parse_args(argv)
     setup_logging(opts.log_file)
     signal.signal(signal.SIGINT, _stop_handler)

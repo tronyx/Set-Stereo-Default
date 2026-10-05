@@ -2747,6 +2747,26 @@ def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, cap
     assert processed == []
 
 
+def test_main_can_run_twice_in_one_process(tmp_path, monkeypatch, capsys):
+    """A stopped run leaves a stop request and its ownership failures behind.
+    The next run must start clean: process its files, report only its own
+    problems, and print each line once, not once per earlier run."""
+    make_videos(tmp_path, 1)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", lambda path, opts, **kwargs: "changed")
+    ssd._cancelled.set()
+    ssd._ownership_failures.append(("/earlier/run.mkv", (1000, 100), (65534, 65534),
+                                    "Operation not permitted"))
+
+    assert ssd.main([str(tmp_path), "--no-progress"]) == 0
+    assert ssd.main([str(tmp_path), "--no-progress"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("Found 1 file(s).") == 2
+    assert out.count("Changed: 1") == 2
+    assert "/earlier/run.mkv" not in out
+
+
 @pytest.mark.filterwarnings("error")
 def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     """Two files reporting 1% at a time used to add up to
