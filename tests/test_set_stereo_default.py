@@ -416,6 +416,23 @@ def test_existing_backups_needs_backup(tmp_path, monkeypatch, capsys):
     assert "--existing-backups only applies with --backup" in capsys.readouterr().err
 
 
+def test_log_file_in_a_missing_folder_is_rejected_like_any_other_bad_option(tmp_path, capsys):
+    """It used to fail with a traceback once logging started."""
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main([str(tmp_path), "--log-file", str(tmp_path / "missing" / "run.log")])
+
+    assert exit_info.value.code == 2
+    assert f"--log-file's folder doesn't exist: {tmp_path / 'missing'}" in capsys.readouterr().err
+
+
+def test_a_log_file_that_cant_be_written_is_a_clean_error(tmp_path, capsys):
+    """The folder exists, so the option check passes, but the file can't be
+    opened: here because it's a folder itself."""
+    assert ssd.main([str(tmp_path), "--log-file", str(tmp_path)]) == 2
+
+    assert f"Can't write --log-file {tmp_path}:" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("missing, need_mkvmerge, reported", [
     ([], True, None),
     (["mkvmerge"], False, None),

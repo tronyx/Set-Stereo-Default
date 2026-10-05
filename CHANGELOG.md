@@ -15,6 +15,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 - An MP4, MOV or AVI remux that lost a flag ffmpeg can't write (e.g. "commentary") and then failed a later check got both the `lost its ... flag` warning, which means the file was fixed, and the `post-remux check failed` error saying it was left untouched. The warning now only appears when the file really was fixed.
 
 - A symlink that someone had put at a file's temp name (`<name>.tmp_remux.<ext>`), or at a backup's staging name, was written through by mkvmerge, ffmpeg or the backup copy, and the link was then renamed over the original or into `.bak`, so the video itself became a symlink to wherever the link pointed. Whatever has the temp name is now removed before the remux, a remux that isn't a regular file is never swapped in, and a backup copy only ever writes a new file.
+- `--log-file` naming a folder that doesn't exist ended in a Python traceback instead of an error message. It's now reported like any other invalid option, with exit code 2, as is a log file that can't be written for another reason, such as permissions.
 
 ### Project
 

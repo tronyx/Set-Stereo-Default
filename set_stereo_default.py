@@ -1735,7 +1735,9 @@ class Options:
 
 def parse_args(argv: list[str] | None = None) -> Options:
     """Parse and check the command line (sys.argv's, unless argv is given).
-    Invalid options exit with argparse's usage message and code 2.
+    Invalid options exit with argparse's usage message and code 2. That
+    includes a --log-file in a folder that doesn't exist, which would
+    otherwise only fail, with a traceback, once logging starts.
 
     The paths to process are the ones given on the command line, then the
     ones listed in --input-file (see read_input_file()). At least one is
@@ -1825,6 +1827,8 @@ def parse_args(argv: list[str] | None = None) -> Options:
                                                          normalize_language(args.prefer_lang)):
         ap.error(f"--prefer-lang {args.prefer_lang!r} isn't a language code; use a 2- or "
                  f"3-letter code such as en or eng")
+    if args.log_file is not None and not Path(args.log_file).parent.is_dir():
+        ap.error(f"--log-file's folder doesn't exist: {Path(args.log_file).parent}")
     return Options(**vars(args))
 
 
@@ -1992,7 +1996,8 @@ def main(argv: list[str] | None = None) -> int:
     summary. Returns the exit code: 0 when done, 1 if no files were found,
     a tool is missing or any file had an error, or 128 + the signal number
     when stopped (130 for Ctrl+C, 143 for SIGTERM). Invalid options exit
-    with 2 straight from parse_args().
+    with 2 straight from parse_args(), and a --log-file that can't be
+    written (no permission, or a folder rather than a file) returns 2 too.
 
     When stopped while files are being processed, the stop handler has
     already killed every remux and each one has removed its temp file.
@@ -2009,7 +2014,11 @@ def main(argv: list[str] | None = None) -> int:
     """
     _reset_run_state()
     opts = parse_args(argv)
-    setup_logging(opts.log_file)
+    try:
+        setup_logging(opts.log_file)
+    except OSError as exc:
+        print(f"Can't write --log-file {opts.log_file}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
