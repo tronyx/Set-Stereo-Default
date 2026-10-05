@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import functools
 import importlib
 import json
@@ -105,7 +106,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType, ModuleType
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 try:
     from tqdm import tqdm
@@ -962,15 +963,16 @@ def report_ownership_failures(folder: Path | str = ".") -> None:
                 f"{where}\n\n{owners} {advice}")
 
 
-def swap_in(path: Path, tmp_path: Path, backup: str | bool, keep_dates: bool = False) -> None:
+def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
+            keep_dates: bool = False) -> None:
     """Replace path with the checked remux at tmp_path. Copies the original's
     permissions and owner (and with keep_dates, its access and modification
     times), keeps the original as a backup if backup is set, then swaps the
     new file in with a single atomic rename.
 
-    backup is falsy for no backup, "replace" to overwrite an existing
-    <name>.bak, or anything else to number the new one if <name>.bak
-    exists (see backup_path()).
+    backup is None for no backup, "replace" to overwrite an existing
+    <name>.bak, or "number" to number the new one if <name>.bak exists
+    (see backup_path()).
 
     keep_dates is off by default because tools that spot changed files by
     size and modification time (rsync's default, some backup software)
@@ -1036,7 +1038,7 @@ class Progress:
     on_progress: Callable[[int], None] | None = None
 
 
-def check_and_swap_in(plan: Plan, reordered: bool, args: argparse.Namespace) -> bool:
+def check_and_swap_in(plan: Plan, reordered: bool, opts: Options) -> bool:
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged).
@@ -1062,7 +1064,7 @@ def check_and_swap_in(plan: Plan, reordered: bool, args: argparse.Namespace) -> 
                       f"left as it is now; run the script again to fix the new version")
             tmp_path.unlink(missing_ok=True)
             return False
-        swap_in(path, tmp_path, args.backup, args.keep_dates)
+        swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates)
         return True
     except BaseException:
         tmp_path.unlink(missing_ok=True)
@@ -1144,7 +1146,7 @@ def _ffmpeg_pct(duration: float | None) -> Callable[[str], int | None]:
 
 
 def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int | None],
-                    args: argparse.Namespace, progress: Progress, *, reordered: bool = False,
+                    opts: Options, progress: Progress, *, reordered: bool = False,
                     warnings_exit: int | None = None) -> bool:
     """Run a remux command written to plan.tmp_path, then check it and swap it
     in. Returns True on success (or after a dry run, which only logs the
@@ -1162,7 +1164,7 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     (Ctrl+C, SIGTERM) or an unexpected error. Until check_and_swap_in()
     has checked it, the original isn't touched."""
     path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
-    if args.dry_run:
+    if opts.dry_run:
         _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
         return True
     _announce(plan.intro)
@@ -1187,12 +1189,12 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         log.warning(f"    {path.name}: {tool} finished with warnings: "
                     + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
-    return check_and_swap_in(plan, reordered, args)
+    return check_and_swap_in(plan, reordered, opts)
 
 
-def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = None) -> bool:
+def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
     """Remux an MKV/WebM file with mkvmerge so only plan.target_index is
-    flagged default, using args.dry_run, args.backup and args.keep_dates.
+    flagged default, using opts.dry_run, opts.backup_mode and opts.keep_dates.
     Returns True on success, False on failure (already logged). The steps
     shared with apply_remux() are in _remux_and_swap().
 
@@ -1247,14 +1249,14 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
         flag = "yes" if s.index == plan.target_index else "no"
         cmd += ["--default-track", f"{track_id}:{flag}"]
     cmd.append(str(path))
-    return _remux_and_swap(plan, cmd, _mkvmerge_pct, args, progress or Progress(),
+    return _remux_and_swap(plan, cmd, _mkvmerge_pct, opts, progress or Progress(),
                            warnings_exit=1)
 
 
-def apply_remux(plan: Plan, args: argparse.Namespace, progress: Progress | None = None) -> bool:
+def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
     """Remux any non-MKV file with ffmpeg (-c copy, so nothing is re-encoded)
-    so only plan.target_index is flagged default, using args.dry_run,
-    args.backup, args.keep_dates and args.avi_reorder. Returns True on
+    so only plan.target_index is flagged default, using opts.dry_run,
+    opts.backup_mode, opts.keep_dates and opts.avi_reorder. Returns True on
     success, False on failure (already logged). The steps shared with
     apply_mkv() are in _remux_and_swap().
 
@@ -1265,7 +1267,7 @@ def apply_remux(plan: Plan, args: argparse.Namespace, progress: Progress | None 
     """
     path, target_index = plan.path, plan.target_index
     ext = path.suffix.lower()
-    reordered = args.avi_reorder and ext in AVI_EXTS
+    reordered = opts.avi_reorder and ext in AVI_EXTS
 
     if reordered:
         others = [s.index for s in plan.streams if s.index != target_index]
@@ -1287,11 +1289,11 @@ def apply_remux(plan: Plan, args: argparse.Namespace, progress: Progress | None 
     cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
            "-i", str(path), *map_args, "-c", "copy", "-map_metadata", "0",
            *disp_args, *faststart, str(plan.tmp_path)]
-    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), args,
+    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), opts,
                            progress or Progress(), reordered=reordered)
 
 
-def process_file(path: Path, args: argparse.Namespace, position: int = 0,
+def process_file(path: Path, opts: Options, position: int = 0,
                  on_progress: Callable[[int], None] | None = None) -> str:
     """Check one file, fix it if needed, and return "changed", "unchanged",
     "skipped" or "error", or "cancelled" if a stop interrupted it (see
@@ -1301,7 +1303,7 @@ def process_file(path: Path, args: argparse.Namespace, position: int = 0,
     header above its lines.
     """
     try:
-        return _process_file(path, args, position, on_progress)
+        return _process_file(path, opts, position, on_progress)
     except Cancelled:
         log.info(f"  {path.name}: cancelled")
         return "cancelled"
@@ -1310,7 +1312,7 @@ def process_file(path: Path, args: argparse.Namespace, position: int = 0,
         return "error"
 
 
-def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
+def _process_file(path: Path, opts: Options, position: int = 0,
                   on_progress: Callable[[int], None] | None = None) -> str:
     """The work behind process_file(). For AVI files with --avi-reorder,
     "already correct" means the target is already the first audio track.
@@ -1323,9 +1325,9 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
     command, or as the remux starts, so in a --jobs dry run each file's
     lines come out together under one header."""
     ext = path.suffix.lower()
-    is_avi_reorder = ext in AVI_EXTS and args.avi_reorder
+    is_avi_reorder = ext in AVI_EXTS and opts.avi_reorder
 
-    if ext in AVI_EXTS and not args.avi_reorder:
+    if ext in AVI_EXTS and not opts.avi_reorder:
         log.info(f"  {path.name}: SKIP (AVI has no reliable default-track flag; re-run "
                  f"with --avi-reorder to reorder streams instead, or convert to mkv)")
         return "skipped"
@@ -1339,7 +1341,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
         log.info(f"  {path.name}: SKIP (no audio streams found)")
         return "skipped"
 
-    target, note = choose_target(streams, args.prefer_lang)
+    target, note = choose_target(streams, opts.prefer_lang)
     if target is None:
         log.info(f"  {path.name}: SKIP ({note})")
         return "skipped"
@@ -1350,7 +1352,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
     else:
         changed = needs_change(streams, target.index)
 
-    if not changed and not args.force:
+    if not changed and not opts.force:
         what = "is first audio stream" if is_avi_reorder else "is default"
         log.info(f"  {path.name}: already correct (stream#{target.index} {what}), skipping{fallback}")
         return "unchanged"
@@ -1361,10 +1363,10 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
                 intro=f"  {path.name}: {action} stream#{target.index} "
                       f"({target.language or 'und'}, {target.codec}) {outcome}{fallback}",
                 layout=layout, snapshot=snapshot)
-    progress = Progress(show=_show_bars(args) and args.jobs == 1,
+    progress = Progress(show=_show_bars(opts) and opts.jobs == 1,
                         position=position, on_progress=on_progress)
     apply = apply_mkv if ext in MKV_EXTS else apply_remux
-    return "changed" if apply(plan, args, progress) else "error"
+    return "changed" if apply(plan, opts, progress) else "error"
 
 
 def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
@@ -1506,7 +1508,7 @@ def _can_ask() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def ask_about_existing_backups(count: int) -> str:
+def ask_about_existing_backups(count: int) -> Literal["replace", "number", "quit"]:
     """Ask once what to do about files that already have a <name>.bak.
     Returns "replace", "number" or "quit". Asks again on any other answer.
     End of input (Ctrl+D, or no one there after all) counts as "number",
@@ -1518,7 +1520,8 @@ def ask_about_existing_backups(count: int) -> str:
     twice."""
     question = (f"{count} file(s) already have a backup. If they're changed: [d]elete and "
                 f"replace the old backup, [n]umber the new one (.bak.1, .bak.2...), or [q]uit? ")
-    choices = {"d": "replace", "n": "number", "q": "quit"}
+    choices: dict[str, Literal["replace", "number", "quit"]] = {
+        "d": "replace", "n": "number", "q": "quit"}
     while True:
         try:
             answer = input(question).strip().lower()
@@ -1577,7 +1580,50 @@ def read_input_file(name: str) -> list[str]:
     return paths
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+BackupMode = Literal["replace", "number"]
+"""What to do when a file's <name>.bak already exists: replace it, or number
+the new backup (.bak.1, .bak.2, ...)."""
+
+
+@dataclass(frozen=True)
+class Options:
+    """The command line, as parse_args() checked it: one field per option,
+    named as argparse names it (--dry-run is dry_run), and paths, the paths
+    given followed by --input-file's. Frozen, so no option changes partway
+    through a run. The one thing settled later, the answer to the backup
+    question, goes into a copy made with dataclasses.replace() (see
+    main()).
+
+    The defaults are those of a run with no options, so code that builds
+    one, as the tests do, only names the options that matter."""
+    paths: list[str] = field(default_factory=list)
+    input_file: str | None = None
+    ext: str | None = None
+    no_recursive: bool = False
+    skip_symlinks: bool = False
+    follow_symlinks: bool = False
+    dry_run: bool = False
+    backup: bool = False
+    existing_backups: BackupMode | None = None
+    prefer_lang: str | None = None
+    avi_reorder: bool = False
+    keep_dates: bool = False
+    force: bool = False
+    log_file: str | None = None
+    no_progress: bool = False
+    jobs: int = 1
+
+    @property
+    def backup_mode(self) -> BackupMode | None:
+        """None without --backup. Otherwise what to do about an existing
+        <name>.bak: replace it if told to, or else number the new backup,
+        since numbering never deletes anything."""
+        if not self.backup:
+            return None
+        return self.existing_backups or "number"
+
+
+def parse_args(argv: list[str] | None = None) -> Options:
     """Parse and check the command line (sys.argv's, unless argv is given).
     Invalid options exit with argparse's usage message and code 2.
 
@@ -1586,7 +1632,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     needed, except in the Docker image, where with neither they default to
     DOCKER_VIDEOS, the folder the image documents mounting your videos at.
     The image itself runs --help when given no arguments at all, so a bare
-    docker run never starts changing files."""
+    docker run never starts changing files.
+
+    Every option argparse parses becomes the Options field of the same
+    name, so a new option needs a new field too."""
     in_docker = _in_docker()
     paths_help = "Video files and folders to process"
     paths_help += f" (default: {DOCKER_VIDEOS})" if in_docker else " (or use --input-file)"
@@ -1666,38 +1715,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                                          normalize_language(args.prefer_lang)):
         ap.error(f"--prefer-lang {args.prefer_lang!r} isn't a language code; use a 2- or "
                  f"3-letter code such as en or eng")
-    return args
+    return Options(**vars(args))
 
 
-def _tell(args: argparse.Namespace, line: str) -> None:
+def _tell(opts: Options, line: str) -> None:
     """Log line, and with --log-file print it too, so it stays on the console
     (where a log file only sends warnings and errors)."""
     log.info(line)
-    if args.log_file:
+    if opts.log_file:
         print(line)
 
 
-def find_files(args: argparse.Namespace) -> list[Path]:
-    """Every file to process: the ones under args.paths with an extension
+def find_files(opts: Options) -> list[Path]:
+    """Every file to process: the ones under opts.paths with an extension
     from --ext (or DEFAULT_EXTS), in the order the paths were given, each
     path's files sorted. So listing one show before another processes it
     first. See iter_files()."""
-    if args.ext:
-        exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")}
+    if opts.ext:
+        exts = {("." + e.strip().lstrip(".")).lower() for e in opts.ext.split(",")}
     else:
         exts = DEFAULT_EXTS
-    return list(iter_files(args.paths, exts, not args.no_recursive,
-                           args.skip_symlinks, args.follow_symlinks))
+    return list(iter_files(opts.paths, exts, not opts.no_recursive,
+                           opts.skip_symlinks, opts.follow_symlinks))
 
 
-def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:
+def choose_backup_mode(opts: Options,
+                       files: list[Path]) -> Literal["replace", "number", "quit"]:
     """What to do with backups when <name>.bak already exists: "replace",
     "number" or "quit". --existing-backups decides if given. Otherwise,
     if any of files has one, the user is asked (see
     ask_about_existing_backups()), or new backups are numbered when no one
     can answer, since that never deletes anything."""
-    if args.existing_backups:
-        return args.existing_backups
+    if opts.existing_backups:
+        return opts.existing_backups
     with_backup = sum(1 for f in files if f.with_name(f.name + ".bak").exists())
     if not with_backup:
         return "number"
@@ -1708,15 +1758,15 @@ def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:
     return "number"
 
 
-def _show_bars(args: argparse.Namespace) -> bool:
+def _show_bars(opts: Options) -> bool:
     """True if progress bars should be drawn: tqdm is installed, --no-progress
     wasn't given, and the bars' output (stderr) is a terminal. Anywhere else
     (cron, docker run without -t, docker logs, a pipe), the codes that move
     the cursor to redraw a bar would land in the output as junk."""
-    return HAVE_TQDM and not args.no_progress and sys.stderr.isatty()
+    return HAVE_TQDM and not opts.no_progress and sys.stderr.isatty()
 
 
-def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, int]) -> None:
+def process_all(files: list[Path], opts: Options, stats: dict[str, int]) -> None:
     """Process every file, adding each outcome to stats ("changed": 3, ...).
     A stop (Ctrl+C, SIGTERM) comes out as KeyboardInterrupt, with the
     progress bars closed and stats holding the files that finished.
@@ -1740,11 +1790,11 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
       (_FileHeaderFilter).
     - Once a stop is requested, files still waiting their turn return
       "cancelled" straight away instead of starting."""
-    use_bar = _show_bars(args)
-    counter = args.log_file and not use_bar and sys.stdout.isatty()
+    use_bar = _show_bars(opts)
+    counter = opts.log_file and not use_bar and sys.stdout.isatty()
     bars, overall = [], None
     if use_bar:
-        first_row = 1 if args.jobs == 1 else 0
+        first_row = 1 if opts.jobs == 1 else 0
         bars.append(tqdm(total=1, position=first_row, bar_format="{desc}", desc="", leave=False))
         overall = tqdm(total=len(files), unit="file", desc="Processing", position=first_row + 1,
                        bar_format="{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
@@ -1775,7 +1825,7 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
             last_reported = pct / 100.0
 
         with file_context(f"[{i}/{len(files)}] {f}"):
-            result = process_file(f, args, on_progress=on_progress if overall else None)
+            result = process_file(f, opts, on_progress=on_progress if overall else None)
         if overall:
             advance_overall(1.0 - last_reported)
         return result
@@ -1786,13 +1836,13 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
             print(f"\rProcessing {n}/{len(files)}...", end="", flush=True)
 
     try:
-        if args.jobs == 1:
+        if opts.jobs == 1:
             for i, f in enumerate(files, 1):
                 show_counter(i)
                 result = run_one(i, f)
                 stats[result] = stats.get(result, 0) + 1
         else:
-            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
                 futures = [pool.submit(run_one, i, f) for i, f in enumerate(files, 1)]
                 for done, fut in enumerate(as_completed(futures), 1):
                     show_counter(done)
@@ -1806,7 +1856,7 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
         print()
 
 
-def print_summary(stats: dict[str, int], args: argparse.Namespace, partial: bool = False,
+def print_summary(stats: dict[str, int], opts: Options, partial: bool = False,
                   cancelled: int = 0) -> None:
     """Log the counts, printing them too with --log-file (see _tell()). In a
     dry run nothing was changed, so the heading says so and "Changed" reads
@@ -1814,16 +1864,16 @@ def print_summary(stats: dict[str, int], args: argparse.Namespace, partial: bool
     files didn't finish. Each line, and the heading's note, starts with a
     capital letter."""
     notes = (["partial -- interrupted"] if partial else []) + (
-        ["dry run, nothing was changed"] if args.dry_run else [])
+        ["dry run, nothing was changed"] if opts.dry_run else [])
     note = "; ".join(notes)
     heading = "Summary" + (f" ({note[:1].upper()}{note[1:]})" if note else "")
-    _tell(args, "")
-    _tell(args, f"----- {heading} -----")
+    _tell(opts, "")
+    _tell(opts, f"----- {heading} -----")
     for k in ("changed", "unchanged", "skipped", "error"):
-        name = "would change" if k == "changed" and args.dry_run else k
-        _tell(args, f"{name.capitalize()}: {stats[k]}")
+        name = "would change" if k == "changed" and opts.dry_run else k
+        _tell(opts, f"{name.capitalize()}: {stats[k]}")
     if cancelled:
-        _tell(args, f"Cancelled: {cancelled}")
+        _tell(opts, f"Cancelled: {cancelled}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1841,14 +1891,18 @@ def main(argv: list[str] | None = None) -> int:
     couldn't be given their original owner are reported in one warning
     just before the summary (report_ownership_failures()), with the full
     list saved next to --log-file, or in the current folder.
+
+    The answer to the backup question goes into opts.existing_backups, in
+    a copy of opts (Options is frozen), so the rest of the run reads it from
+    opts.backup_mode like any other option.
     """
-    args = parse_args(argv)
-    setup_logging(args.log_file)
+    opts = parse_args(argv)
+    setup_logging(opts.log_file)
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
     try:
-        files = find_files(args)
+        files = find_files(opts)
     except KeyboardInterrupt as exc:
         signum, reason = _stop_reason(exc)
         log.error(f"{reason} while looking for files. No files were changed.")
@@ -1858,35 +1912,36 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if not check_tools(need_mkvmerge=any(f.suffix.lower() in MKV_EXTS for f in files)):
         return 1
-    _tell(args, f"Found {len(files)} file(s){' (dry run)' if args.dry_run else ''}.")
+    _tell(opts, f"Found {len(files)} file(s){' (dry run)' if opts.dry_run else ''}.")
 
-    if args.backup and not args.dry_run:
+    if opts.backup and not opts.dry_run:
         try:
-            args.backup = choose_backup_mode(args, files)
+            answer = choose_backup_mode(opts, files)
         except KeyboardInterrupt as exc:
             signum, reason = _stop_reason(exc)
             print()
             log.error(f"{reason}. No files were changed.")
             return 128 + signum
-        if args.backup == "quit":
-            _tell(args, "Quit before changing any files.")
+        if answer == "quit":
+            _tell(opts, "Quit before changing any files.")
             return 0
+        opts = dataclasses.replace(opts, existing_backups=answer)
 
     stats = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
-    list_folder = Path(args.log_file).parent if args.log_file else Path.cwd()
+    list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
     try:
-        process_all(files, args, stats)
+        process_all(files, opts, stats)
     except KeyboardInterrupt as exc:
         signum, reason = _stop_reason(exc)
         print()
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
-        print_summary(stats, args, partial=True, cancelled=len(files) - sum(stats.values()))
+        print_summary(stats, opts, partial=True, cancelled=len(files) - sum(stats.values()))
         return 128 + signum
 
     report_ownership_failures(list_folder)
-    print_summary(stats, args)
+    print_summary(stats, opts)
     return 1 if stats["error"] else 0
 
 

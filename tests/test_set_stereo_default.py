@@ -68,12 +68,11 @@ def parse_pct_line(line):
 
 
 def file_args(**overrides):
-    """The parsed options process_file() and the apply functions take, as a
-    --dry-run with no progress bar."""
-    values = {"prefer_lang": None, "avi_reorder": False, "force": False, "dry_run": True,
-              "backup": False, "keep_dates": False, "no_progress": True, "jobs": 1}
+    """The Options process_file() and the apply functions take, as a
+    --dry-run with no progress bar unless overrides say otherwise."""
+    values = {"dry_run": True, "no_progress": True}
     values.update(overrides)
-    return types.SimpleNamespace(**values)
+    return ssd.Options(**values)
 
 
 def make_videos(folder, count):
@@ -544,8 +543,7 @@ def test_iter_files_respects_ext(library):
 def test_ext_takes_extensions_however_theyre_written(tmp_path, ext, found):
     for name in ("a.mkv", "b.MP4", "c.avi", "d.webm"):
         (tmp_path / name).write_bytes(b"x")
-    args = types.SimpleNamespace(paths=[str(tmp_path)], ext=ext, no_recursive=False,
-                                 skip_symlinks=False, follow_symlinks=False)
+    args = ssd.Options(paths=[str(tmp_path)], ext=ext)
     assert [p.name for p in ssd.find_files(args)] == found
 
 
@@ -556,8 +554,7 @@ def test_files_come_path_by_path_in_the_order_given(tmp_path):
         (tmp_path / name).parent.mkdir(exist_ok=True)
         (tmp_path / name).write_text("x")
     paths = [tmp_path / "Show B", tmp_path / "Show A", tmp_path / "Show B" / "e01.mkv"]
-    args = types.SimpleNamespace(paths=paths, ext=None, no_recursive=False, skip_symlinks=False,
-                                 follow_symlinks=False)
+    args = ssd.Options(paths=paths)
 
     found = [p.relative_to(tmp_path).as_posix() for p in ssd.find_files(args)]
 
@@ -833,7 +830,7 @@ def backed_up(tmp_path, monkeypatch):
     """Two videos, one of which already has a .bak, with process_file()
     replaced by a stand-in. Returns (folder, run), where run(*options,
     tty=..., answer=...) runs main() and returns (exit code or None, the
-    backup setting each file was processed with, questions asked). An
+    backup mode each file was processed with, questions asked). An
     exception as the answer is raised at the question instead."""
     make_videos(tmp_path, 2)
     (tmp_path / "e00.mkv.bak").write_text("old")
@@ -842,7 +839,7 @@ def backed_up(tmp_path, monkeypatch):
         seen, questions = [], []
 
         def fake_process_file(path, args, position=0, on_progress=None):
-            seen.append(args.backup)
+            seen.append(args.backup_mode)
             return "changed"
 
         def fake_input(prompt):
