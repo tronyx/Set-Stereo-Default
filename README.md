@@ -41,7 +41,7 @@ The commentary is stereo too, but it's never picked (see [Picking the track](#-p
 | --- | --- | --- |
 | [Python](https://www.python.org) | 3.10 or newer | Everything |
 | [ffmpeg and ffprobe](https://ffmpeg.org) | 4.4 or newer | Everything |
-| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any; 54 or newer recommended | `.mkv` and `.webm` files |
+| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | 45 or newer; 54 or newer recommended | `.mkv` and `.webm` files |
 | [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
 
 The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45, 65, 74, 82, 92 and the newest release.
@@ -474,8 +474,12 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest
+python -m pytest          # the tests
+python -m ruff check .    # lint the code
+python -m mypy            # check the type hints
 ```
+
+GitHub runs all three on every push, so a pull request needs to pass each one.
 
 There are two sets of tests:
 
@@ -491,7 +495,7 @@ python -m coverage run -m pytest
 python -m coverage report
 ```
 
-The real-file tests run the script as a separate program, so the lines only they reach (the actual ffmpeg and mkvmerge runs, for example) show as missing in that report.
+Coverage only counts code that runs inside the test process. The logic tests reach almost every line, because they drive the script's own code for running ffmpeg and mkvmerge with small Python stand-ins. The real-file tests run the script as a separate program, so they don't add to the number.
 
 ## 🤖 A note on how this was built
 
