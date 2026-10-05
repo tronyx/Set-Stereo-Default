@@ -387,9 +387,11 @@ def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type
 @pytest.mark.parametrize("ext", [".mkv", ".mp4"])
 def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
     """Laid out like a real release: video, stereo AAC, a subtitle, then
-    5.1 E-AC3, every track flagged default. mkvmerge writes subtitles after
-    all the audio unless told otherwise, so without --track-order the remux
-    came out reordered and was rejected. The order must come through."""
+    5.1 E-AC3, here with the 5.1 track as the default (ffmpeg 4.4 can't
+    write two default audio tracks, as that release had). mkvmerge writes
+    subtitles after all the audio unless told otherwise, so without
+    --track-order the remux came out reordered and was rejected. The order
+    must come through."""
     need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
     srt = tmp_path / "subs.srt"
     srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
@@ -402,11 +404,12 @@ def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
                     "-map", "0", "-map", "1", "-map", "2", "-map", "3",
                     "-c:v", "mpeg4", "-c:a:0", "aac", "-c:a:1", "eac3",
                     "-c:s", "mov_text" if ext == ".mp4" else "srt",
-                    "-disposition:a:0", "default", "-disposition:a:1", "default",
+                    "-disposition:a:0", "0", "-disposition:a:1", "default",
                     "-disposition:s:0", "default", str(video)],
                    check=True, capture_output=True, text=True)
     before = contents(video)
     assert [s["type"] for s in before["streams"]] == ["video", "audio", "subtitle", "audio"], before
+    assert audio_defaults(video) == [(2, False), (6, True)]
 
     code, output = run_script(video)
 

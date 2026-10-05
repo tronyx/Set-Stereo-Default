@@ -18,6 +18,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - MKV files with a subtitle between two audio tracks (common in some releases) were rejected with `post-remux check failed (stream#2 changed from subtitle subrip to audio ...)` and left unfixed. mkvmerge writes video, then audio, then subtitles unless told otherwise, so it moved the subtitle to the end. The script now tells it to keep every track where it was.
 
+### Project
+
+- CI finds the newest ffmpeg build again after BtbN, which publishes the builds the static-build and Windows jobs use, changed how it names and releases them.
+
 ## 2026-10-04 · [#10](https://github.com/tronyx/Set-Stereo-Default/pull/10)
 
 ### Changed
