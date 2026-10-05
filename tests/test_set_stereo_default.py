@@ -1649,7 +1649,9 @@ def test_a_file_changed_during_its_remux_is_left_as_it_is_now(tmp_path, monkeypa
     """Another program (e.g. Sonarr importing an upgrade) replaced, edited
     or removed the file while it was being remuxed. Swapping the remux in
     would undo that, so the file must be left as it is now, with no backup
-    made and no temp file left. Untouched, the remux is swapped in."""
+    made and no temp file left. Untouched, the remux is swapped in. The edit
+    keeps the size and moves the modification time 2 seconds, enough for
+    every file system to record (NTFS keeps 100 ns, FAT only 2 s)."""
     video = tmp_path / filename
     video.write_bytes(b"original")
     old_ns = 1_577_890_000_000_000_000
@@ -1665,7 +1667,7 @@ def test_a_file_changed_during_its_remux_is_left_as_it_is_now(tmp_path, monkeypa
             os.replace(upgrade, video)
         elif meanwhile == "edited":
             video.write_bytes(b"retagged")
-            os.utime(video, ns=(old_ns, old_ns + 1))
+            os.utime(video, ns=(old_ns, old_ns + 2_000_000_000))
         elif meanwhile == "removed":
             video.unlink()
         return 0, ""
