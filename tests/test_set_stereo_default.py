@@ -1414,6 +1414,40 @@ def test_owner_list_falls_back_to_the_temp_folder(tmp_path, monkeypatch, caplog)
     assert f"You can view the full list of files here: {listed.resolve()}" in caplog.text
 
 
+@pytest.mark.parametrize("already_there", ["file", "symlink"])
+def test_owner_list_never_writes_over_or_through_whatever_has_its_name(tmp_path, monkeypatch,
+                                                                       caplog, already_there):
+    """The list's name can be predicted, so something may already have it:
+    an earlier list, or a symlink planted in a shared temp folder so a run
+    as root would overwrite the file it points to. Neither may be written
+    to; the list goes to the next place instead."""
+    monkeypatch.setattr(ssd.time, "strftime", lambda fmt, *args: "20261005-120000")
+    name = f"set_stereo_default-owners-20261005-120000-{os.getpid()}.log"
+    folder, temp = tmp_path / "folder", tmp_path / "temp"
+    folder.mkdir()
+    temp.mkdir()
+    monkeypatch.setattr(ssd.tempfile, "gettempdir", lambda: str(temp))
+    target = tmp_path / "target"
+    target.write_text("keep me")
+    if already_there == "file":
+        (folder / name).write_text("keep me")
+    else:
+        try:
+            (folder / name).symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"can't create symlinks here: {exc}")
+    for video in ("a.mkv", "b.mkv"):
+        ssd._ownership_failures.append((video, (1000, 100), (65534, 65534),
+                                        "Operation not permitted"))
+
+    ssd.report_ownership_failures(folder)
+
+    assert (folder / name).read_text() == "keep me"
+    assert target.read_text() == "keep me"
+    assert (temp / name).read_text(encoding="utf-8").splitlines() == ["a.mkv", "b.mkv"]
+    assert f"You can view the full list of files here: {(temp / name).resolve()}" in caplog.text
+
+
 def test_owner_list_goes_in_the_warning_if_it_cant_be_saved(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(ssd.tempfile, "gettempdir", lambda: str(tmp_path / "missing too"))
     for name in ("/videos/a.mkv", "/videos/b.mkv"):

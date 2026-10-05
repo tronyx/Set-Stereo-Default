@@ -909,21 +909,29 @@ def copy_ownership(src: Path, dst: Path) -> None:
 
 def _write_ownership_list(folder: Path | str) -> Path | None:
     """Write the full path of every file in _ownership_failures to a new
-    set_stereo_default-owners-<date>-<time>.log in folder, one per line in
-    path order (they're recorded in whatever order --jobs finishes them),
-    and return its path. If the files don't all share one wanted and one actual
-    owner, each line also says which. Falls back to the system's temp
-    folder if folder can't be written to; returns None if that fails too.
-    The timestamp means a later run never overwrites an earlier list."""
+    set_stereo_default-owners-<date>-<time>-<process ID>.log in folder, one
+    per line in path order (they're recorded in whatever order --jobs
+    finishes them), and return its path. If the files don't all share one
+    wanted and one actual owner, each line also says which. Falls back to
+    the system's temp folder if folder can't be written to; returns None if
+    that fails too.
+
+    The file is always created new, never written over or through something
+    already at that name: an earlier list, or a symlink someone planted in a
+    shared temp folder so that a run as root would overwrite the file it
+    points to. If the name is taken, the next place is tried. The time and
+    process ID in the name mean a later run never finds its name taken by
+    an earlier one."""
     owners = {(wanted, got) for _, wanted, got, _ in _ownership_failures}
     lines = [path if len(owners) == 1
              else f"{path}  (should belong to {_owner_name(*wanted)}, belongs to {_owner_name(*got)})"
              for path, wanted, got, _ in sorted(_ownership_failures)]
-    name = f"set_stereo_default-owners-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    name = f"set_stereo_default-owners-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.log"
     for place in (Path(folder), Path(tempfile.gettempdir())):
-        target = (place / name).resolve()
+        target = place.resolve() / name
         try:
-            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with open(target, "x", encoding="utf-8") as listing:
+                listing.write("\n".join(lines) + "\n")
             return target
         except OSError:
             continue
