@@ -547,6 +547,28 @@ def test_unreadable_file_is_an_error_and_left_alone(tmp_path):
     assert digest(video) == before
 
 
+@pytest.mark.parametrize("name", [
+    "-dash.mkv",
+    "@at.mkv",
+    pytest.param("Movie:Part2.mp4", marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows file names can't contain a colon")),
+])
+def test_a_name_like_an_option_is_fixed_when_run_on_its_folder(tmp_path, monkeypatch, name):
+    """Run on ".", the tools would get the bare name: ffprobe, ffmpeg and
+    mkvmerge read one starting with - as an option, mkvmerge one starting
+    with @ as a file of options, and ffmpeg one with a colon as a protocol.
+    Each must be fixed like any other file."""
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if name.endswith(".mkv") else []))
+    make_video(tmp_path / name, [Track(6, default=True), Track(2)])
+    monkeypatch.chdir(tmp_path)
+
+    code, output = run_script(".")
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(tmp_path / name) == [(6, False), (2, True)]
+
+
 @pytest.mark.parametrize("ext", [".mkv", ".mp4"])
 def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
     """An incomplete download still claims its full length in its header,

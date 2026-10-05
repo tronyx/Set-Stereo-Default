@@ -608,6 +608,24 @@ def test_iter_files_warns_about_a_path_that_doesnt_exist(library, caplog):
     assert f"Skipping {typo}: no such file or directory" in caplog.text
 
 
+@pytest.mark.parametrize("name", [
+    "-dash.mkv",
+    "@at.mkv",
+    pytest.param("Movie:Part2.mp4", marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows file names can't contain a colon")),
+])
+def test_files_found_from_a_relative_path_are_absolute(tmp_path, monkeypatch, name):
+    """Run on ".", a file named like an option (-, @) or a protocol (a colon)
+    must still come out as a path no tool can misread."""
+    (tmp_path / name).write_text("x")
+    monkeypatch.chdir(tmp_path)
+
+    found = list(ssd.iter_files(["."], ssd.DEFAULT_EXTS, recursive=True))
+
+    assert found == [Path.cwd() / name]
+    assert found[0].is_absolute()
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a named pipe (not on Windows)")
 def test_iter_files_warns_about_a_path_that_isnt_a_file_or_folder(tmp_path, caplog):
     pipe = tmp_path / "pipe.mkv"

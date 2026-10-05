@@ -1404,10 +1404,17 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
     A path that doesn't exist (a typo, an unmounted share) is skipped with a
     warning, so a mistake in one of several paths doesn't go unnoticed. In
     the Docker image, a path in DOCKER_VIDEOS when nothing is mounted there
-    (a forgotten -v) also gets the fix."""
+    (a forgotten -v) also gets the fix.
+
+    Every path is made absolute first (without following symlinks), so the
+    files found are too. ffprobe, ffmpeg and mkvmerge read a relative name
+    starting with "-" as an option, mkvmerge reads one starting with "@" as
+    a file of options, and ffmpeg reads one with a colon ("Movie:Part2.mp4")
+    as a protocol, like "http:". Running the script on "." gives such
+    names, since pathlib drops the leading "./"."""
     seen = set()
     videos = Path(DOCKER_VIDEOS)
-    for p in map(Path, paths):
+    for p in (Path(os.path.abspath(x)) for x in paths):
         candidates: Iterable[tuple[Path, os.DirEntry[str] | None, str | None]]
         if p.is_file():
             candidates = [(p, None, None)]
