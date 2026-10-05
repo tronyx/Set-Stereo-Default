@@ -20,6 +20,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 - Every third-party GitHub Action is pinned to a commit instead of a version tag, which its owner could move to other code, and the actionlint image to its digest. The Docker actions get the Docker Hub token and push the published image, so this keeps a compromised or moved tag from reaching either. Dependabot still proposes updates, moving each pin and its version comment together.
 - The command-line options are passed around as one typed, read-only `Options` object instead of argparse's untyped one, with no change in behavior. mypy now checks every option the script reads, so a misspelled option name or a wrong type fails the checks instead of slipping through, and the backup setting no longer changes from yes/no to a mode partway through a run.
 - `main()` can be called more than once in the same Python process. A second call used to print every line twice, report the first run's ownership problems again, and, after a stopped run, cancel every file. Each run now starts clean.
+- Removed an unused `position` setting from `process_file()` and `Progress`: nothing ever set it, so the file's progress bar was always on the top row, where it's now drawn directly.
 
 ## 2026-10-04 · [#11](https://github.com/tronyx/Set-Stereo-Default/pull/11)
 

@@ -446,9 +446,10 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
 
     parse_pct(line) returns 0-100 for a progress line and None for anything
     else. With progress.show, a tqdm bar titled label shows this file's
-    progress at row progress.position. progress.on_progress(pct), if set,
-    is called on every increase and with 100 on success; process_all()
-    uses it to move the overall bar. Output is read as UTF-8, as in run().
+    progress on the top row, above process_all()'s overall bar.
+    progress.on_progress(pct), if set, is called on every increase and with
+    100 on success; process_all() uses it to move the overall bar. Output
+    is read as UTF-8, as in run().
 
     The process is listed in _active_procs while it runs and is killed if
     anything goes wrong, so it's never left running on its own. If a stop
@@ -470,8 +471,7 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
         if _cancelled.is_set():
             proc.kill()
         if progress.show and HAVE_TQDM:
-            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False,
-                       position=progress.position)
+            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=0)
         for line in stdout:
             pct = parse_pct(line)
             if pct is None:
@@ -1079,10 +1079,9 @@ def _snapshot(path: Path) -> tuple[int, int] | None:
 
 @dataclass
 class Progress:
-    """How to show a remux's progress: show its own bar at row position
-    (--jobs 1 only), and call on_progress(pct) to move the overall bar."""
+    """How to show a remux's progress: show its own bar (--jobs 1 only; see
+    run_with_progress()), and call on_progress(pct) to move the overall bar."""
     show: bool = False
-    position: int = 0
     on_progress: Callable[[int], None] | None = None
 
 
@@ -1346,17 +1345,17 @@ def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> 
                            progress or Progress(), reordered=reordered)
 
 
-def process_file(path: Path, opts: Options, position: int = 0,
+def process_file(path: Path, opts: Options,
                  on_progress: Callable[[int], None] | None = None) -> str:
     """Check one file, fix it if needed, and return "changed", "unchanged",
     "skipped" or "error", or "cancelled" if a stop interrupted it (see
     Cancelled). An unexpected error is logged and returned as "error" so
-    one bad file doesn't stop the run. position is the progress bar's row
-    (--jobs 1 only). Run it inside file_context(), which puts the file's
-    header above its lines.
+    one bad file doesn't stop the run. on_progress(pct), if given, is
+    called as the remux progresses (see run_with_progress()). Run it inside
+    file_context(), which puts the file's header above its lines.
     """
     try:
-        return _process_file(path, opts, position, on_progress)
+        return _process_file(path, opts, on_progress)
     except Cancelled:
         log.info(f"  {path.name}: cancelled")
         return "cancelled"
@@ -1365,7 +1364,7 @@ def process_file(path: Path, opts: Options, position: int = 0,
         return "error"
 
 
-def _process_file(path: Path, opts: Options, position: int = 0,
+def _process_file(path: Path, opts: Options,
                   on_progress: Callable[[int], None] | None = None) -> str:
     """The work behind process_file(). For AVI files with --avi-reorder,
     "already correct" means the target is already the first audio track.
@@ -1416,8 +1415,7 @@ def _process_file(path: Path, opts: Options, position: int = 0,
                 intro=f"  {path.name}: {action} stream#{target.index} "
                       f"({target.language or 'und'}, {target.codec}) {outcome}{fallback}",
                 layout=layout, snapshot=snapshot)
-    progress = Progress(show=_show_bars(opts) and opts.jobs == 1,
-                        position=position, on_progress=on_progress)
+    progress = Progress(show=_show_bars(opts) and opts.jobs == 1, on_progress=on_progress)
     apply = apply_mkv if ext in MKV_EXTS else apply_remux
     return "changed" if apply(plan, opts, progress) else "error"
 
