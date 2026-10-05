@@ -421,7 +421,7 @@ With `--keep-dates`, each changed file gets the original's modification and acce
 
 Ctrl+C and SIGTERM (what `docker stop`, `kill` and systemd send) stop the script cleanly: running remuxes are killed, their temp files are removed, and finished files are untouched. The partial summary counts every file that didn't finish as `Cancelled`.
 
-If the script is killed outright instead (`kill -9`, a power cut, a container that doesn't stop in time), a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning. They're safe to delete, since the original is only ever replaced by a finished, checked file.
+If the script is killed outright instead (`kill -9`, a power cut, a container that doesn't stop in time), a `<name>.tmp_remux.<ext>` file can be left next to the original, or a `<name>.bak.tmp_remux.<ext>` one if it was making a backup. The next run skips these with a warning. They're safe to delete, since the original is only ever replaced by a finished, checked file, and a backup only takes its real name once it's complete.
 
 ## ⚠️ Limitations
 

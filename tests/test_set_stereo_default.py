@@ -796,6 +796,42 @@ def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypat
     assert os.stat(bak).st_ino != os.stat(video).st_ino
 
 
+@pytest.mark.parametrize("replace", [True, False], ids=["replace", "number"])
+def test_a_backup_copy_that_fails_partway_leaves_no_partial_backup(tmp_path, monkeypatch,
+                                                                   replace):
+    """Where hard links aren't supported, the backup is a copy, which can
+    fail partway (a full disk). It mustn't leave a partial backup that looks
+    whole, or remove the old one it was replacing."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    (tmp_path / "v.mkv.bak").write_bytes(b"old backup")
+
+    def no_hard_links(*args):
+        raise OSError("hard links not supported")
+
+    def disk_fills_up(src, dst):
+        Path(dst).write_bytes(b"orig")
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(ssd.os, "link", no_hard_links)
+    monkeypatch.setattr(ssd.shutil, "copy2", disk_fills_up)
+
+    with pytest.raises(OSError, match="No space left"):
+        ssd.make_backup(video, replace=replace)
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["v.mkv", "v.mkv.bak"]
+    assert (tmp_path / "v.mkv.bak").read_bytes() == b"old backup"
+    assert video.read_bytes() == b"original"
+
+
+def test_a_backup_left_half_made_is_reported_as_a_leftover(tmp_path, caplog):
+    """If a run is killed while making a backup, its staging file must be
+    reported like any other leftover temp file, not processed as a video."""
+    (tmp_path / "v.mkv.bak.tmp_remux.mkv").write_bytes(b"orig")
+
+    assert list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, recursive=True)) == []
+    assert "Skipping leftover temp file from an interrupted run (safe to delete)" in caplog.text
+
+
 @pytest.mark.parametrize("answers, expected", [
     (["d"], "replace"),
     (["N"], "number"),

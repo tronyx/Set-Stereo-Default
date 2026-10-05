@@ -10,6 +10,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - Run on a relative path such as `.`, files whose names start with `-` or `@`, or contain a colon (`Movie: Part 2.mp4`), failed with errors like `Missing argument for option` or `Protocol not found`, because ffprobe, ffmpeg and mkvmerge read the bare name as an option or a web address. Every path is now made absolute before it's used, so these files are fixed like any other. File headers show the full path as a result.
 - A file that another program replaced, edited or removed while it was being remuxed (e.g. Sonarr or Radarr importing an upgrade) was overwritten by the remux of the old version, silently losing the change. The script now checks that the file is unchanged before swapping the remux in; if it isn't, the file is left as it is now, reported as `changed by another program during the remux` and counted as an `Error`, and the next run fixes the new version.
+- With `--backup` on storage without hard links (exFAT, some network shares), where the backup is a full copy, a copy that failed partway (a full disk, a dropped share) left a partial `.bak` that looked complete, and with `--existing-backups replace` had already deleted the old one. Backups are now made under a temporary name and only renamed to `.bak` once complete, so a failed copy leaves the old backup, and the original, as they were.
 
 ### Project
 

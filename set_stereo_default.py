@@ -824,13 +824,26 @@ def make_backup(path: Path, replace: bool = False) -> Path:
     is instant and needs no room while the remux runs; once the new file
     replaces the original, the backup holds the original's data on its
     own, so it takes the original's full size until it's deleted. Where
-    hard links aren't supported, a full copy is made instead."""
+    hard links aren't supported, a full copy is made instead.
+
+    The backup is made under a staging name, <name>.bak.tmp_remux.<ext>,
+    and renamed into place in one step once it's complete. So a copy that
+    fails partway (a full disk, a dropped share) never leaves a partial
+    backup that looks whole, nor removes the <name>.bak it was replacing.
+    The staging file is removed if anything goes wrong, and if the run is
+    killed outright, the next run reports it as a leftover temp file."""
     bak_path = backup_path(path, replace)
-    bak_path.unlink(missing_ok=True)
+    staging = bak_path.with_name(bak_path.name + TMP_MARKER + path.suffix)
+    staging.unlink(missing_ok=True)
     try:
-        os.link(path, bak_path)
-    except OSError:
-        shutil.copy2(path, bak_path)
+        try:
+            os.link(path, staging)
+        except OSError:
+            shutil.copy2(path, staging)
+        os.replace(staging, bak_path)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
     return bak_path
 
 
