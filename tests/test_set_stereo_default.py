@@ -1717,6 +1717,53 @@ def test_a_file_changed_during_its_remux_is_left_as_it_is_now(tmp_path, monkeypa
         assert video.read_bytes() == {"replaced": b"new download", "edited": b"retagged"}[meanwhile]
 
 
+@pytest.mark.parametrize("how", ["hard link", "copy"])
+def test_a_file_replaced_during_its_backup_is_left_as_it_is_now(tmp_path, monkeypatch, caplog,
+                                                                how):
+    """The backup is the slow step: without hard links it's a full copy,
+    which can take minutes on a share. An upgrade imported during it must
+    not be overwritten by the remux, and the backup, which holds the
+    superseded version, must be removed. With hard links the window is
+    tiny, but it's checked all the same."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    real_link, real_copystat = ssd.os.link, ssd.shutil.copystat
+
+    def upgrade_arrives():
+        upgrade = tmp_path / "upgrade.part"
+        upgrade.write_bytes(b"new download")
+        os.replace(upgrade, video)
+
+    def link_then_upgrade(src, dst):
+        real_link(src, dst)
+        upgrade_arrives()
+
+    def no_hard_links(*args):
+        raise OSError("hard links not supported")
+
+    def copy_then_upgrade(src, dst):
+        real_copystat(src, dst)
+        upgrade_arrives()
+
+    def write_remux(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        return 0, ""
+    if how == "hard link":
+        monkeypatch.setattr(ssd.os, "link", link_then_upgrade)
+    else:
+        monkeypatch.setattr(ssd.os, "link", no_hard_links)
+        monkeypatch.setattr(ssd.shutil, "copystat", copy_then_upgrade)
+    monkeypatch.setattr(ssd, "run_with_progress", write_remux)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: None)
+    plan = ssd.Plan(video, ORIGINAL_AUDIO, 2, snapshot=ssd._snapshot(video))
+
+    assert ssd.apply_mkv(plan, file_args(dry_run=False, backup=True)) is False
+
+    assert video.read_bytes() == b"new download"
+    assert "v.mkv: changed by another program during the remux" in caplog.text
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["v.mkv"]
+
+
 def test_process_file_snapshots_the_file_before_probing_it(tmp_path, probed, monkeypatch):
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")

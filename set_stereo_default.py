@@ -1025,28 +1025,54 @@ def report_ownership_failures(folder: Path | str = ".") -> None:
                 f"{where}\n\n{owners} {advice}")
 
 
+class Superseded(Exception):
+    """Raised by swap_in() when the original changed after it was probed: the
+    remux was made from the old version, and swapping it in would undo
+    whatever replaced it, such as an upgrade a media manager imported (see
+    _snapshot())."""
+
+
+def _changed_since(path: Path, snapshot: tuple[int, int] | None) -> bool:
+    """True if path no longer matches snapshot, its _snapshot() from when it
+    was probed. Never true without a snapshot to compare."""
+    return snapshot is not None and _snapshot(path) != snapshot
+
+
 def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
-            keep_dates: bool = False) -> None:
-    """Replace path with the checked remux at tmp_path. Copies the original's
-    permissions and owner (and with keep_dates, its access and modification
-    times), keeps the original as a backup if backup is set, then swaps the
-    new file in with a single atomic rename.
+            keep_dates: bool = False, snapshot: tuple[int, int] | None = None) -> None:
+    """Replace path with the checked remux at tmp_path: keep the original as
+    a backup if backup is set, copy its permissions and owner (and with
+    keep_dates, its access and modification times) onto the new file, then
+    swap the new file in with a single atomic rename.
 
     backup is None for no backup, "replace" to overwrite an existing
     <name>.bak, or "number" to number the new one if <name>.bak exists
     (see backup_path()).
 
+    snapshot, if given, is the file's _snapshot() from when it was probed,
+    and the file is checked against it twice: before the backup, so a file
+    already replaced doesn't get a pointless one, and right after it, just
+    before the swap. The backup comes first because without hard links it's
+    a full copy, which can take minutes on a network share, and a change
+    during it must be caught too. If the file changed, Superseded is raised
+    with nothing touched, except that a backup just made is removed, since
+    it holds a version that has been superseded.
+
     keep_dates is off by default because tools that spot changed files by
     size and modification time (rsync's default, some backup software)
     could skip a remux that kept both, leaving a stale copy."""
+    if _changed_since(path, snapshot):
+        raise Superseded
+    bak_path = make_backup(path, replace=(backup == "replace")) if backup else None
+    if bak_path is not None and _changed_since(path, snapshot):
+        bak_path.unlink(missing_ok=True)
+        raise Superseded
     copy_ownership(path, tmp_path)
     if keep_dates:
         st = os.stat(path)
         os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
-    if backup:
-        bak_path = make_backup(path, replace=(backup == "replace"))
-        if bak_path.suffix != ".bak":
-            log.info(f"    {path.name}: kept the original as {bak_path.name}")
+    if bak_path is not None and bak_path.suffix != ".bak":
+        log.info(f"    {path.name}: kept the original as {bak_path.name}")
     os.replace(tmp_path, path)
 
 
@@ -1106,11 +1132,12 @@ def check_and_swap_in(plan: Plan, reordered: bool, opts: Options) -> bool:
     logged once the remux has replaced the original, so a rejected remux
     never warns about a file it didn't change.
 
-    It's also not swapped in if the original changed since it was probed
-    (see _snapshot()): the remux was made from the old version, and
-    swapping it in would silently undo whatever replaced it, such as an
-    upgrade a media manager imported. The file is left as it is now, to be
-    fixed on the next run.
+    It's also not swapped in if the original changed since it was probed,
+    which swap_in() checks before the backup and again just before the swap
+    (see Superseded): the remux was made from the old version, and swapping
+    it in would silently undo whatever replaced it, such as an upgrade a
+    media manager imported. The file is left as it is now, to be fixed on
+    the next run.
 
     Nor is it swapped in unless it's a regular file. _remux_and_swap()
     removes whatever has the temp name before the remux, but a symlink
@@ -1133,12 +1160,12 @@ def check_and_swap_in(plan: Plan, reordered: bool, opts: Options) -> bool:
             log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        if plan.snapshot is not None and _snapshot(path) != plan.snapshot:
-            log.error(f"    {path.name}: changed by another program during the remux, so it's "
-                      f"left as it is now; run the script again to fix the new version")
-            tmp_path.unlink(missing_ok=True)
-            return False
-        swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates)
+        swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
+    except Superseded:
+        log.error(f"    {path.name}: changed by another program during the remux, so it's "
+                  f"left as it is now; run the script again to fix the new version")
+        tmp_path.unlink(missing_ok=True)
+        return False
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
