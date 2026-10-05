@@ -384,6 +384,41 @@ def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type
     assert contents(video) == before
 
 
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
+    """Laid out like a real release: video, stereo AAC, a subtitle, then
+    5.1 E-AC3, here with the 5.1 track as the default (ffmpeg 4.4 can't
+    write two default audio tracks, as that release had). mkvmerge writes
+    subtitles after all the audio unless told otherwise, so without
+    --track-order the remux came out reordered and was rejected. The order
+    must come through."""
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
+    srt = tmp_path / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    video = tmp_path / f"video{ext}"
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1",
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-i", str(srt),
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+                    "-map", "0", "-map", "1", "-map", "2", "-map", "3",
+                    "-c:v", "mpeg4", "-c:a:0", "aac", "-c:a:1", "eac3",
+                    "-c:s", "mov_text" if ext == ".mp4" else "srt",
+                    "-disposition:a:0", "0", "-disposition:a:1", "default",
+                    "-disposition:s:0", "default", str(video)],
+                   check=True, capture_output=True, text=True)
+    before = contents(video)
+    assert [s["type"] for s in before["streams"]] == ["video", "audio", "subtitle", "audio"], before
+    assert audio_defaults(video) == [(2, False), (6, True)]
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(2, True), (6, False)]
+    assert contents(video) == before
+
+
 AUDIO_CODECS = {
     "aac": (("aac",), "aac"),
     "e-ac3": (("eac3",), "eac3"),
@@ -565,6 +600,27 @@ def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path
     assert code == 0, output
     assert summary(output) == {"changed": 0, "unchanged": 3, "skipped": 1, "error": 0}, output
     assert {p: digest(p) for p in tmp_path.rglob("*.m*")} == digests
+
+
+def test_input_file_fixes_each_listed_folder_in_order(tmp_path):
+    """The list names the shows in reverse alphabetical order, quoted the
+    way ls shows names on a terminal, including '\\'' for an apostrophe.
+    Both must be fixed, in the list's order."""
+    need("ffmpeg", "ffprobe")
+    shows = ["Blue's Clues (1996)", "Billions"]
+    for show in shows:
+        (tmp_path / show).mkdir()
+        make_video(tmp_path / show / "S01E01.mp4", [Track(6, default=True), Track(2)])
+    listing = tmp_path / "shows.txt"
+    listing.write_text("".join("'" + (tmp_path / s).as_posix().replace("'", "'\\''") + "'\n"
+                               for s in shows), encoding="utf-8")
+
+    code, output = run_script("--input-file", listing)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 2, output
+    headers = [line for line in output.splitlines() if line.startswith("[")]
+    assert [Path(h.split("] ", 1)[1]).parent.name for h in headers] == shows, output
 
 
 @pytest.mark.parametrize("skip", [False, True], ids=["default", "--skip-symlinks"])

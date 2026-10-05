@@ -62,6 +62,10 @@ Examples:
   plays by default now:
     python3 set_stereo_default.py /path/to/videos --prefer-lang en
 
+  Work through a list of folders, one per line, in the list's order (see
+  --input-file below for how lines can be written):
+    python3 set_stereo_default.py --input-file shows.txt --dry-run
+
   Just these files, or only .mkv files and not in subfolders:
     python3 set_stereo_default.py file1.mkv file2.mp4
     python3 set_stereo_default.py /path/to/videos --ext mkv --no-recursive
@@ -995,10 +999,11 @@ def check_and_swap_in(plan: Plan, reordered: bool, args: argparse.Namespace) -> 
         raise
 
 
-def mkvmerge_audio_ids(path: Path) -> list[int] | None:
-    """Return mkvmerge's track IDs for path's audio tracks, in file order, or
-    None if mkvmerge can't read it. mkvmerge -J exits 0 even for a file it
-    doesn't recognize, but then lists no tracks, so that gives []."""
+def mkvmerge_tracks(path: Path) -> list[tuple[int, str]] | None:
+    """Return every track in path as mkvmerge sees it, (ID, type) in file
+    order, e.g. [(0, "video"), (1, "audio"), (2, "subtitles")], or None if
+    mkvmerge can't read it. mkvmerge -J exits 0 even for a file it doesn't
+    recognize, but then lists no tracks, so that gives []."""
     res = run(["mkvmerge", "-J", str(path)])
     if res.returncode != 0:
         return None
@@ -1006,7 +1011,7 @@ def mkvmerge_audio_ids(path: Path) -> list[int] | None:
         tracks = json.loads(res.stdout).get("tracks", [])
     except (json.JSONDecodeError, AttributeError):
         return None
-    return [t["id"] for t in tracks if t.get("type") == "audio"]
+    return [(t["id"], t.get("type", "")) for t in tracks]
 
 
 @functools.cache
@@ -1129,9 +1134,13 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
     - It numbers tracks its own way, which usually matches ffprobe's stream
       indexes but not always: ffmpeg skips track types it doesn't know, so
       every later index shifts. So mkvmerge's own IDs are looked up
-      (mkvmerge_audio_ids()) and matched to ffprobe's audio streams by
+      (mkvmerge_tracks()) and matched to ffprobe's audio streams by
       position, since both list audio tracks in file order. If the two
       don't see the same number of audio tracks, the file is left alone.
+    - By default it writes video tracks first, then audio, then subtitles,
+      so a file with a subtitle between two audio tracks would come out
+      reordered (and fail verify_remux()). --track-order lists every
+      track in its original order, so the order is kept.
     - The flag is set with --default-track. mkvmerge 65 renamed it
       --default-track-flag but promises to keep accepting the old name,
       and older versions only know the old one.
@@ -1149,9 +1158,10 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
       but a file with both is rare, and the older types work everywhere.
     """
     path = plan.path
-    ids = mkvmerge_audio_ids(path)
-    if ids is None or len(ids) != len(plan.streams):
-        found = "couldn't read the file" if ids is None else f"sees {len(ids)} audio track(s)"
+    tracks = mkvmerge_tracks(path)
+    ids = [track_id for track_id, kind in tracks or [] if kind == "audio"]
+    if tracks is None or len(ids) != len(plan.streams):
+        found = "couldn't read the file" if tracks is None else f"sees {len(ids)} audio track(s)"
         _announce(plan.intro)
         log.error(f"    {path.name}: mkvmerge {found}, but ffprobe sees {len(plan.streams)}; "
                   f"leaving the file alone")
@@ -1161,7 +1171,8 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
     if (any(s.mimetype.lower() in LEGACY_FONT_MIME_TYPES for s in plan.layout)
             and mkvmerge_can_keep_legacy_font_types()):
         cmd.append("--enable-legacy-font-mime-types")
-    cmd += ["-o", str(plan.tmp_path)]
+    cmd += ["-o", str(plan.tmp_path),
+            "--track-order", ",".join(f"0:{track_id}" for track_id, _ in tracks)]
     for s, track_id in zip(plan.streams, ids, strict=True):
         flag = "yes" if s.index == plan.target_index else "no"
         cmd += ["--default-track", f"{track_id}:{flag}"]
@@ -1332,11 +1343,12 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
 
 def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
                skip_symlinks: bool = False, follow_symlinks: bool = False) -> Iterator[Path]:
-    """Yield every file in paths with an extension in exts. Files are used
-    as given; folders are searched (into subfolders if recursive). The
-    extension is checked before anything else, and files found in a folder
-    are checked using what the folder listing already says about them (see
-    _walk()), so searching costs little beyond listing each folder.
+    """Yield every file in paths with an extension in exts, path by path in
+    the order given, each path's files sorted. Files are used as given;
+    folders are searched (into subfolders if recursive). The extension is
+    checked before anything else, and files found in a folder are checked
+    using what the folder listing already says about them (see _walk()), so
+    searching costs little beyond listing each folder.
 
     A symlinked file is yielded as the file it points to, so that file gets
     fixed and the link keeps working; replacing the link itself would turn
@@ -1344,7 +1356,7 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
     instead. Symlinked subfolders are only searched with follow_symlinks
     (see _walk()); a folder named in paths is always searched. A file
     reached by more than one path (through links, or given twice) is only
-    yielded once.
+    yielded once, with the first path that reaches it.
 
     A run killed outright (kill -9, a reboot) can leave a temp file such as
     "name.mkv.tmp_remux.mkv", which still ends in .mkv. Those are skipped
@@ -1372,11 +1384,13 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
         else:
             log.warning(f"Skipping {p}: not a file or directory")
             continue
+        here = []
         for candidate in candidates:
             found = _video_file(*candidate, exts, skip_symlinks)
             if found and found[1] not in seen:
                 seen.add(found[1])
-                yield found[0]
+                here.append(found[0])
+        yield from sorted(here)
 
 
 def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, exts: set[str],
@@ -1438,21 +1452,74 @@ def ask_about_existing_backups(count: int) -> str:
             return choices[answer]
 
 
+def _input_path(line: str, base: Path) -> str:
+    """One line of an --input-file as a path, relative to base if it isn't
+    absolute. Lists come written in different ways, so the line is tried as
+    it is first (a plain path, spaces and all, or a Windows path, whose
+    backslashes a shell would eat), then the way a shell would read it: in
+    single or double quotes, with '\\'' for an apostrophe (how ls shows names
+    on a terminal), or with backslash-escaped spaces. A leading ~ is your
+    home folder. The first reading that exists is used. If none does, the
+    path is returned anyway, unquoted if it was quoted, so the warning that
+    it doesn't exist names it the way you'd recognize it."""
+    readings = [line]
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        words = []
+    if len(words) == 1 and words[0] != line:
+        readings.append(words[0])
+    readings += [os.path.expanduser(r) for r in readings if r.startswith("~")]
+    candidates = [str(base / r) for r in readings]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+    quoted = line[0] in "'\"" and len(words) == 1
+    return candidates[1] if quoted else candidates[0]
+
+
+def read_input_file(name: str) -> list[str]:
+    """The paths listed in the file name, one per line in order, or on
+    standard input if name is "-" (see _input_path()). Relative paths are
+    taken from the file's folder, or the current folder for standard input,
+    so a list kept next to your videos can name them by their folders.
+    Blank lines and lines starting with # are skipped. The text is read as
+    UTF-8, ignoring a byte order mark and Windows line endings; a name that
+    isn't valid UTF-8 is kept byte for byte, so it still matches the file
+    on Linux. Raises OSError if the file can't be read."""
+    if name == "-":
+        data, base = sys.stdin.buffer.read(), Path.cwd()
+    else:
+        data, base = Path(name).read_bytes(), Path(name).parent
+    paths = []
+    for line in data.decode("utf-8-sig", "surrogateescape").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            paths.append(_input_path(line, base))
+    return paths
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse and check the command line (sys.argv's, unless argv is given).
     Invalid options exit with argparse's usage message and code 2.
 
-    At least one path is required, except in the Docker image, where it
-    defaults to DOCKER_VIDEOS, the folder the image documents mounting your
-    videos at. The image itself runs --help when given no arguments at all,
-    so a bare docker run never starts changing files."""
+    The paths to process are the ones given on the command line, then the
+    ones listed in --input-file (see read_input_file()). At least one is
+    needed, except in the Docker image, where with neither they default to
+    DOCKER_VIDEOS, the folder the image documents mounting your videos at.
+    The image itself runs --help when given no arguments at all, so a bare
+    docker run never starts changing files."""
     in_docker = _in_docker()
     paths_help = "Video files and folders to process"
-    if in_docker:
-        paths_help += f" (default: {DOCKER_VIDEOS})"
+    paths_help += f" (default: {DOCKER_VIDEOS})" if in_docker else " (or use --input-file)"
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("paths", nargs="*" if in_docker else "+", help=paths_help)
+    ap.add_argument("paths", nargs="*", help=paths_help)
+    ap.add_argument("--input-file", default=None, metavar="FILE",
+                    help="Also process the paths listed in FILE, one per line, in order "
+                         "(- reads them from standard input). Each path can be written as "
+                         "is or quoted as a shell would; a relative one is taken from FILE's "
+                         "folder. Blank lines and lines starting with # are skipped")
     ap.add_argument("--ext", default=None,
                     help="Comma-separated extensions to process, replacing the default list "
                          "(default: mkv,webm,mp4,m4v,mov,avi)")
@@ -1503,7 +1570,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "Above 1, only the overall progress bar is shown, and a file's "
                          "[i/N] header is repeated when its lines follow another file's")
     args = ap.parse_args(argv)
-    if not args.paths:
+    if args.input_file is not None:
+        try:
+            args.paths = [*args.paths, *read_input_file(args.input_file)]
+        except OSError as exc:
+            ap.error(f"couldn't read --input-file {args.input_file}: {exc.strerror or exc}")
+    elif not args.paths:
+        if not in_docker:
+            ap.error("give at least one path to process, or --input-file")
         args.paths = [DOCKER_VIDEOS]
 
     if args.jobs < 1:
@@ -1526,14 +1600,16 @@ def _tell(args: argparse.Namespace, line: str) -> None:
 
 
 def find_files(args: argparse.Namespace) -> list[Path]:
-    """Every file to process, sorted: the ones under args.paths with an
-    extension from --ext (or DEFAULT_EXTS). See iter_files()."""
+    """Every file to process: the ones under args.paths with an extension
+    from --ext (or DEFAULT_EXTS), in the order the paths were given, each
+    path's files sorted. So listing one show before another processes it
+    first. See iter_files()."""
     if args.ext:
         exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")}
     else:
         exts = DEFAULT_EXTS
-    return sorted(set(iter_files(args.paths, exts, not args.no_recursive,
-                                 args.skip_symlinks, args.follow_symlinks)))
+    return list(iter_files(args.paths, exts, not args.no_recursive,
+                           args.skip_symlinks, args.follow_symlinks))
 
 
 def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:

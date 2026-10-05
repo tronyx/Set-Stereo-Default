@@ -202,22 +202,26 @@ jobs:
           LD_LIBRARY_PATH=/opt/mkvtoolnix/usr/lib exec /opt/mkvtoolnix/usr/bin/mkvmerge "$@"
           WRAPPER
           chmod +x /usr/local/bin/mkvmerge
-      # https://github.com/BtbN/FFmpeg-Builds keeps builds of the newest release
-      # branches (e.g. ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz) and drops old
-      # ones, so pick the highest version listed rather than pinning one.
+      # https://github.com/BtbN/FFmpeg-Builds publishes builds of the newest
+      # release branches in each day's release (e.g. a file named
+      # ffmpeg-n9.0.2-22-g46d8f462ee-linux64-gpl-9.0.tar.xz), so pick the
+      # highest version in the newest release rather than pinning one. File and
+      # folder names have changed before, so the download link is taken as
+      # listed and ffmpeg is found wherever the archive puts it.
       - name: Install static ffmpeg
         if: matrix.static-ffmpeg
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          build=$(curl -sSLf -H "Authorization: Bearer $GH_TOKEN" \
+          url=$(curl -sSLf -H "Authorization: Bearer $GH_TOKEN" \
               https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
-            | grep -o 'ffmpeg-n[0-9.]*-latest-linux64-gpl-[0-9.]*\.tar\.xz' | sort -uV | tail -n 1)
-          test -n "$build" || { echo "No ffmpeg release build found"; exit 1; }
-          echo "Using $build"
-          curl -sSLf "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$build" \
-            | tar -xJ -C /opt
-          echo "/opt/${build%.tar.xz}/bin" >> "$GITHUB_PATH"
+            | grep -o 'https://[^"]*/ffmpeg-n[0-9][^"/]*-linux64-gpl-[0-9.]*\.tar\.xz' | sort -uV | tail -n 1)
+          test -n "$url" || { echo "No ffmpeg release build found"; exit 1; }
+          echo "Using $url"
+          curl -sSLf "$url" | tar -xJ -C /opt
+          bin=$(find /opt -maxdepth 3 -type f -name ffmpeg -path '*/bin/*' | head -n 1)
+          test -n "$bin" || { echo "No ffmpeg in the download"; exit 1; }
+          dirname "$bin" >> "$GITHUB_PATH"
       - name: Tool versions
         run: |
           ffmpeg -version | head -n 1
@@ -251,14 +255,17 @@ jobs:
         run: |
           tools="$(cygpath -u "$RUNNER_TEMP")/tools"
           mkdir -p "$tools" && cd "$tools"
-          build=$(curl -sSLf -H "Authorization: Bearer $GH_TOKEN" \
+          # The same newest ffmpeg release build as the static-build job above.
+          url=$(curl -sSLf -H "Authorization: Bearer $GH_TOKEN" \
               https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
-            | grep -o 'ffmpeg-n[0-9.]*-latest-win64-gpl-[0-9.]*\.zip' | sort -uV | tail -n 1)
-          test -n "$build" || { echo "No ffmpeg release build found"; exit 1; }
-          echo "Using $build"
-          curl -sSLf -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$build"
+            | grep -o 'https://[^"]*/ffmpeg-n[0-9][^"/]*-win64-gpl-[0-9.]*\.zip' | sort -uV | tail -n 1)
+          test -n "$url" || { echo "No ffmpeg release build found"; exit 1; }
+          echo "Using $url"
+          curl -sSLf -o ffmpeg.zip "$url"
           unzip -q ffmpeg.zip
-          cygpath -w "$tools/${build%.zip}/bin" >> "$GITHUB_PATH"
+          bin=$(find "$tools" -maxdepth 3 -type f -name ffmpeg.exe -path '*/bin/*' | head -n 1)
+          test -n "$bin" || { echo "No ffmpeg in the download"; exit 1; }
+          cygpath -w "$(dirname "$bin")" >> "$GITHUB_PATH"
           # Windows' own tar can unpack the .7z (Git Bash's tar can't).
           version=$(curl -sSLf https://mkvtoolnix.download/latest-release.xml \
             | grep -o '<latest-source>.*</latest-source>' | grep -o '<version>[^<]*' | cut -d'>' -f2)

@@ -2,6 +2,7 @@
 mkvmerge: anything that would call those tools is replaced with a stand-in,
 and subprocess behavior is exercised with small Python child processes."""
 
+import io
 import json
 import logging
 import os
@@ -18,16 +19,22 @@ import pytest
 
 import set_stereo_default as ssd
 
-real_mkvmerge_audio_ids = ssd.mkvmerge_audio_ids
+real_mkvmerge_tracks = ssd.mkvmerge_tracks
 
 
 @pytest.fixture(autouse=True)
 def mkvmerge_ids(monkeypatch):
-    """mkvmerge never runs in these tests, so mkvmerge_audio_ids() reports
-    audio track IDs 1 and 2, the indexes the ffprobe stand-ins use. Set
-    mkvmerge_ids.value to report something else."""
+    """mkvmerge never runs in these tests, so mkvmerge_tracks() reports a
+    video track (ID 0) and audio tracks with IDs 1 and 2, the indexes the
+    ffprobe stand-ins use. Set mkvmerge_ids.value to other audio track IDs,
+    or to None to make mkvmerge fail to read the file."""
     stand_in = types.SimpleNamespace(value=[1, 2])
-    monkeypatch.setattr(ssd, "mkvmerge_audio_ids", lambda path: stand_in.value)
+
+    def tracks(path):
+        if stand_in.value is None:
+            return None
+        return [(0, "video"), *((i, "audio") for i in stand_in.value)]
+    monkeypatch.setattr(ssd, "mkvmerge_tracks", tracks)
     return stand_in
 
 
@@ -287,7 +294,92 @@ def test_a_path_is_required_outside_the_docker_image(capsys):
         ssd.parse_args(["--dry-run"])
 
     assert exit_info.value.code == 2
-    assert "the following arguments are required: paths" in capsys.readouterr().err
+    assert "give at least one path to process, or --input-file" in capsys.readouterr().err
+
+
+SHOWS = ["Big Sky (2020)", "Billions", "Blue's Clues (1996)", "Black Bird", "Black Sails",
+         "Blue Planet II", "Bloodline"]
+"""Show folders for the --input-file tests, with the spaces, brackets and
+apostrophes real names have."""
+
+
+@pytest.fixture
+def shows(tmp_path):
+    """tmp_path/TV Shows/<each of SHOWS>, created. Returns the TV Shows folder."""
+    folder = tmp_path / "TV Shows"
+    for show in SHOWS:
+        (folder / show).mkdir(parents=True)
+    return folder
+
+
+def test_input_file_reads_a_path_however_its_written(shows, tmp_path, monkeypatch):
+    """Every way a list line can come: quoted as ls shows names on a
+    terminal (with '\\'' for an apostrophe), double quoted, plain with
+    spaces, plain with an apostrophe (which a shell would reject), with
+    backslash-escaped spaces, relative to the list's folder, from ~, and
+    with a missing path, which comes back unquoted so its warning is
+    recognizable. Blank lines and comments are skipped; the list has a byte
+    order mark and Windows line endings."""
+    root = shows.as_posix()
+    home = tmp_path / "home"
+    (home / "Bloodline").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    lines = [
+        "# Shows to fix",
+        f"'{root}/Big Sky (2020)'",
+        f'"{root}/Billions"',
+        f"'{root}/Blue'\\''s Clues (1996)'",
+        "",
+        f"   {shows / 'Black Bird'}   ",
+        "TV\\ Shows/Black\\ Sails",
+        "TV Shows/Blue Planet II",
+        str(shows / "Blue's Clues (1996)"),
+        "~/Bloodline",
+        f"'{root}/Missing Show'",
+    ]
+    listing = tmp_path / "shows.txt"
+    listing.write_bytes("﻿".encode() + "\r\n".join(lines).encode("utf-8") + b"\r\n")
+
+    found = [Path(p) for p in ssd.read_input_file(str(listing))]
+
+    assert found == [shows / "Big Sky (2020)", shows / "Billions", shows / "Blue's Clues (1996)",
+                     shows / "Black Bird", shows / "Black Sails", shows / "Blue Planet II",
+                     shows / "Blue's Clues (1996)", home / "Bloodline", shows / "Missing Show"]
+
+
+def test_input_file_from_standard_input_is_relative_to_the_current_folder(shows, monkeypatch):
+    monkeypatch.chdir(shows)
+    monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"Billions\n'Black Bird'\n")))
+
+    assert [Path(p) for p in ssd.read_input_file("-")] == [shows / "Billions", shows / "Black Bird"]
+
+
+def test_input_file_paths_come_after_the_command_lines(shows):
+    (shows / "shows.txt").write_text("Black Bird\nBillions\n", encoding="utf-8")
+
+    args = ssd.parse_args([str(shows / "Bloodline"), "--input-file", str(shows / "shows.txt")])
+
+    assert [Path(p) for p in args.paths] == [shows / "Bloodline", shows / "Black Bird",
+                                             shows / "Billions"]
+
+
+def test_an_input_file_that_cant_be_read_is_an_error(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.parse_args(["--input-file", str(tmp_path / "missing.txt")])
+
+    assert exit_info.value.code == 2
+    assert f"couldn't read --input-file {tmp_path / 'missing.txt'}" in capsys.readouterr().err
+
+
+def test_an_input_file_replaces_the_docker_default(shows, monkeypatch):
+    """With a list, only the list is processed, never the whole of /videos."""
+    monkeypatch.setenv(ssd.IN_DOCKER_VAR, "1")
+    (shows / "shows.txt").write_text("Billions\n", encoding="utf-8")
+
+    args = ssd.parse_args(["--input-file", str(shows / "shows.txt"), "--dry-run"])
+
+    assert [Path(p) for p in args.paths] == [shows / "Billions"]
 
 
 @pytest.mark.parametrize("value", ["english", "xx", "", "e"])
@@ -455,6 +547,21 @@ def test_ext_takes_extensions_however_theyre_written(tmp_path, ext, found):
     args = types.SimpleNamespace(paths=[str(tmp_path)], ext=ext, no_recursive=False,
                                  skip_symlinks=False, follow_symlinks=False)
     assert [p.name for p in ssd.find_files(args)] == found
+
+
+def test_files_come_path_by_path_in_the_order_given(tmp_path):
+    """Listing one show before another processes it first; within each
+    path, files are sorted. A file reached again later isn't repeated."""
+    for name in ["Show B/e02.mkv", "Show B/e01.mkv", "Show A/e02.mkv", "Show A/e01.mkv"]:
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).write_text("x")
+    paths = [tmp_path / "Show B", tmp_path / "Show A", tmp_path / "Show B" / "e01.mkv"]
+    args = types.SimpleNamespace(paths=paths, ext=None, no_recursive=False, skip_symlinks=False,
+                                 follow_symlinks=False)
+
+    found = [p.relative_to(tmp_path).as_posix() for p in ssd.find_files(args)]
+
+    assert found == ["Show B/e01.mkv", "Show B/e02.mkv", "Show A/e01.mkv", "Show A/e02.mkv"]
 
 
 def test_iter_files_accepts_files_passed_directly(library):
@@ -1884,6 +1991,22 @@ def test_mkvmerge_gets_its_own_track_ids_when_they_differ_from_ffprobes(tmp_path
     assert dry_run_flags(caplog) == ["2:no", "3:yes"]
 
 
+def test_mkvmerge_keeps_the_original_track_order(tmp_path, caplog, monkeypatch):
+    """mkvmerge writes video, then audio, then subtitles unless told
+    otherwise, so a subtitle between two audio tracks would move to the end
+    and the remux be rejected. --track-order lists every track as it was."""
+    caplog.set_level("INFO")
+    monkeypatch.setattr(ssd, "mkvmerge_tracks", lambda path: [
+        (0, "video"), (1, "audio"), (2, "subtitles"), (3, "audio")])
+    streams = [audio(1, 2, default=True), audio(3, 6, "eac3", default=True)]
+
+    assert ssd.apply_mkv(ssd.Plan(tmp_path / "v.mkv", streams, 1), file_args())
+
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    assert args[args.index("--track-order") + 1] == "0:0,0:1,0:2,0:3"
+    assert dry_run_flags(caplog) == ["1:yes", "3:no"]
+
+
 @pytest.mark.parametrize("ids, message", [
     ([1], "mkvmerge sees 1 audio track(s), but ffprobe sees 2"),
     ([], "mkvmerge sees 0 audio track(s), but ffprobe sees 2"),
@@ -1904,15 +2027,15 @@ def test_mkvmerge_and_ffprobe_disagreeing_leaves_the_file_alone(tmp_path, caplog
 @pytest.mark.parametrize("returncode, stdout, expected", [
     (0, json.dumps({"tracks": [{"id": 0, "type": "video"}, {"id": 1, "type": "audio"},
                                {"id": 2, "type": "subtitles"}, {"id": 3, "type": "audio"}]}),
-     [1, 3]),
+     [(0, "video"), (1, "audio"), (2, "subtitles"), (3, "audio")]),
     (0, json.dumps({"container": {"recognized": False}, "errors": []}), []),
     (2, "", None),
     (0, "not json", None),
-], ids=["audio tracks only", "unrecognized file", "mkvmerge failed", "bad output"])
-def test_mkvmerge_audio_ids(monkeypatch, returncode, stdout, expected):
+], ids=["every track in order", "unrecognized file", "mkvmerge failed", "bad output"])
+def test_mkvmerge_tracks(monkeypatch, returncode, stdout, expected):
     monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
         returncode=returncode, stdout=stdout, stderr=""))
-    assert real_mkvmerge_audio_ids(Path("v.mkv")) == expected
+    assert real_mkvmerge_tracks(Path("v.mkv")) == expected
 
 
 SLOW_CMD = python_cmd("import time\n"
@@ -2258,14 +2381,14 @@ def test_jobs_dry_run_shows_each_files_header_once(tmp_path, monkeypatch, capsys
     make_videos(tmp_path, 2)
     barrier = threading.Barrier(2, timeout=5)
 
-    def slow_ids(path):
+    def slow_tracks(path):
         barrier.wait()
-        return [1, 2]
+        return [(0, "video"), (1, "audio"), (2, "audio")]
 
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "probe_streams",
                         lambda path: (list(ORIGINAL_AUDIO), 100.0))
-    monkeypatch.setattr(ssd, "mkvmerge_audio_ids", slow_ids)
+    monkeypatch.setattr(ssd, "mkvmerge_tracks", slow_tracks)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
                                       "--jobs", "2", "--dry-run"])
     ssd.main()

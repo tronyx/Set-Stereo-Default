@@ -102,9 +102,34 @@ python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
 python3 set_stereo_default.py "/path/to/videos"
 ```
 
-Folders are searched recursively. You can also pass individual files, or a mix of files and folders. A path that doesn't exist, such as a mistyped one, is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
+Folders are searched recursively. You can also pass individual files, or a mix of files and folders. They're processed in the order you give them, each folder's files in alphabetical order, so you can put the shows you care about most first. A path that doesn't exist, such as a mistyped one, is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
 
 On Windows, type `py` instead of `python3`.
+
+### 📃 A list of folders
+
+To work through many shows or movies, list their folders in a text file, one per line, and pass it with `--input-file`:
+
+```text
+# Shows to fix this week
+/mnt/data/media/Videos/TV Shows/Awesome Show 1 (2020)
+'/mnt/data/media/Videos/TV Shows/Someone'\''s Awesome Show (1996)'
+TV Shows/Cartoons
+```
+
+```bash
+python3 set_stereo_default.py --input-file shows.txt --dry-run
+```
+
+The folders are processed in the list's order, after any paths on the command line. Each line can be:
+
+- a plain path, spaces and all;
+- a path quoted the way a shell or `ls` shows it, in single or double quotes (with `'\''` for an apostrophe) or with backslash-escaped spaces, so you can paste a listing straight from your terminal;
+- relative to the list file's folder, like `TV Shows/Cartoons` above, or starting with `~` for your home folder.
+
+Blank lines and lines starting with `#` are skipped. A path that doesn't exist is reported and skipped, and the rest still run.
+
+To pipe a list in instead, use `--input-file -`, e.g. `ls -d "/mnt/data/media/Videos/TV Shows/B"* | python3 set_stereo_default.py --input-file - --dry-run`. The [backup question](#-backups) can't be asked then, so new backups are numbered.
 
 ## 🐳 Docker
 
@@ -144,6 +169,14 @@ With nothing at all after the image name, the image shows the built-in help inst
 docker run --rm -it -v "/mnt/media/Movies:/videos/Movies" -v "/mnt/media/TV Shows:/videos/TV Shows" tronyx/set-stereo-default --dry-run
 ```
 
+**A list of folders.** Keep the [list](#-a-list-of-folders) in the folder you mount, with paths relative to it, and give its path inside the container:
+
+```bash
+docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default --input-file /videos/shows.txt --dry-run
+```
+
+A list of your computer's own paths, like `/mnt/data/media/...`, works too if you mount that folder at the same path: `-v "/mnt/data/media:/mnt/data/media"`. To pipe a list in, use `-i` instead of `-it`.
+
 **Running as the files' owner.** The container runs as root by default, which lets it give every remuxed file its original owner on a local disk. On an NFS share, root usually becomes `nobody` and can't change owners (see [Permissions and ownership](#-permissions-and-ownership)), so run the container as the user that owns your videos instead. `id -u` and `id -g` show your own IDs, and `stat -c '%u:%g' "/path/to/a/video.mkv"` shows a file's:
 
 ```bash
@@ -179,6 +212,7 @@ docker run --rm -v "/path/to/videos:/videos" tronyx/set-stereo-default --log-fil
 | `--backup` | Keep each original as `<name>.bak`. Each backup takes as much space as the original (see [Disk space](#-disk-space)) |
 | `--existing-backups MODE` | With `--backup`, what to do when `<name>.bak` already exists: `replace` it, or `number` the new one (`.bak.1`, `.bak.2`, ...). Without this you're asked once (see [Backups](#-backups)) |
 | `--prefer-lang LANG` | Language to use whenever a file has a stereo track in it, as a 2- or 3-letter code (`en`, `eng`, `de`, `ger` and `deu` all work). Also picks between several stereo tracks. Files without one are handled as usual, in the language of the track that plays by default now |
+| `--input-file FILE` | Also process the paths listed in `FILE`, one per line, in order; `-` reads them from a pipe (see [A list of folders](#-a-list-of-folders)) |
 | `--jobs N` | Work on up to `N` files at once (default: `1`) |
 | `--log-file PATH` | Write the details to a file. Warnings, errors, the progress bar and the summary still show on the console |
 | `--ext EXT1,EXT2` | Extensions to process (default: `mkv,webm,mp4,m4v,mov,avi`). This replaces the default list, so list every extension you want |
