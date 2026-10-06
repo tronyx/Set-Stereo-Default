@@ -13,8 +13,10 @@ import os
 import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -584,6 +586,133 @@ def test_a_random_layout_is_fixed_or_left_alone(tmp_path, case):
     assert defaults == [i == position for i in range(len(defaults))], f"{layout}\n{output}"
     if ext == ".mkv":
         assert mkvmerge_defaults(video) == defaults, layout
+
+
+STOP_CASES = max(10, FUZZ_CASES // 3)
+"""How many random stops to try: ten on every push, more on the weekly run."""
+
+STOP_REASONS = {signal.SIGINT: "Interrupted by user (Ctrl+C)", signal.SIGTERM: "Stopped by SIGTERM"}
+"""What the script says it was stopped by, for each signal it handles."""
+
+FIXED = [(6, False), (2, True)]
+"""audio_defaults() of a stop_files file once the script has fixed it."""
+
+
+@dataclass
+class StopFiles:
+    """What the stop cases start from: pristine copies of the files, each
+    one's digest and contents as made, and how long one uninterrupted run
+    over them takes."""
+    folder: Path
+    digests: dict
+    contents: dict
+    seconds: float
+
+
+@pytest.fixture(scope="module")
+def stop_files(tmp_path_factory):
+    """Six files that each need a remux, three MKV and three MP4, long
+    enough that each remux takes a measurable time. Made once for all the
+    stop cases, and timed once so the stops can be spread over a run."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    folder = tmp_path_factory.mktemp("pristine")
+    for i in range(6):
+        make_video(folder / f"movie{i}{'.mkv' if i % 2 else '.mp4'}",
+                   [Track(6, default=True), Track(2)], seconds=8)
+    files = sorted(folder.iterdir())
+    timing = tmp_path_factory.mktemp("timing")
+    for f in files:
+        shutil.copy2(f, timing / f.name)
+    started = time.monotonic()
+    code, output = run_script(timing)
+    seconds = time.monotonic() - started
+    assert code == 0 and summary(output)["changed"] == len(files), output
+    return StopFiles(folder, {f.name: digest(f) for f in files},
+                     {f.name: contents(f) for f in files}, seconds)
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows has no SIGTERM, and Ctrl+C can't be sent to one process")
+@pytest.mark.parametrize("case", range(STOP_CASES),
+                         ids=[f"seed={FUZZ_SEED}-{i}" for i in range(STOP_CASES)])
+def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files, case):
+    """Ctrl+C or SIGTERM at a random moment of a run, sent the way a
+    terminal does (to the script and its remux alike) or the way docker
+    stop and kill do (to the script alone), with a random --jobs and
+    sometimes --backup. Wherever it lands, the script must exit with that
+    signal's code and a partial summary, or with 0 if it had finished, and
+    never with a traceback; leave no temp file; leave every file either as
+    it was or properly fixed, and every backup a copy of the original; and
+    a second run must finish the job. Replay a failing case with
+    SSD_FUZZ_SEED set to the seed in its ID."""
+    rng = random.Random(f"{FUZZ_SEED}-stop-{case}")
+    folder = tmp_path / "videos"
+    shutil.copytree(stop_files.folder, folder)
+    jobs = rng.choice([1, 1, 2, 3])
+    backup = ["--backup", "--existing-backups", "replace"] if rng.random() < 0.3 else []
+    sig = rng.choice([signal.SIGINT, signal.SIGTERM])
+    whole_group = rng.random() < 0.5
+    delay = rng.uniform(0, stop_files.seconds)
+    how = (f"{sig.name} to the {'whole group' if whole_group else 'script only'} {delay:.2f}s "
+           f"after the search, --jobs {jobs}{' --backup' if backup else ''}")
+
+    proc = subprocess.Popen([sys.executable, "-u", str(SCRIPT), "--no-progress", "--jobs", str(jobs),
+                             *backup, str(folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, start_new_session=True)
+    lines = []
+    reader = threading.Thread(target=lambda: lines.extend(iter(proc.stdout.readline, "")), daemon=True)
+    reader.start()
+    try:
+        deadline = time.monotonic() + 60
+        while not any("Found " in line and "file(s)" in line for line in list(lines)):
+            assert proc.poll() is None and time.monotonic() < deadline, how + "\n" + "".join(lines)
+            time.sleep(0.01)
+        time.sleep(delay)
+        stopped = proc.poll() is None
+        if stopped:
+            (os.killpg if whole_group else os.kill)(proc.pid, sig)
+        proc.wait(timeout=60)
+    finally:
+        proc.kill()
+    reader.join(timeout=10)
+    code, output = proc.returncode, "".join(lines)
+    counts = summary(output)
+    report = f"{how}\n{output}"
+
+    assert "Traceback" not in output, report
+    assert not list(folder.glob("*.tmp_remux*")), f"temp file left behind\n{report}"
+    if code == 0:
+        assert counts == {"changed": 6, "unchanged": 0, "skipped": 0, "error": 0}, report
+        assert "Partial" not in output, report
+    else:
+        assert stopped and code == 128 + sig, report
+        assert STOP_REASONS[sig] in output and "(Partial -- interrupted)" in output, report
+        assert counts["error"] == 0 and counts["skipped"] == 0, report
+    fixed = 0
+    for name, original in stop_files.digests.items():
+        if digest(folder / name) == original:
+            continue
+        assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{report}"
+        assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{report}"
+        fixed += 1
+    assert fixed >= counts["changed"], f"{counts['changed']} counted as changed, {fixed} fixed\n{report}"
+    for bak in folder.glob("*.bak"):
+        name = bak.name[:-len(".bak")]
+        assert backup and digest(bak) == stop_files.digests[name], f"{bak.name} isn't the original\n{report}"
+
+    code, output = run_script(folder, "--jobs", str(jobs), *backup)
+    report = f"{how}, then a second run\n{output}"
+    assert code == 0, report
+    counts = summary(output)
+    assert counts["changed"] + counts["unchanged"] == 6 and counts["changed"] + fixed == 6, report
+    assert counts["error"] == 0 and counts["skipped"] == 0, report
+    assert not list(folder.glob("*.tmp_remux*")), f"temp file left behind\n{report}"
+    for name in stop_files.digests:
+        assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{report}"
+        assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{report}"
+        if backup:
+            bak = folder / f"{name}.bak"
+            assert digest(bak) == stop_files.digests[name], f"{bak.name} isn't the original\n{report}"
 
 
 AUDIO_CODECS = {

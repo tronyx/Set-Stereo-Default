@@ -2077,7 +2077,8 @@ def main(argv: list[str] | None = None) -> int:
     already killed every remux and each one has removed its temp file.
     What's left is a partial summary that counts unfinished files as
     cancelled. A stop while looking for files, or at the backup question,
-    ends the run with no summary, since nothing has changed. Files that
+    ends the run with no summary, since nothing has changed. Once every
+    file is done, a stop is ignored: only the summary is left. Files that
     couldn't be given their original owner are reported in one warning
     just before the summary (report_ownership_failures()), with the full
     list saved next to --log-file, or in the current folder.
@@ -2087,9 +2088,9 @@ def main(argv: list[str] | None = None) -> int:
     opts.backup_mode like any other option.
 
     Call it from the main thread, since it installs the Ctrl+C and SIGTERM
-    handlers, which Python only allows there, and one run at a time: runs
-    share the module's state, which each one resets as it starts (see
-    _reset_run_state()).
+    handlers, which Python only allows there (the previous handlers are put
+    back when it returns), and one run at a time: runs share the module's
+    state, which each one resets as it starts (see _reset_run_state()).
     """
     _reset_run_state()
     opts = parse_args(argv)
@@ -2098,44 +2099,70 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"Can't write --log-file {opts.log_file}: {exc.strerror or exc}", file=sys.stderr)
         return 2
-    signal.signal(signal.SIGINT, _stop_handler)
-    signal.signal(signal.SIGTERM, _stop_handler)
-
-    if not check_tools(need_mkvmerge=False):
-        return 1
+    previous = {sig: signal.signal(sig, _stop_handler) for sig in (signal.SIGINT, signal.SIGTERM)}
     try:
-        files = find_files(opts)
-    except KeyboardInterrupt as exc:
-        signum, reason = _stop_reason(exc)
-        log.error(f"{reason} while looking for files. No files were changed.")
-        return 128 + signum
-    if not files:
-        log.error("No matching files found.")
-        return 1
-    if any(f.suffix.lower() in MKV_EXTS for f in files) and not check_tools(need_mkvmerge=True):
-        return 1
-    _tell(opts, f"Found {len(files)} file(s){' (dry run)' if opts.dry_run else ''}.")
+        return _run(opts)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
-    if opts.backup and not opts.dry_run:
-        try:
-            answer = choose_backup_mode(opts, files)
-        except KeyboardInterrupt as exc:
-            signum, reason = _stop_reason(exc)
-            print()
-            log.error(f"{reason}. No files were changed.")
-            return 128 + signum
-        if answer == "quit":
-            _tell(opts, "Quit before changing any files.")
-            return 0
-        opts = dataclasses.replace(opts, existing_backups=answer)
 
+def _ignore_stops() -> None:
+    """Ignore Ctrl+C and SIGTERM from now on: the files are done, or a stop
+    is already being reported, and only the summary is left. Otherwise a
+    signal now would raise Stopped wherever the main thread happens to be
+    and end the run in a traceback.
+
+    Run as a program, this is also set before main() starts, so the
+    handlers main() puts back when it returns are these, and a signal
+    during the interpreter's own exit is ignored too, rather than ending it
+    with Python's default KeyboardInterrupt."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def _run(opts: Options) -> int:
+    """The run behind main(), once the stop handlers are installed: the
+    search, the backup question, the files, the summary. One try covers
+    all of it, so a stop can't arrive between two of them and go
+    unhandled; stage says what it interrupted, which decides the message
+    and whether there's a partial summary to print."""
+    files: list[Path] = []
     stats: Counter[Outcome] = Counter()
     list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
+    stage = "search"
     try:
+        if not check_tools(need_mkvmerge=False):
+            return 1
+        files = find_files(opts)
+        if not files:
+            log.error("No matching files found.")
+            return 1
+        if any(f.suffix.lower() in MKV_EXTS for f in files) and not check_tools(need_mkvmerge=True):
+            return 1
+        _tell(opts, f"Found {len(files)} file(s){' (dry run)' if opts.dry_run else ''}.")
+
+        if opts.backup and not opts.dry_run:
+            stage = "question"
+            answer = choose_backup_mode(opts, files)
+            if answer == "quit":
+                _tell(opts, "Quit before changing any files.")
+                return 0
+            opts = dataclasses.replace(opts, existing_backups=answer)
+
+        stage = "files"
         process_all(files, opts, stats)
+        _ignore_stops()
     except KeyboardInterrupt as exc:
+        _ignore_stops()
         signum, reason = _stop_reason(exc)
+        if stage == "search":
+            log.error(f"{reason} while looking for files. No files were changed.")
+            return 128 + signum
         print()
+        if stage == "question":
+            log.error(f"{reason}. No files were changed.")
+            return 128 + signum
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
@@ -2148,4 +2175,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    _ignore_stops()
     sys.exit(main())

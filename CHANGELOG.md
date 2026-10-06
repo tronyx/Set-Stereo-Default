@@ -6,9 +6,14 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+### Fixed
+
+- Ctrl+C or SIGTERM arriving once every file was done, while the summary was being printed, or in the moment between the search and the first file, ended the run with a Python traceback instead of the summary. A stop is now ignored once the files are done, since only the summary is left, and one that lands anywhere else in the run is reported like any other stop. The script also puts back the signal handlers it found when it returns, for programs that call it from Python.
+
 ### Project
 
 - The real-file tests also try random track layouts, 30 per job on every push and 300 on the weekly run: an MKV or MP4 with up to four audio tracks of random channels, codecs, languages, names and flags, in random order, with or without subtitles and a font attachment. What the script does with each is checked against a separate restatement of the README's track-picking rules, and the file must come through with only the default flags changed, or byte for byte as it was. Each test's ID shows the seed, so `SSD_FUZZ_SEED=<seed>` replays a failure and `SSD_FUZZ_CASES=<count>` tries more.
+- On Linux and macOS, the real-file tests also stop the script with Ctrl+C or SIGTERM at random moments of a run over six files, 10 times per job on every push and 100 on the weekly run: sent the way a terminal does (to the script and its remux alike) or the way `docker stop` and `kill` do (to the script alone), with a random `--jobs` and sometimes `--backup`. The script must exit with the signal's code and a partial summary, or with 0 if it had finished, never with a traceback; leave no temp file; leave every file either as it was or properly fixed, and every backup a copy of the original; and a second run must finish the job. This is what found the stop windows fixed above.
 
 ## 2026-10-05 · [#12](https://github.com/tronyx/Set-Stereo-Default/pull/12)
 

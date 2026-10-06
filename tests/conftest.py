@@ -29,7 +29,7 @@ def _reset():
 @pytest.fixture(autouse=True)
 def clean_module_state(monkeypatch):
     """Reset the script's state before and after every test, and put back
-    the Ctrl+C and SIGTERM handlers that main() replaces. Tests run as if
+    the Ctrl+C and SIGTERM handlers a test may have installed. Tests run as if
     outside the Docker image, even when they run inside it, and each one
     checks mkvmerge's options afresh. Whatever the test patched is put back
     before the reset afterwards, since the reset uses the script's own

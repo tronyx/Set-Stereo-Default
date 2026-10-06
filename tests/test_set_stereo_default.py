@@ -2951,6 +2951,104 @@ def test_signal_mid_run_prints_a_partial_summary(tmp_path, monkeypatch, capsys,
 
 
 @pytest.mark.parametrize("signum, code, message", [
+    (signal.SIGINT, 130, "Interrupted by user (Ctrl+C)"),
+    (signal.SIGTERM, 143, "Stopped by SIGTERM"),
+], ids=["SIGINT", "SIGTERM"])
+def test_a_stop_between_the_search_and_the_first_file_is_reported(tmp_path, monkeypatch, capsys,
+                                                                   signum, code, message):
+    """A stop can land after the search but before the first file, e.g.
+    while mkvmerge is being looked up. It's reported like one during the
+    search, rather than ending the run in a traceback."""
+    make_videos(tmp_path, 2)
+
+    def interrupted_check(need_mkvmerge):
+        if need_mkvmerge:
+            signal.raise_signal(signum)
+        return True
+
+    monkeypatch.setattr(ssd, "check_tools", interrupted_check)
+    monkeypatch.setattr(ssd, "process_file", lambda *a, **k: pytest.fail("a file was processed"))
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    exit_code = ssd.main()
+
+    out = capsys.readouterr().out
+    assert exit_code == code
+    assert f"{message} while looking for files. No files were changed." in out
+    assert "Summary" not in out
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+def test_a_stop_once_the_files_are_done_is_ignored(tmp_path, monkeypatch, capsys, signum):
+    """Once every file is done only the summary is left, so a stop then
+    changes nothing: the full summary is printed and the run exits with 0,
+    rather than with a traceback from the stop handler."""
+    make_videos(tmp_path, 2)
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", lambda *a, **k: "changed")
+    monkeypatch.setattr(ssd, "report_ownership_failures", lambda folder: signal.raise_signal(signum))
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    assert ssd.main() == 0
+
+    out = capsys.readouterr().out
+    assert "Changed: 2" in out
+    assert "Partial" not in out and "Stopped" not in out and "Interrupted" not in out
+
+
+@pytest.mark.parametrize("signum, code, message", [
+    (signal.SIGINT, 130, "Interrupted by user (Ctrl+C)"),
+    (signal.SIGTERM, 143, "Stopped by SIGTERM"),
+], ids=["SIGINT", "SIGTERM"])
+def test_a_second_stop_while_the_stop_is_reported_is_ignored(tmp_path, monkeypatch, capsys,
+                                                              signum, code, message):
+    """Ctrl+C pressed again while the first stop is being reported mustn't
+    turn the report and the partial summary into a traceback."""
+    make_videos(tmp_path, 3)
+    calls = []
+
+    def fake_process_file(path, args, on_progress=None):
+        calls.append(path.name)
+        if len(calls) == 2:
+            signal.raise_signal(signum)
+        return "changed"
+
+    real_summary = ssd.print_summary
+
+    def interrupted_summary(*args, **kwargs):
+        signal.raise_signal(signum)
+        real_summary(*args, **kwargs)
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(ssd, "print_summary", interrupted_summary)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    exit_code = ssd.main()
+
+    out = capsys.readouterr().out
+    assert exit_code == code
+    assert message in out
+    assert "Changed: 1" in out
+    assert "Cancelled: 2" in out
+
+
+def test_main_puts_the_previous_signal_handlers_back(tmp_path, monkeypatch):
+    """main() installs its own Ctrl+C and SIGTERM handlers and puts the ones
+    it found back when it returns, so a program that calls it keeps its own
+    handling afterwards."""
+    make_videos(tmp_path, 1)
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", lambda *a, **k: "changed")
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    assert ssd.main() == 0
+
+    assert {s: signal.getsignal(s) for s in before} == before
+
+
+@pytest.mark.parametrize("signum, code, message", [
     (signal.SIGINT, 130, "Interrupted by user (Ctrl+C) while looking for files"),
     (signal.SIGTERM, 143, "Stopped by SIGTERM while looking for files"),
 ], ids=["SIGINT", "SIGTERM"])
