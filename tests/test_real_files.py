@@ -7,13 +7,19 @@ can encode Opus and VP8. Without them the tests are skipped, unless
 REQUIRE_MEDIA_TOOLS is set -- as it is in CI -- in which case a missing tool
 fails the run instead of quietly skipping everything."""
 
+import contextlib
+import ctypes
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,8 +28,16 @@ import pytest
 SCRIPT = Path(__file__).resolve().parent.parent / "set_stereo_default.py"
 """The script under test, run as a separate program like a user would."""
 
-LAYOUTS = {2: "stereo", 6: "5.1"}
+TMP_MARKER = ".tmp_remux"
+"""What the script puts in a temp file's name: <name>.tmp_remux.<ext>."""
+
+LAYOUTS = {1: "mono", 2: "stereo", 6: "5.1"}
 """ffmpeg's channel layout name for each channel count make_video() supports."""
+
+SAME_LANGUAGE = {"en": "eng", "fre": "fra"}
+"""Language codes the tests use that mean the same as another, in the form
+the script compares them in. A remux may change the spelling: mkvmerge
+writes a 2-letter code ffmpeg stored as it was given as its 3-letter form."""
 
 
 def _unavailable(message):
@@ -324,7 +338,10 @@ def contents(path):
     or picture size, language, name, attachment file name and MIME type,
     and every disposition flag except the audio default flag, which is the
     one thing the script changes. Chapter times are rounded to the
-    millisecond, since containers store them with different precision."""
+    millisecond, since containers store them with different precision.
+    Languages are compared the way the script compares them: "und" counts
+    as no language, since ffmpeg's MP4 muxer writes "und" for a track that
+    had none, and "en" is the same as "eng" (see SAME_LANGUAGE)."""
     res = subprocess.run(["ffprobe", "-v", "error", "-of", "json", "-show_streams",
                           "-show_chapters", "-show_format", str(path)],
                          check=True, capture_output=True, text=True)
@@ -332,6 +349,9 @@ def contents(path):
     streams = []
     for s in data["streams"]:
         tags = {k.lower(): v for k, v in s.get("tags", {}).items()}
+        language = tags.pop("language", "")
+        if language not in ("", "und"):
+            tags["language"] = SAME_LANGUAGE.get(language, language)
         disposition = dict(s.get("disposition", {}))
         if s["codec_type"] == "audio":
             disposition.pop("default", None)
@@ -420,6 +440,561 @@ def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
     assert summary(output)["changed"] == 1, output
     assert audio_defaults(video) == [(2, True), (6, False)]
     assert contents(video) == before
+
+
+FUZZ_SEED = os.environ.get("SSD_FUZZ_SEED") or str(int(time.time()))
+"""Where the random layouts start from: the time, so every run tries new
+ones, unless SSD_FUZZ_SEED says otherwise (CI gives each job its own). A
+failure's test ID names the seed, and SSD_FUZZ_SEED=<seed> replays it."""
+
+FUZZ_CASES = int(os.environ.get("SSD_FUZZ_CASES", "30"))
+"""How many random layouts to try. The weekly CI run tries more."""
+
+RANDOM_NAMES = ["", "", "Stereo", "Surround 5.1", "Director's Commentary", "Audio Description",
+                "Español", "日本語", "Signs"]
+"""Track names for random layouts, some of which mark commentary."""
+
+RANDOM_LANGUAGES = ["", "und", "eng", "en", "spa", "jpn", "fre"]
+"""Language tags for random layouts: missing, unknown, and the same language
+written two ways."""
+
+COMMENTARY_NAME = re.compile(r"commentary|audio[ -]?description|descriptive|described|\bdvs\b",
+                             re.IGNORECASE)
+"""The names the README says mark a commentary or audio-description track."""
+
+
+def make_random_video(folder, ext, rng):
+    """Write folder/random<ext> with a layout drawn from rng: one to four
+    audio tracks, each with random channels (mono, stereo or 5.1), codec,
+    language, name and flags; up to two subtitles; in MKV, sometimes a font
+    attachment; and the streams in random order after the video. Returns
+    (path, a description of the layout for a failure message). What the
+    file actually holds is read back with ffprobe afterwards, since MP4
+    can't store some of it and ffmpeg versions differ."""
+    audio = [{"channels": rng.choice([1, 2, 2, 6]), "codec": rng.choice(["ac3", "aac"]),
+              "language": rng.choice(RANDOM_LANGUAGES), "title": rng.choice(RANDOM_NAMES),
+              "flags": [name for name, chance in (("default", 0.4), ("comment", 0.15),
+                                                  ("visual_impaired", 0.1))
+                        if rng.random() < chance]}
+             for _ in range(rng.randint(1, 4))]
+    subtitles = [{"language": rng.choice(["eng", "spa"]), "flags": rng.choice(["0", "default", "forced"])}
+                 for _ in range(rng.randint(0, 2))]
+    order = [("audio", i) for i in range(len(audio))] + [("subtitle", i) for i in range(len(subtitles))]
+    rng.shuffle(order)
+    attach = ext == ".mkv" and rng.random() < 0.3
+
+    srt = folder / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1"]
+    for a in audio:
+        cmd += ["-f", "lavfi", "-t", "1", "-i",
+                f"anullsrc=channel_layout={LAYOUTS[a['channels']]}:sample_rate=48000"]
+    cmd += ["-i", str(srt)] * len(subtitles)
+    if attach:
+        font = folder / "font.ttf"
+        font.write_bytes(b"\x00\x01\x00\x00" + bytes(64))
+        cmd += ["-attach", str(font), "-metadata:s:t", "mimetype=font/ttf",
+                "-metadata:s:t", "filename=font.ttf"]
+    cmd += ["-map", "0:v"]
+    settings = ["-c:v", "mpeg4", "-c:s", "mov_text" if ext == ".mp4" else "srt",
+                "-disposition:v:0", "default"]
+    out = {"audio": 0, "subtitle": 0}
+    for kind, i in order:
+        n = out[kind]
+        out[kind] += 1
+        if kind == "audio":
+            a = audio[i]
+            cmd += ["-map", f"{1 + i}:a"]
+            settings += [f"-c:a:{n}", a["codec"], f"-disposition:a:{n}", "+".join(a["flags"]) or "0"]
+            if a["language"]:
+                settings += [f"-metadata:s:a:{n}", f"language={a['language']}"]
+            if a["title"]:
+                settings += [f"-metadata:s:a:{n}", f"title={a['title']}",
+                             f"-metadata:s:a:{n}", f"handler_name={a['title']}"]
+        else:
+            s = subtitles[i]
+            cmd += ["-map", f"{1 + len(audio) + i}:s"]
+            settings += [f"-disposition:s:{n}", s["flags"],
+                         f"-metadata:s:s:{n}", f"language={s['language']}"]
+    if ext == ".mp4":
+        settings += ["-movflags", "+faststart"]
+    path = folder / f"random{ext}"
+    subprocess.run(cmd + settings + [str(path)], check=True, capture_output=True, text=True)
+    layout = ", ".join(f"{kind}#{i}" + (f" {audio[i]}" if kind == "audio" else f" {subtitles[i]}")
+                       for kind, i in order)
+    return path, f"{ext}{' +font' if attach else ''}: video, {layout}"
+
+
+def expected_outcome(path):
+    """What the README's "Picking the track" rules say should happen to the
+    file at path, worked out from what ffprobe reads back: ("changed",
+    position of the stereo track among the audio tracks), ("unchanged",
+    position) if it's already the only default, or ("skipped", None). A
+    restatement of the rules, independent of the script, so the two can
+    disagree."""
+    def language(tags):
+        code = tags.get("language", "").lower().split("-")[0]
+        return SAME_LANGUAGE.get(code, code)
+
+    audio = [(s, default) for s, (_, default) in zip(
+        [s for s in contents(path)["streams"] if s["type"] == "audio"], audio_defaults(path))]
+    candidates = [
+        (s, default) for s, default in audio
+        if s["channels"] == 2 and not s["disposition"].get("comment")
+        and not s["disposition"].get("visual_impaired")
+        and not COMMENTARY_NAME.search(s["tags"].get("title", "") + s["tags"].get("handler_name", ""))]
+    current = next((s for s, default in audio if default), audio[0][0])
+    wanted = language(current["tags"])
+    if wanted not in ("", "und"):
+        candidates = [(s, d) for s, d in candidates if language(s["tags"]) in ("", "und", wanted)]
+        exact = [(s, d) for s, d in candidates if language(s["tags"]) == wanted]
+        if len(exact) == 1:
+            candidates = exact
+    if len(candidates) != 1:
+        return "skipped", None
+    target = candidates[0][0]
+    position = [s for s, _ in audio].index(target)
+    already = all((s is target) == default for s, default in audio)
+    return ("unchanged" if already else "changed"), position
+
+
+@pytest.mark.parametrize("case", range(FUZZ_CASES),
+                         ids=[f"seed={FUZZ_SEED}-{i}" for i in range(FUZZ_CASES)])
+def test_a_random_layout_is_fixed_or_left_alone(tmp_path, case):
+    """A file with a layout nobody wrote a test for. Whatever it holds, the
+    script must do what the README's rules say (see expected_outcome()):
+    change exactly the right track's default flag and nothing else, or
+    leave the file byte for byte as it was. With mkvmerge 52 or older,
+    which drops the commentary and audio-description flags, an MKV that
+    has one must be rejected and left alone instead. Replay a failing case
+    with SSD_FUZZ_SEED set to the seed in its ID."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    rng = random.Random(f"{FUZZ_SEED}-{case}")
+    ext = rng.choice([".mkv", ".mp4"])
+    video, layout = make_random_video(tmp_path, ext, rng)
+    expected, position = expected_outcome(video)
+    before, before_digest = contents(video), digest(video)
+    if expected == "changed" and ext == ".mkv" and mkvmerge_version() < 54 and any(
+            s["disposition"].get(flag) for s in before["streams"] for flag in ("comment", "visual_impaired")):
+        expected = "error"
+
+    code, output = run_script(video)
+
+    assert code == (1 if expected == "error" else 0), f"{layout}\n{output}"
+    assert summary(output)[expected] == 1, f"expected {expected}\n{layout}\n{output}"
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    if expected != "changed":
+        assert digest(video) == before_digest, f"the file changed\n{layout}\n{output}"
+        return
+    assert contents(video) == before, f"something besides the default flags changed\n{layout}"
+    defaults = [default for _, default in audio_defaults(video)]
+    assert defaults == [i == position for i in range(len(defaults))], f"{layout}\n{output}"
+    if ext == ".mkv":
+        assert mkvmerge_defaults(video) == defaults, layout
+
+
+STOP_CASES = max(10, FUZZ_CASES // 3)
+"""How many random stops to try: ten on every push, more on the weekly run."""
+
+STOP_REASONS = {signal.SIGINT: "Interrupted by user (Ctrl+C)", signal.SIGTERM: "Stopped by SIGTERM"}
+"""What the script says it was stopped by, for each signal it handles."""
+
+FIXED = [(6, False), (2, True)]
+"""audio_defaults() of a stop_files file once the script has fixed it."""
+
+
+@dataclass
+class StopFiles:
+    """What the stop cases start from: pristine copies of the files, each
+    one's digest and contents as made, and how long one uninterrupted run
+    over them takes."""
+    folder: Path
+    digests: dict
+    contents: dict
+    seconds: float
+
+
+@pytest.fixture(scope="module")
+def stop_files(tmp_path_factory):
+    """Six files that each need a remux, three MKV and three MP4, long
+    enough that each remux takes a measurable time. Made once for all the
+    stop cases, and timed once so the stops can be spread over a run."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    folder = tmp_path_factory.mktemp("pristine")
+    for i in range(6):
+        make_video(folder / f"movie{i}{'.mkv' if i % 2 else '.mp4'}",
+                   [Track(6, default=True), Track(2)], seconds=8)
+    files = sorted(folder.iterdir())
+    timing = tmp_path_factory.mktemp("timing")
+    for f in files:
+        shutil.copy2(f, timing / f.name)
+    started = time.monotonic()
+    code, output = run_script(timing)
+    seconds = time.monotonic() - started
+    assert code == 0 and summary(output)["changed"] == len(files), output
+    return StopFiles(folder, {f.name: digest(f) for f in files},
+                     {f.name: contents(f) for f in files}, seconds)
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows has no SIGTERM, and Ctrl+C can't be sent to one process")
+@pytest.mark.parametrize("case", range(STOP_CASES),
+                         ids=[f"seed={FUZZ_SEED}-{i}" for i in range(STOP_CASES)])
+def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files, case):
+    """Ctrl+C or SIGTERM at a random moment of a run, sent the way a
+    terminal does (to the script and its remux alike) or the way docker
+    stop and kill do (to the script alone), with a random --jobs and
+    sometimes --backup. Wherever it lands, the script must exit with that
+    signal's code and a partial summary, or with 0 if it had finished, and
+    never with a traceback; leave no temp file; leave every file either as
+    it was or properly fixed, and every backup a copy of the original; and
+    a second run must finish the job. Replay a failing case with
+    SSD_FUZZ_SEED set to the seed in its ID."""
+    rng = random.Random(f"{FUZZ_SEED}-stop-{case}")
+    folder = tmp_path / "videos"
+    shutil.copytree(stop_files.folder, folder)
+    jobs = rng.choice([1, 1, 2, 3])
+    backup = ["--backup", "--existing-backups", "replace"] if rng.random() < 0.3 else []
+    sig = rng.choice([signal.SIGINT, signal.SIGTERM])
+    whole_group = rng.random() < 0.5
+    delay = rng.uniform(0, stop_files.seconds)
+    how = (f"{sig.name} to the {'whole group' if whole_group else 'script only'} {delay:.2f}s "
+           f"after the search, --jobs {jobs}{' --backup' if backup else ''}")
+
+    proc = subprocess.Popen([sys.executable, "-u", str(SCRIPT), "--no-progress", "--jobs", str(jobs),
+                             *backup, str(folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, start_new_session=True)
+    lines = []
+    reader = threading.Thread(target=lambda: lines.extend(iter(proc.stdout.readline, "")), daemon=True)
+    reader.start()
+    try:
+        deadline = time.monotonic() + 60
+        while not any("Found " in line and "file(s)" in line for line in list(lines)):
+            assert proc.poll() is None and time.monotonic() < deadline, how + "\n" + "".join(lines)
+            time.sleep(0.01)
+        time.sleep(delay)
+        stopped = proc.poll() is None
+        if stopped:
+            (os.killpg if whole_group else os.kill)(proc.pid, sig)
+        proc.wait(timeout=60)
+    finally:
+        proc.kill()
+    reader.join(timeout=10)
+    code, output = proc.returncode, "".join(lines)
+    counts = summary(output)
+    report = f"{how}\n{output}"
+
+    assert "Traceback" not in output, report
+    assert not list(folder.glob("*.tmp_remux*")), f"temp file left behind\n{report}"
+    if code == 0:
+        assert counts == {"changed": 6, "unchanged": 0, "skipped": 0, "error": 0}, report
+        assert "Partial" not in output, report
+    else:
+        assert stopped and code == 128 + sig, report
+        assert STOP_REASONS[sig] in output and "(Partial -- interrupted)" in output, report
+        assert counts["error"] == 0 and counts["skipped"] == 0, report
+    fixed = 0
+    for name, original in stop_files.digests.items():
+        if digest(folder / name) == original:
+            continue
+        assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{report}"
+        assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{report}"
+        fixed += 1
+    assert fixed >= counts["changed"], f"{counts['changed']} counted as changed, {fixed} fixed\n{report}"
+    for bak in folder.glob("*.bak"):
+        name = bak.name[:-len(".bak")]
+        assert backup and digest(bak) == stop_files.digests[name], f"{bak.name} isn't the original\n{report}"
+
+    code, output = run_script(folder, "--jobs", str(jobs), *backup)
+    report = f"{how}, then a second run\n{output}"
+    assert code == 0, report
+    counts = summary(output)
+    assert counts["changed"] + counts["unchanged"] == 6 and counts["changed"] + fixed == 6, report
+    assert counts["error"] == 0 and counts["skipped"] == 0, report
+    assert not list(folder.glob("*.tmp_remux*")), f"temp file left behind\n{report}"
+    for name in stop_files.digests:
+        assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{report}"
+        assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{report}"
+        if backup:
+            bak = folder / f"{name}.bak"
+            assert digest(bak) == stop_files.digests[name], f"{bak.name} isn't the original\n{report}"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' MAX_PATH limit")
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_path_longer_than_max_path_is_fixed(tmp_path, ext):
+    """Windows limits a path to 260 characters unless long paths are
+    enabled, as they are on recent versions. The script, ffprobe, ffmpeg
+    and mkvmerge must all cope with a longer one."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    folder = tmp_path
+    while len(str(folder)) < 270:
+        folder = folder / ("x" * 50)
+    try:
+        folder.mkdir(parents=True)
+    except OSError:
+        pytest.skip("long paths aren't enabled on this Windows")
+    video = make_video(folder / f"movie{ext}", [Track(6, default=True), Track(2)])
+    before = contents(video)
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert contents(video) == before
+
+
+@contextlib.contextmanager
+def hold_open(path, exclusive):
+    """Keep path open while the block runs, the way another program would:
+    for reading with sharing, like a player, or exclusively, like some
+    scanners, which stops even reads. Windows only."""
+    if not exclusive:
+        with open(path, "rb"):
+            yield
+        return
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                     ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    generic_read, no_sharing, open_existing, normal = 0x80000000, 0, 3, 0x80
+    handle = kernel32.CreateFileW(str(path), generic_read, no_sharing, None, open_existing, normal, None)
+    assert handle != ctypes.c_void_p(-1).value, ctypes.get_last_error()
+    try:
+        yield
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows stops a rename over an open file")
+@pytest.mark.parametrize("backup", [False, True], ids=["no backup", "backup"])
+@pytest.mark.parametrize("exclusive", [False, True], ids=["open for reading", "open exclusively"])
+def test_a_file_open_in_another_program_is_reported_and_left_alone(tmp_path, exclusive, backup):
+    """On Windows a file another program has open can't be renamed over (a
+    player, or Plex scanning it), and one opened exclusively can't even be
+    read. Either way the file is reported, left as it was with no temp
+    file or backup next to it, and the rest of the folder is still fixed."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    locked = make_video(tmp_path / "locked.mkv", [Track(6, default=True), Track(2)])
+    other = make_video(tmp_path / "other.mp4", [Track(6, default=True), Track(2)])
+    before = digest(locked)
+
+    with hold_open(locked, exclusive):
+        code, output = run_script(tmp_path, *(["--backup"] if backup else []))
+
+    assert code == 1, output
+    assert summary(output) == {"changed": 1, "unchanged": 0, "skipped": 0, "error": 1}, output
+    expected = ("ffprobe failed on locked.mkv" if exclusive else
+                "locked.mkv: couldn't swap the new file in (Access is denied), so it's left as it was"
+                " -- is it read-only, or open in another program?")
+    assert expected in output, output
+    assert "unexpected error" not in output, output
+    assert digest(locked) == before
+    assert audio_defaults(other) == [(6, False), (2, True)]
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert sorted(p.name for p in tmp_path.glob("*.bak")) == (["other.mp4.bak"] if backup else [])
+
+
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_name_too_long_for_its_temp_name_is_reported(tmp_path, ext):
+    """A name at the file system's limit (255 characters) leaves no room for
+    the temp name's suffix. The file can't be fixed, so it's reported as
+    such, and left as it is with nothing else next to it."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    try:
+        video = make_video(tmp_path / ("n" * (255 - len(ext)) + ext), [Track(6, default=True), Track(2)])
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("can't make a 255-character name here")
+    before = digest(video)
+
+    code, output = run_script(video)
+
+    assert code == 1, output
+    assert summary(output)["error"] == 1, output
+    assert f"can't use the temp name {video.name}.tmp_remux{ext}" in output, output
+    assert "unexpected error" not in output, output
+    assert digest(video) == before
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows ignores permissions set with chmod")
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+@pytest.mark.parametrize("what", ["folder not writable", "file not readable"])
+def test_a_file_without_the_needed_permissions_is_reported(tmp_path, what, ext):
+    """Run as a user who can't write to the folder (a read-only share, or
+    files owned by someone else), the remux can't be written next to the
+    original; a file the user can't read can't even be probed. Either way
+    the file is reported with the tool's own error and left as it was, and
+    nothing is left behind. --dry-run writes nothing, so it still works on
+    the unwritable folder."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    if os.geteuid() == 0:
+        pytest.skip("root can read and write anywhere")
+    folder = tmp_path / "shared"
+    folder.mkdir()
+    video = make_video(folder / f"movie{ext}", [Track(6, default=True), Track(2)])
+    before = digest(video)
+    locked = folder if what == "folder not writable" else video
+    locked.chmod(0o555 if locked.is_dir() else 0o000)
+    try:
+        code, output = run_script(video)
+        dry_code, dry_output = run_script(video, "--dry-run")
+    finally:
+        locked.chmod(0o755 if locked.is_dir() else 0o644)
+
+    assert code == 1, output
+    assert summary(output)["error"] == 1, output
+    expected = "remux failed" if what == "folder not writable" else f"ffprobe failed on movie{ext}"
+    assert expected in output and "unexpected error" not in output, output
+    assert digest(video) == before
+    assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+    if what == "folder not writable":
+        assert dry_code == 0 and summary(dry_output)["would change"] == 1, dry_output
+    else:
+        assert dry_code == 1 and summary(dry_output)["error"] == 1, dry_output
+
+
+FULL_DISK = os.environ.get("SSD_FULL_DISK")
+"""A writable folder on a file system too small for the remux of a file
+that takes more than half of it, for the full-disk test; unset, that
+test is skipped. CI mounts a 2 MB tmpfs there in the Docker image."""
+
+
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_full_disk_is_reported_and_the_partial_remux_removed(tmp_path, ext):
+    """A file whose remux doesn't fit on the disk. The tool fails partway,
+    and the half-written temp file must be removed, so a disk that's
+    already full isn't left even fuller; the original is left as it was.
+    Needs SSD_FULL_DISK (see FULL_DISK)."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    if not FULL_DISK:
+        pytest.skip("SSD_FULL_DISK isn't set")
+    folder = Path(FULL_DISK) / f"full{ext[1:]}"
+    folder.mkdir()
+    try:
+        tracks = [Track(6, default=True), Track(2)]
+        free = shutil.disk_usage(folder).free
+        per_second = make_video(tmp_path / f"probe{ext}", tracks, seconds=1).stat().st_size
+        video = make_video(folder / f"movie{ext}", tracks, seconds=max(2, int(free * 0.6 / per_second)))
+        free = shutil.disk_usage(folder).free
+        assert video.stat().st_size > free, "the remux would fit: is SSD_FULL_DISK on a small enough file system?"
+        before = digest(video)
+
+        code, output = run_script(video)
+
+        assert code == 1, output
+        assert summary(output)["error"] == 1, output
+        assert "remux failed" in output and "No space left" in output, output
+        assert "unexpected error" not in output, output
+        assert digest(video) == before
+        assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+        assert shutil.disk_usage(folder).free >= free, "the space wasn't given back"
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def group_still_running(pgid):
+    """Whether any process in the process group pgid is still running: on
+    Linux read from /proc, elsewhere from ps. A zombie doesn't count: in a
+    container nothing may ever reap it, and it's done writing. (Asking
+    with a signal won't do: a zombie still answers, and macOS can answer
+    EPERM for a group with a process on its way out.)"""
+    if Path("/proc").is_dir():
+        for stat in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                state, _, group = stat.read_text().rsplit(")", 1)[1].split()[:3]
+            except (OSError, ValueError):
+                continue
+            if int(group) == pgid and state != "Z":
+                return True
+        return False
+    listing = subprocess.run(["ps", "-eo", "pid=,pgid=,stat="], check=True, capture_output=True,
+                             text=True).stdout
+    return any(int(fields[1]) == pgid and not fields[2].startswith("Z")
+               for fields in map(str.split, listing.splitlines()) if len(fields) == 3)
+
+
+def kill_outright(proc, everything):
+    """Kill the script the way nothing can be caught: with everything it
+    started too (a reboot, the OOM killer), or alone (kill -9 on the
+    script, End task in Task Manager). Alone, the remux it was waiting
+    for is on its own: it may finish, or die writing its progress to a
+    script that's gone. This waits until it has ended either way, since
+    the next run must not find it still writing. The script is its
+    group's leader (start_new_session), so the remux is found by the
+    group; on Windows by its parent's ID, which it keeps after the parent
+    dies."""
+    if everything:
+        os.killpg(proc.pid, signal.SIGKILL)
+    else:
+        proc.kill()
+    proc.wait(timeout=30)
+    if sys.platform == "win32":
+        wait_for_children = (f"Get-CimInstance Win32_Process -Filter 'ParentProcessId={proc.pid}' | ForEach-Object "
+                             "{ Wait-Process -Id $_.ProcessId -Timeout 60 -ErrorAction SilentlyContinue }")
+        subprocess.run(["powershell", "-NoProfile", "-Command", wait_for_children], check=True,
+                       capture_output=True)
+        return
+    deadline = time.monotonic() + 60
+    while group_still_running(proc.pid):
+        assert time.monotonic() < deadline, "the remux the script started didn't end"
+        time.sleep(0.01)
+
+
+@pytest.mark.parametrize("backup", [False, True], ids=["no backup", "backup"])
+@pytest.mark.parametrize("everything", [
+    pytest.param(True, marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows has no instant way to kill a process tree")),
+    False,
+], ids=["everything killed", "only the script killed"])
+def test_a_run_killed_outright_leaves_a_temp_file_the_next_run_reports_and_replaces(tmp_path, stop_files,
+                                                                                    everything, backup):
+    """kill -9, a reboot or the OOM killer gives the script no chance to
+    clean up, so the temp file of the remux under way stays behind: a
+    partial one if the remux died too, maybe a complete one if it ran on
+    without the script. Either way the original must be untouched, and
+    the next run must report the leftover as such rather than treat it as
+    a video, remux the original afresh rather than trust it, and leave
+    nothing behind; the files done before the kill are just unchanged."""
+    folder = tmp_path / "videos"
+    shutil.copytree(stop_files.folder, folder)
+    names = sorted(stop_files.digests)
+    killed, done, waiting = names[2], names[:2], names[3:]
+    leftover = folder / f"{killed}{TMP_MARKER}{Path(killed).suffix}"
+    args = ["--backup"] if backup else []
+    posix = {"start_new_session": True} if sys.platform != "win32" else {}
+
+    proc = subprocess.Popen([sys.executable, str(SCRIPT), "--no-progress", *args, str(folder)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **posix)
+    try:
+        deadline = time.monotonic() + 60
+        while not leftover.exists():
+            assert proc.poll() is None and time.monotonic() < deadline, "the remux never started"
+            time.sleep(0.001)
+        kill_outright(proc, everything)
+    finally:
+        proc.kill()
+
+    assert leftover.exists(), "no temp file left: the remux finished before the kill"
+    for name in [killed, *waiting]:
+        assert digest(folder / name) == stop_files.digests[name], f"{name} was touched"
+    for name in done:
+        assert audio_defaults(folder / name) == FIXED, f"{name} wasn't done before the kill"
+
+    code, output = run_script(folder, *args, *(["--existing-backups", "replace"] if backup else []))
+
+    assert code == 0, output
+    assert f"Skipping leftover temp file from an interrupted run (safe to delete): {leftover}" in output, output
+    assert summary(output) == {"changed": 4, "unchanged": 2, "skipped": 0, "error": 0}, output
+    assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+    for name in names:
+        assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{output}"
+        assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{output}"
+        if backup:
+            assert digest(folder / f"{name}.bak") == stop_files.digests[name], f"{name}.bak isn't the original"
+    assert sorted(p.name for p in folder.glob("*.bak")) == ([f"{n}.bak" for n in names] if backup else [])
 
 
 AUDIO_CODECS = {

@@ -3,6 +3,8 @@
 -r requirements.txt
 pytest>=7
 coverage>=7
+# For tests/test_properties.py, which is skipped without it.
+hypothesis>=6
 # Pinned, so a new release with new rules can't suddenly fail the checks.
 # Dependabot proposes new versions once a month (.github/dependabot.yml);
 # fix anything new they find in that same pull request.

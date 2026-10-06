@@ -40,7 +40,7 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
    python -m mypy
    ```
 
-   The real-file tests are skipped unless ffmpeg, ffprobe and mkvmerge are installed. GitHub runs them for you on every pull request, but it's quicker to catch problems locally. To see which lines your tests reach, run `python -m coverage run -m pytest` and then `python -m coverage report`.
+   The real-file tests are skipped unless ffmpeg, ffprobe and mkvmerge are installed. GitHub runs them for you on every pull request, but it's quicker to catch problems locally. Some of them try random track layouts, or stop the script at random moments: a failing one's test ID shows the seed, and running pytest with `SSD_FUZZ_SEED=<seed>` tries the same cases again (`SSD_FUZZ_CASES=<count>` sets how many). To see which lines your tests reach, run `python -m coverage run -m pytest` and then `python -m coverage report`.
 
    `ruff` is a linter and `mypy` checks the type hints; both are set up in `pyproject.toml`, and GitHub runs them on every push too.
 
@@ -70,11 +70,11 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 ## 📏 Code style
 
 - **One file, standard library only.** People install this by copying a single script, so keep it that way: no new modules, and no new required packages. tqdm stays optional.
-- **Python 3.10 and newer.** GitHub tests on 3.10 and the newest release. Avoid syntax newer than 3.10, such as reusing the same quote inside an f-string (3.12+).
+- **Python 3.10 and newer.** GitHub tests on 3.10, the newest release, and the next release's pre-release, which may fail without failing the run (a heads-up, not a blocker). Avoid syntax newer than 3.10, such as reusing the same quote inside an f-string (3.12+).
 - **Linux, macOS and Windows.** Use `pathlib` for paths, pass commands as lists rather than through a shell, and don't assume a file system feature (hard links, symlinks, owners) is always available.
 - **Docstrings, not comments.** Explain code in the docstring of the function it belongs to. Module-level settings get a docstring on the line after them. Don't add `#` comments.
 - **Keep docstrings short and plain.** Say what something does and, where it isn't obvious, why.
 - **Type hints on every function.** `mypy` checks them in strict mode, so they stay accurate and complete. If it objects to something, fix the code rather than silencing it: a `# type: ignore` is a comment, which the rule above rules out.
-- **Add or update tests** for any change in behavior. Logic tests go in `tests/test_set_stereo_default.py`. Anything that depends on how ffmpeg or mkvmerge really behave goes in `tests/test_real_files.py`.
+- **Add or update tests** for any change in behavior. Logic tests go in `tests/test_set_stereo_default.py`. A rule that must hold for every input, not just a few chosen examples, can be a property in `tests/test_properties.py` (Hypothesis). Anything that depends on how ffmpeg or mkvmerge really behave goes in `tests/test_real_files.py`.
 - **Update the README** if you add an option or change what the script does.
 - **Add a line to the changelog** under **Unreleased** in `CHANGELOG.md`, saying what changes for someone using the script.

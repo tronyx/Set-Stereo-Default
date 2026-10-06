@@ -358,6 +358,9 @@ main thread, which may be the thread it interrupted while holding it."""
 _cancelled = threading.Event()
 """Set once Ctrl+C or SIGTERM arrives, so files that haven't started are skipped."""
 
+_requested_stop: list[int] = [signal.SIGINT]
+"""The signal of the last stop request, for _check_stop()."""
+
 _ownership_failures: list[tuple[str, tuple[int, int], tuple[int, int], str]] = []
 """Remuxed files that couldn't be given their original owner, as (full path,
 wanted owner, actual owner, reason). Reported once, at the end of the run,
@@ -417,7 +420,11 @@ def _stop_handler(signum: int, frame: FrameType | None) -> NoReturn:
     The remuxes have to be killed here for two reasons. Python raises the
     exception only in the main thread, so with --jobs > 1 a worker waiting
     on its remux would never notice it. And SIGTERM (docker stop, kill,
-    systemd) reaches only this process, not the remuxes it started."""
+    systemd) reaches only this process, not the remuxes it started.
+
+    The request is recorded before the exception is raised, since the
+    exception can be lost (see _check_stop())."""
+    _requested_stop[0] = signum
     _cancelled.set()
     _terminate_active_procs()
     raise Stopped(signum)
@@ -430,6 +437,31 @@ def _stop_reason(exc: BaseException) -> tuple[int, str]:
     if signum == signal.SIGINT:
         return signum, "Interrupted by user (Ctrl+C)"
     return signum, f"Stopped by {signal.Signals(signum).name}"
+
+
+def _check_stop() -> None:
+    """Raise Stopped if a stop was requested but its exception was lost.
+
+    _stop_handler() raises Stopped wherever the main thread happens to be,
+    and Python drops an exception raised while a __del__ runs (a finished
+    tool's Popen being collected, say) or a generator is closed, reporting
+    it through sys.unraisablehook instead of raising it. The run would
+    carry on as if nothing had happened, with the remaining files quietly
+    cancelled. The request itself survives in _cancelled, so _run() asks
+    here after each phase, and _unraisable() keeps the dropped exception
+    quiet."""
+    if _cancelled.is_set():
+        raise Stopped(_requested_stop[0])
+
+
+def _unraisable(unraisable: sys.UnraisableHookArgs,
+                fallback: Callable[[sys.UnraisableHookArgs], object]) -> None:
+    """sys.unraisablehook while main() runs: a Stopped that Python couldn't
+    raise is dropped without a word, since _check_stop() acts on the
+    request anyway; anything else goes to fallback, the hook that was
+    there before."""
+    if not isinstance(unraisable.exc_value, Stopped):
+        fallback(unraisable)
 
 
 class Cancelled(Exception):
@@ -637,10 +669,11 @@ def is_commentary(stream: Stream) -> bool:
 def normalize_language(code: str | None) -> str:
     """Return code in one standard form, so different tags for the same
     language compare equal: lowercased, with any region or script part
-    dropped ("pt-BR" -> "pt"), then mapped to its ISO 639-2/T code through
-    LANGUAGE_ALIASES ("de" and "ger" -> "deu"). Codes that aren't in the
-    table come back lowercased; an empty tag stays empty."""
-    base = re.split(r"[-_]", (code or "").strip().lower(), maxsplit=1)[0]
+    dropped ("pt-BR" -> "pt") and any spaces around it removed, then
+    mapped to its ISO 639-2/T code through LANGUAGE_ALIASES ("de" and
+    "ger" -> "deu"). Codes that aren't in the table come back lowercased;
+    an empty tag stays empty."""
+    base = re.split(r"[-_]", (code or "").lower(), maxsplit=1)[0].strip()
     return LANGUAGE_ALIASES.get(base, base)
 
 
@@ -766,12 +799,12 @@ def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
     first audio track (audio, the remux's audio tracks). AVI has no default
     flag to check, so the first track must match the target's codec,
     channel count and language (compared after normalize_language(), as
-    everywhere else)."""
-    target = plan.target
-    first = audio[0]
+    everywhere else, and only when both are known: a tool may drop a
+    language or fill one in, as in _stream_loss())."""
+    target, first = plan.target, audio[0]
+    wanted, got = normalize_language(target.language), normalize_language(first.language)
     if (first.codec != target.codec or first.channels != target.channels
-            or (target.language and normalize_language(first.language)
-                != normalize_language(target.language))):
+            or (wanted not in ("", "und") and got not in ("", "und") and got != wanted)):
         return "target audio track didn't end up first"
     return None
 
@@ -1100,8 +1133,15 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     before the swap. The backup comes first because without hard links it's
     a full copy, which can take minutes on a network share, and a change
     during it must be caught too. If the file changed, Superseded is raised
-    with nothing touched, except that a backup just made is removed, since
-    it holds a version that has been superseded.
+    with nothing touched.
+
+    If anything stops the swap once the backup is made (the file changed,
+    the rename failed because another program has the file open, a stop),
+    the backup is removed again: the original is untouched, and a backup
+    would only suggest it had been changed. A backup it replaced is gone,
+    though. Whether the swap happened is read from the file system, since
+    a stop can land right after the rename, so the backup of a file that
+    was replaced is never removed.
 
     keep_dates is off by default because tools that spot changed files by
     size and modification time (rsync's default, some backup software)
@@ -1109,16 +1149,20 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     if _changed_since(path, snapshot):
         raise Superseded
     bak_path = make_backup(path, replace=(backup == "replace")) if backup else None
-    if bak_path is not None and _changed_since(path, snapshot):
-        bak_path.unlink(missing_ok=True)
-        raise Superseded
-    copy_ownership(path, tmp_path)
-    if keep_dates:
-        st = os.stat(path)
-        os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
-    if bak_path is not None and bak_path.suffix != ".bak":
-        log.info(f"    {path.name}: kept the original as {bak_path.name}")
-    os.replace(tmp_path, path)
+    try:
+        if bak_path is not None and _changed_since(path, snapshot):
+            raise Superseded
+        copy_ownership(path, tmp_path)
+        if keep_dates:
+            st = os.stat(path)
+            os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        if bak_path is not None and bak_path.suffix != ".bak":
+            log.info(f"    {path.name}: kept the original as {bak_path.name}")
+        os.replace(tmp_path, path)
+    except BaseException:
+        if bak_path is not None and tmp_path.exists():
+            bak_path.unlink(missing_ok=True)
+        raise
 
 
 @dataclass
@@ -1213,7 +1257,14 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
                       f"keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
+        try:
+            swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
+        except OSError as exc:
+            hint = " -- is it read-only, or open in another program?" if isinstance(exc, PermissionError) else ""
+            log.error(f"    {path.name}: couldn't swap the new file in ({exc.strerror or exc}), "
+                      f"so it's left as it was{hint}")
+            tmp_path.unlink(missing_ok=True)
+            return False
     except Superseded:
         log.error(f"    {path.name}: changed by another program during the remux, so it's "
                   f"left as it is now; run the script again to fix the new version")
@@ -1320,15 +1371,23 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
 
     Whatever already has the temp name is removed before the remux, so the
     tool writes a new file rather than through a symlink someone left there
-    (see check_and_swap_in()). The temp file is removed whatever stops the
-    remux: a failure, a stop (Ctrl+C, SIGTERM) or an unexpected error. Until
-    check_and_swap_in() has checked it, the original isn't touched."""
+    (see check_and_swap_in()). A temp name the file system refuses, because
+    the file's name is already near its length limit (255 characters on
+    most), is reported, and the file left alone. The temp file is removed
+    whatever stops the remux: a failure, a stop (Ctrl+C, SIGTERM) or an
+    unexpected error. Until check_and_swap_in() has checked it, the
+    original isn't touched."""
     path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
     if opts.dry_run:
         _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
         return True
     _announce(plan.intro)
-    tmp_path.unlink(missing_ok=True)
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.error(f"    {path.name}: can't use the temp name {tmp_path.name} ({exc.strerror or exc}); "
+                  f"the name may be too long for this file system")
+        return False
 
     try:
         returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)
@@ -2077,7 +2136,8 @@ def main(argv: list[str] | None = None) -> int:
     already killed every remux and each one has removed its temp file.
     What's left is a partial summary that counts unfinished files as
     cancelled. A stop while looking for files, or at the backup question,
-    ends the run with no summary, since nothing has changed. Files that
+    ends the run with no summary, since nothing has changed. Once every
+    file is done, a stop is ignored: only the summary is left. Files that
     couldn't be given their original owner are reported in one warning
     just before the summary (report_ownership_failures()), with the full
     list saved next to --log-file, or in the current folder.
@@ -2087,9 +2147,9 @@ def main(argv: list[str] | None = None) -> int:
     opts.backup_mode like any other option.
 
     Call it from the main thread, since it installs the Ctrl+C and SIGTERM
-    handlers, which Python only allows there, and one run at a time: runs
-    share the module's state, which each one resets as it starts (see
-    _reset_run_state()).
+    handlers, which Python only allows there (the previous handlers are put
+    back when it returns), and one run at a time: runs share the module's
+    state, which each one resets as it starts (see _reset_run_state()).
     """
     _reset_run_state()
     opts = parse_args(argv)
@@ -2098,48 +2158,82 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"Can't write --log-file {opts.log_file}: {exc.strerror or exc}", file=sys.stderr)
         return 2
-    signal.signal(signal.SIGINT, _stop_handler)
-    signal.signal(signal.SIGTERM, _stop_handler)
-
-    if not check_tools(need_mkvmerge=False):
-        return 1
+    previous = {sig: signal.signal(sig, _stop_handler) for sig in (signal.SIGINT, signal.SIGTERM)}
+    previous_hook = sys.unraisablehook
+    sys.unraisablehook = lambda unraisable: _unraisable(unraisable, previous_hook)
     try:
-        files = find_files(opts)
-    except KeyboardInterrupt as exc:
-        signum, reason = _stop_reason(exc)
-        log.error(f"{reason} while looking for files. No files were changed.")
-        return 128 + signum
-    if not files:
-        log.error("No matching files found.")
-        return 1
-    if any(f.suffix.lower() in MKV_EXTS for f in files) and not check_tools(need_mkvmerge=True):
-        return 1
-    _tell(opts, f"Found {len(files)} file(s){' (dry run)' if opts.dry_run else ''}.")
+        return _run(opts)
+    finally:
+        sys.unraisablehook = previous_hook
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
-    if opts.backup and not opts.dry_run:
-        try:
-            answer = choose_backup_mode(opts, files)
-        except KeyboardInterrupt as exc:
-            signum, reason = _stop_reason(exc)
-            print()
-            log.error(f"{reason}. No files were changed.")
-            return 128 + signum
-        if answer == "quit":
-            _tell(opts, "Quit before changing any files.")
-            return 0
-        opts = dataclasses.replace(opts, existing_backups=answer)
 
+def _ignore_stops() -> None:
+    """Ignore Ctrl+C and SIGTERM from now on: the files are done, or a stop
+    is already being reported, and only the summary is left. Otherwise a
+    signal now would raise Stopped wherever the main thread happens to be
+    and end the run in a traceback.
+
+    Run as a program, this is also set before main() starts, so the
+    handlers main() puts back when it returns are these, and a signal
+    during the interpreter's own exit is ignored too, rather than ending it
+    with Python's default KeyboardInterrupt."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def _run(opts: Options) -> int:
+    """The run behind main(), once the stop handlers are installed: the
+    search, the backup question, the files, the summary. One try covers
+    all of it, so a stop can't arrive between two of them and go
+    unhandled; stage says what it interrupted, which decides the message
+    and whether there's a partial summary to print. After each phase,
+    _check_stop() catches a stop whose exception was lost."""
+    files: list[Path] = []
     stats: Counter[Outcome] = Counter()
     list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
+    stage = "search"
     try:
+        if not check_tools(need_mkvmerge=False):
+            return 1
+        files = find_files(opts)
+        _check_stop()
+        if not files:
+            log.error("No matching files found.")
+            return 1
+        if any(f.suffix.lower() in MKV_EXTS for f in files) and not check_tools(need_mkvmerge=True):
+            return 1
+        _tell(opts, f"Found {len(files)} file(s){' (dry run)' if opts.dry_run else ''}.")
+
+        if opts.backup and not opts.dry_run:
+            stage = "question"
+            answer = choose_backup_mode(opts, files)
+            _check_stop()
+            if answer == "quit":
+                _tell(opts, "Quit before changing any files.")
+                return 0
+            opts = dataclasses.replace(opts, existing_backups=answer)
+
+        stage = "files"
         process_all(files, opts, stats)
+        _check_stop()
+        _ignore_stops()
     except KeyboardInterrupt as exc:
+        _ignore_stops()
         signum, reason = _stop_reason(exc)
+        if stage == "search":
+            log.error(f"{reason} while looking for files. No files were changed.")
+            return 128 + signum
         print()
+        if stage == "question":
+            log.error(f"{reason}. No files were changed.")
+            return 128 + signum
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
-        print_summary(stats, opts, partial=True, cancelled=len(files) - sum(stats.values()))
+        finished = sum(stats[k] for k in ("changed", "unchanged", "skipped", "error"))
+        print_summary(stats, opts, partial=True, cancelled=len(files) - finished)
         return 128 + signum
 
     report_ownership_failures(list_folder)
@@ -2148,4 +2242,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    _ignore_stops()
     sys.exit(main())
