@@ -28,8 +28,10 @@ env:
 
 jobs:
   test:
-    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}${{ matrix.experimental && ' (pre-release, may fail)' || '' }}
     runs-on: ${{ matrix.os }}
+    # The pre-release job may fail without failing the run.
+    continue-on-error: ${{ matrix.experimental == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,11 +44,19 @@ jobs:
             python-version: "3.14"
           - os: macos-latest
             python-version: "3.14"
+          # The next Python's pre-release, so a change in it that breaks the
+          # script or the tests shows up before it's released. Once 3.15 is
+          # out, make it the newest release above and move this to 3.16.
+          - os: ubuntu-latest
+            python-version: "3.15"
+            experimental: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          # Only matters for a version with no release yet, like 3.15 above.
+          allow-prereleases: true
           cache: pip
           cache-dependency-path: requirements*.txt
       - run: pip install -r requirements-dev.txt

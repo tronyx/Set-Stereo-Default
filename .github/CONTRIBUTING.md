@@ -70,7 +70,7 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 ## 📏 Code style
 
 - **One file, standard library only.** People install this by copying a single script, so keep it that way: no new modules, and no new required packages. tqdm stays optional.
-- **Python 3.10 and newer.** GitHub tests on 3.10 and the newest release. Avoid syntax newer than 3.10, such as reusing the same quote inside an f-string (3.12+).
+- **Python 3.10 and newer.** GitHub tests on 3.10, the newest release, and the next release's pre-release, which may fail without failing the run (a heads-up, not a blocker). Avoid syntax newer than 3.10, such as reusing the same quote inside an f-string (3.12+).
 - **Linux, macOS and Windows.** Use `pathlib` for paths, pass commands as lists rather than through a shell, and don't assume a file system feature (hard links, symlinks, owners) is always available.
 - **Docstrings, not comments.** Explain code in the docstring of the function it belongs to. Module-level settings get a docstring on the line after them. Don't add `#` comments.
 - **Keep docstrings short and plain.** Say what something does and, where it isn't obvious, why.
