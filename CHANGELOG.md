@@ -35,6 +35,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 - Removed an unused `position` setting from `process_file()` and `Progress`: nothing ever set it, so the file's progress bar was always on the top row, where it's now drawn directly.
 - What happened to each file (`changed`, `unchanged`, `skipped`, `error`, `cancelled`) has its own `Outcome` type instead of being any string, so mypy rejects a misspelled one, which would otherwise have been counted somewhere the summary never shows.
 - The README lists mkvmerge 45, the oldest version the tests run against, as the minimum instead of "any"; shows the lint and type-check commands next to the test command; and no longer says the coverage report misses the lines that run ffmpeg and mkvmerge, which the logic tests now reach.
+- The README's dry-run sample shows the `--track-order` option mkvmerge is now given, and its Troubleshooting section explains `changed by another program during the remux`; `--help` lists that check under "Safe by default".
 
 ## 2026-10-04 · [#11](https://github.com/tronyx/Set-Stereo-Default/pull/11)
 

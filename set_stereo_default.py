@@ -42,6 +42,9 @@ Safe by default:
     the right track default, and no shorter than the original. --backup
     also keeps the original as <name>.bak, never deleting an existing
     backup unless you say so.
+  - A file that another program replaced or edited during its remux is
+    left as it is now, rather than overwritten with the remux of the old
+    version; the next run fixes the new one.
   - Ctrl+C or SIGTERM (docker stop, kill) stops cleanly and removes any
     half-written temp files.
   - A symlinked file is fixed through its link: the file it points to is
@@ -1273,7 +1276,9 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     """Run a remux command written to plan.tmp_path, then check it and swap it
     in. Returns True on success (or after a dry run, which only logs the
     command), False on failure (already logged). Shared by apply_mkv() and
-    apply_remux(), which only build the command.
+    apply_remux(), which only build the command. parse_pct reads a
+    percentage from one line of the tool's output, or None for any other
+    line (see run_with_progress()).
 
     plan.intro is logged with the dry-run command, or just before the remux
     starts (see _announce()). warnings_exit is an exit code that means the

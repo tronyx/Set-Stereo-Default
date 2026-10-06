@@ -302,7 +302,7 @@ Found 8 file(s) (dry run).
 
 [1/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
   Awesome Show (2026) - S04E01 - Episode 25.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode --output-charset UTF-8 -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
+    [dry-run] mkvmerge --gui-mode --output-charset UTF-8 -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --track-order 0:0,0:1,0:2,0:3,0:4 --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
 
 ...
 
@@ -459,6 +459,8 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 **`post-remux check failed (stream#N lost its ... flag; ...)`.** Your mkvmerge is too old to keep a track flag (commentary, hearing impaired, ...) that the file has, so the file is left untouched. Update MKVToolNix to 54 or newer and run the script again. A similar check rejects a remux that changed a track's codec or language or lost its name.
 
 **`stream#N lost its ... flag, which ffmpeg can't write to .mp4 files`.** A warning, not an error: the file was fixed, but ffmpeg can't store flags such as "commentary" in MP4, MOV or AVI files at all, so that flag is gone. The tracks themselves are unchanged, but players can no longer tell, for example, that a track is commentary unless its name says so.
+
+**`changed by another program during the remux, so it's left as it is now`.** Another program, such as Sonarr or Radarr importing an upgrade, replaced or edited the file while the script was remuxing it. The remux was made from the old version, so it was discarded and the file was left as it is now. Run the script again to fix the new version. See [Changing the file](#-changing-the-file).
 
 **`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
 
