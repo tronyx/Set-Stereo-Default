@@ -2028,6 +2028,11 @@ def main(argv: list[str] | None = None) -> int:
     The answer to the backup question goes into opts.existing_backups, in
     a copy of opts (Options is frozen), so the rest of the run reads it from
     opts.backup_mode like any other option.
+
+    Call it from the main thread, since it installs the Ctrl+C and SIGTERM
+    handlers, which Python only allows there, and one run at a time: runs
+    share the module's state, which each one resets as it starts (see
+    _reset_run_state()).
     """
     _reset_run_state()
     opts = parse_args(argv)
