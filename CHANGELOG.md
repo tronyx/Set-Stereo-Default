@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+### Changed
+
+- A missing ffmpeg or ffprobe is reported before the search for files rather than after it, which on a large library or a network share could take minutes. mkvmerge is still checked only once the search shows there are MKV files to process.
+
 ### Fixed
 
 - Run on a relative path such as `.`, files whose names start with `-` or `@`, or contain a colon (`Movie: Part 2.mp4`), failed with errors like `Missing argument for option` or `Protocol not found`, because ffprobe, ffmpeg and mkvmerge read the bare name as an option or a web address. Every path is now made absolute before it's used, so these files are fixed like any other. File headers show the full path as a result.

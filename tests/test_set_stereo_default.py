@@ -2440,6 +2440,7 @@ def test_the_script_runs_without_tqdm(tmp_path):
             "sys.modules['tqdm'] = None\n"
             f"sys.path.insert(0, {str(Path(ssd.__file__).parent)!r})\n"
             "import set_stereo_default as ssd\n"
+            "ssd.shutil.which = lambda tool: '/usr/bin/' + tool\n"
             "print('HAVE_TQDM', ssd.HAVE_TQDM)\n"
             f"sys.exit(ssd.main([{str(tmp_path)!r}]))\n")
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
@@ -2898,6 +2899,7 @@ def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, cap
         signal.raise_signal(signum)
 
     processed = []
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "iter_files", interrupted_scan)
     monkeypatch.setattr(ssd, "process_file", lambda *a, **k: processed.append(a))
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
@@ -2995,19 +2997,47 @@ def test_log_handler_reports_its_own_errors_instead_of_raising(monkeypatch):
     assert handled == [record]
 
 
-@pytest.mark.parametrize("make_files, expected", [
-    (lambda folder: None, "No matching files found."),
-    (lambda folder: (folder / "a.mp4").write_text("x"), "Missing required tool(s): ffmpeg, ffprobe"),
+@pytest.mark.parametrize("tools, expected", [
+    (True, "No matching files found."),
+    (False, "Missing required tool(s): ffmpeg, ffprobe"),
 ], ids=["no files", "missing tools"])
-def test_fatal_errors_reach_the_console_with_a_log_file(tmp_path, monkeypatch, capsys,
-                                                         make_files, expected):
+def test_fatal_errors_reach_the_console_with_a_log_file(tmp_path, monkeypatch, capsys, tools,
+                                                         expected):
     videos = tmp_path / "videos"
     videos.mkdir()
-    make_files(videos)
-    monkeypatch.setattr(ssd.shutil, "which", lambda tool: None)
+    monkeypatch.setattr(ssd.shutil, "which", lambda tool: f"/usr/bin/{tool}" if tools else None)
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(videos),
                                       "--log-file", str(tmp_path / "run.log")])
 
     assert ssd.main() == 1
     assert expected in capsys.readouterr().out
     assert expected in (tmp_path / "run.log").read_text()
+
+
+def test_a_missing_tool_is_reported_before_the_search(tmp_path, monkeypatch, capsys):
+    """The search can take minutes on a large share, so a missing ffmpeg is
+    reported at once, without searching."""
+    searched = []
+    monkeypatch.setattr(ssd.shutil, "which", lambda tool: None)
+    monkeypatch.setattr(ssd, "find_files", lambda opts: searched.append(opts) or [])
+
+    assert ssd.main([str(tmp_path), "--no-progress"]) == 1
+
+    assert searched == []
+    assert "Missing required tool(s): ffmpeg, ffprobe" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name, code, message", [
+    ("e00.mkv", 1, "Missing required tool(s): mkvmerge (install MKVToolNix)"),
+    ("e00.mp4", 0, "Changed: 1"),
+], ids=["mkv needs it", "mp4 doesn't"])
+def test_mkvmerge_is_only_required_once_mkv_files_are_found(tmp_path, monkeypatch, capsys, name,
+                                                             code, message):
+    (tmp_path / name).write_text("x")
+    monkeypatch.setattr(ssd.shutil, "which",
+                        lambda tool: None if tool == "mkvmerge" else f"/usr/bin/{tool}")
+    monkeypatch.setattr(ssd, "process_file", lambda path, opts, **kwargs: "changed")
+
+    assert ssd.main([str(tmp_path), "--no-progress"]) == code
+
+    assert message in capsys.readouterr().out

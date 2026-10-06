@@ -2016,6 +2016,11 @@ def main(argv: list[str] | None = None) -> int:
     with 2 straight from parse_args(), and a --log-file that can't be
     written (no permission, or a folder rather than a file) returns 2 too.
 
+    ffmpeg and ffprobe are checked before the search for files, which can
+    take minutes on a large library or a network share, so a missing tool is
+    reported at once. mkvmerge is checked once the search shows there are
+    MKV files to process.
+
     When stopped while files are being processed, the stop handler has
     already killed every remux and each one has removed its temp file.
     What's left is a partial summary that counts unfinished files as
@@ -2044,6 +2049,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
+    if not check_tools(need_mkvmerge=False):
+        return 1
     try:
         files = find_files(opts)
     except KeyboardInterrupt as exc:
@@ -2053,7 +2060,7 @@ def main(argv: list[str] | None = None) -> int:
     if not files:
         log.error("No matching files found.")
         return 1
-    if not check_tools(need_mkvmerge=any(f.suffix.lower() in MKV_EXTS for f in files)):
+    if any(f.suffix.lower() in MKV_EXTS for f in files) and not check_tools(need_mkvmerge=True):
         return 1
     _tell(opts, f"Found {len(files)} file(s){' (dry run)' if opts.dry_run else ''}.")
 
