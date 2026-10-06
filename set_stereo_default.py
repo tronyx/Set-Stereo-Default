@@ -358,6 +358,9 @@ main thread, which may be the thread it interrupted while holding it."""
 _cancelled = threading.Event()
 """Set once Ctrl+C or SIGTERM arrives, so files that haven't started are skipped."""
 
+_requested_stop: list[int] = [signal.SIGINT]
+"""The signal of the last stop request, for _check_stop()."""
+
 _ownership_failures: list[tuple[str, tuple[int, int], tuple[int, int], str]] = []
 """Remuxed files that couldn't be given their original owner, as (full path,
 wanted owner, actual owner, reason). Reported once, at the end of the run,
@@ -417,7 +420,11 @@ def _stop_handler(signum: int, frame: FrameType | None) -> NoReturn:
     The remuxes have to be killed here for two reasons. Python raises the
     exception only in the main thread, so with --jobs > 1 a worker waiting
     on its remux would never notice it. And SIGTERM (docker stop, kill,
-    systemd) reaches only this process, not the remuxes it started."""
+    systemd) reaches only this process, not the remuxes it started.
+
+    The request is recorded before the exception is raised, since the
+    exception can be lost (see _check_stop())."""
+    _requested_stop[0] = signum
     _cancelled.set()
     _terminate_active_procs()
     raise Stopped(signum)
@@ -430,6 +437,31 @@ def _stop_reason(exc: BaseException) -> tuple[int, str]:
     if signum == signal.SIGINT:
         return signum, "Interrupted by user (Ctrl+C)"
     return signum, f"Stopped by {signal.Signals(signum).name}"
+
+
+def _check_stop() -> None:
+    """Raise Stopped if a stop was requested but its exception was lost.
+
+    _stop_handler() raises Stopped wherever the main thread happens to be,
+    and Python drops an exception raised while a __del__ runs (a finished
+    tool's Popen being collected, say) or a generator is closed, reporting
+    it through sys.unraisablehook instead of raising it. The run would
+    carry on as if nothing had happened, with the remaining files quietly
+    cancelled. The request itself survives in _cancelled, so _run() asks
+    here after each phase, and _unraisable() keeps the dropped exception
+    quiet."""
+    if _cancelled.is_set():
+        raise Stopped(_requested_stop[0])
+
+
+def _unraisable(unraisable: sys.UnraisableHookArgs,
+                fallback: Callable[[sys.UnraisableHookArgs], object]) -> None:
+    """sys.unraisablehook while main() runs: a Stopped that Python couldn't
+    raise is dropped without a word, since _check_stop() acts on the
+    request anyway; anything else goes to fallback, the hook that was
+    there before."""
+    if not isinstance(unraisable.exc_value, Stopped):
+        fallback(unraisable)
 
 
 class Cancelled(Exception):
@@ -2127,9 +2159,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Can't write --log-file {opts.log_file}: {exc.strerror or exc}", file=sys.stderr)
         return 2
     previous = {sig: signal.signal(sig, _stop_handler) for sig in (signal.SIGINT, signal.SIGTERM)}
+    previous_hook = sys.unraisablehook
+    sys.unraisablehook = lambda unraisable: _unraisable(unraisable, previous_hook)
     try:
         return _run(opts)
     finally:
+        sys.unraisablehook = previous_hook
         for sig, handler in previous.items():
             signal.signal(sig, handler)
 
@@ -2153,7 +2188,8 @@ def _run(opts: Options) -> int:
     search, the backup question, the files, the summary. One try covers
     all of it, so a stop can't arrive between two of them and go
     unhandled; stage says what it interrupted, which decides the message
-    and whether there's a partial summary to print."""
+    and whether there's a partial summary to print. After each phase,
+    _check_stop() catches a stop whose exception was lost."""
     files: list[Path] = []
     stats: Counter[Outcome] = Counter()
     list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
@@ -2162,6 +2198,7 @@ def _run(opts: Options) -> int:
         if not check_tools(need_mkvmerge=False):
             return 1
         files = find_files(opts)
+        _check_stop()
         if not files:
             log.error("No matching files found.")
             return 1
@@ -2172,6 +2209,7 @@ def _run(opts: Options) -> int:
         if opts.backup and not opts.dry_run:
             stage = "question"
             answer = choose_backup_mode(opts, files)
+            _check_stop()
             if answer == "quit":
                 _tell(opts, "Quit before changing any files.")
                 return 0
@@ -2179,6 +2217,7 @@ def _run(opts: Options) -> int:
 
         stage = "files"
         process_all(files, opts, stats)
+        _check_stop()
         _ignore_stops()
     except KeyboardInterrupt as exc:
         _ignore_stops()
@@ -2193,7 +2232,8 @@ def _run(opts: Options) -> int:
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
-        print_summary(stats, opts, partial=True, cancelled=len(files) - sum(stats.values()))
+        finished = sum(stats[k] for k in ("changed", "unchanged", "skipped", "error"))
+        print_summary(stats, opts, partial=True, cancelled=len(files) - finished)
         return 128 + signum
 
     report_ownership_failures(list_folder)

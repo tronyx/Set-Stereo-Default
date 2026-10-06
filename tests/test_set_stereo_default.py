@@ -3131,19 +3131,113 @@ def test_a_second_stop_while_the_stop_is_reported_is_ignored(tmp_path, monkeypat
     assert "Cancelled: 2" in out
 
 
+def stop_from_a_finalizer(signum):
+    """Deliver a stop the way one that lands while a __del__ runs arrives:
+    Python drops the exception the handler raises there (reporting it
+    through sys.unraisablehook), so only the request remains."""
+    class Finalizer:
+        def __del__(self):
+            ssd._stop_handler(signum, None)
+
+    obj = Finalizer()
+    del obj
+
+
+@pytest.mark.parametrize("signum, code, message", [
+    (signal.SIGINT, 130, "Interrupted by user (Ctrl+C)"),
+    (signal.SIGTERM, 143, "Stopped by SIGTERM"),
+], ids=["SIGINT", "SIGTERM"])
+def test_a_stop_whose_exception_was_lost_still_stops_the_run(tmp_path, monkeypatch, capsys,
+                                                             signum, code, message):
+    """A stop that lands while a __del__ runs (a finished tool's Popen being
+    collected) can't raise: Python drops the exception. The request must
+    still end the run as a stop, with the partial summary counting the
+    files that didn't run, rather than let it finish with exit code 0 and
+    a summary that doesn't mention them; and the dropped exception must
+    not be printed as a traceback."""
+    make_videos(tmp_path, 5)
+    calls = []
+
+    def fake_process_file(path, args, on_progress=None):
+        calls.append(path.name)
+        if len(calls) == 3:
+            stop_from_a_finalizer(signum)
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    exit_code = ssd.main()
+
+    out, err = capsys.readouterr()
+    assert exit_code == code
+    assert message in out
+    assert "Changed: 3" in out
+    assert "Cancelled: 2" in out
+    assert len(calls) == 3
+    assert "Stopped" not in err and "Exception ignored" not in err
+
+
+@pytest.mark.parametrize("signum, code, message", [
+    (signal.SIGINT, 130, "Interrupted by user (Ctrl+C)"),
+    (signal.SIGTERM, 143, "Stopped by SIGTERM"),
+], ids=["SIGINT", "SIGTERM"])
+def test_a_stop_lost_during_the_search_still_ends_the_run(tmp_path, monkeypatch, capsys,
+                                                          signum, code, message):
+    """The same, for a stop lost while looking for files: no file is
+    processed, and the run ends as a stop during the search."""
+    def scan_with_a_lost_stop(*args, **kwargs):
+        yield tmp_path / "a.mkv"
+        stop_from_a_finalizer(signum)
+        yield tmp_path / "b.mkv"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "iter_files", scan_with_a_lost_stop)
+    monkeypatch.setattr(ssd, "process_file", lambda *a, **k: pytest.fail("a file was processed"))
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    exit_code = ssd.main()
+
+    out, err = capsys.readouterr()
+    assert exit_code == code
+    assert f"{message} while looking for files. No files were changed." in out
+    assert "Summary" not in out
+    assert "Exception ignored" not in err
+
+
+def test_the_unraisable_hook_drops_only_a_lost_stop():
+    """While main() runs, a Stopped that Python couldn't raise is dropped
+    quietly; any other unraisable exception still reaches the hook that
+    was there before."""
+    seen = []
+    stop = types.SimpleNamespace(exc_value=ssd.Stopped(signal.SIGINT))
+    other = types.SimpleNamespace(exc_value=ValueError("something else"))
+
+    ssd._unraisable(stop, seen.append)
+    ssd._unraisable(other, seen.append)
+
+    assert seen == [other]
+
+
 def test_main_puts_the_previous_signal_handlers_back(tmp_path, monkeypatch):
     """main() installs its own Ctrl+C and SIGTERM handlers and puts the ones
     it found back when it returns, so a program that calls it keeps its own
     handling afterwards."""
     make_videos(tmp_path, 1)
     before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    hook_before = sys.unraisablehook
+    hooks_while_running = []
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
-    monkeypatch.setattr(ssd, "process_file", lambda *a, **k: "changed")
+    monkeypatch.setattr(ssd, "process_file",
+                        lambda *a, **k: hooks_while_running.append(sys.unraisablehook) or "changed")
     monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
 
     assert ssd.main() == 0
 
     assert {s: signal.getsignal(s) for s in before} == before
+    assert hooks_while_running != [hook_before]
+    assert sys.unraisablehook is hook_before
 
 
 @pytest.mark.parametrize("signum, code, message", [
