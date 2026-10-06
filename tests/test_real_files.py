@@ -28,6 +28,9 @@ import pytest
 SCRIPT = Path(__file__).resolve().parent.parent / "set_stereo_default.py"
 """The script under test, run as a separate program like a user would."""
 
+TMP_MARKER = ".tmp_remux"
+"""What the script puts in a temp file's name: <name>.tmp_remux.<ext>."""
+
 LAYOUTS = {1: "mono", 2: "stereo", 6: "5.1"}
 """ffmpeg's channel layout name for each channel count make_video() supports."""
 
@@ -890,6 +893,89 @@ def test_a_full_disk_is_reported_and_the_partial_remux_removed(tmp_path, ext):
         assert shutil.disk_usage(folder).free >= free, "the space wasn't given back"
     finally:
         shutil.rmtree(folder, ignore_errors=True)
+
+
+def kill_outright(proc, everything):
+    """Kill the script the way nothing can be caught: with everything it
+    started too (a reboot, the OOM killer), or alone (kill -9 on the
+    script, End task in Task Manager). Alone, the remux it was waiting
+    for is on its own: it may finish, or die writing its progress to a
+    script that's gone. This waits until it has ended either way, since
+    the next run must not find it still writing. On Windows the orphan
+    is found by its parent's ID, which it keeps after the parent dies."""
+    if everything:
+        os.killpg(proc.pid, signal.SIGKILL)
+    else:
+        proc.kill()
+    proc.wait(timeout=30)
+    if sys.platform == "win32":
+        wait_for_children = (f"Get-CimInstance Win32_Process -Filter 'ParentProcessId={proc.pid}' | ForEach-Object "
+                             "{ Wait-Process -Id $_.ProcessId -Timeout 60 -ErrorAction SilentlyContinue }")
+        subprocess.run(["powershell", "-NoProfile", "-Command", wait_for_children], check=True,
+                       capture_output=True)
+        return
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(proc.pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+    pytest.fail("the remux the script started didn't end")
+
+
+@pytest.mark.parametrize("backup", [False, True], ids=["no backup", "backup"])
+@pytest.mark.parametrize("everything", [
+    pytest.param(True, marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows has no instant way to kill a process tree")),
+    False,
+], ids=["everything killed", "only the script killed"])
+def test_a_run_killed_outright_leaves_a_temp_file_the_next_run_reports_and_replaces(tmp_path, stop_files,
+                                                                                    everything, backup):
+    """kill -9, a reboot or the OOM killer gives the script no chance to
+    clean up, so the temp file of the remux under way stays behind: a
+    partial one if the remux died too, maybe a complete one if it ran on
+    without the script. Either way the original must be untouched, and
+    the next run must report the leftover as such rather than treat it as
+    a video, remux the original afresh rather than trust it, and leave
+    nothing behind; the files done before the kill are just unchanged."""
+    folder = tmp_path / "videos"
+    shutil.copytree(stop_files.folder, folder)
+    names = sorted(stop_files.digests)
+    killed, done, waiting = names[2], names[:2], names[3:]
+    leftover = folder / f"{killed}{TMP_MARKER}{Path(killed).suffix}"
+    args = ["--backup"] if backup else []
+    posix = {"start_new_session": True} if sys.platform != "win32" else {}
+
+    proc = subprocess.Popen([sys.executable, str(SCRIPT), "--no-progress", *args, str(folder)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **posix)
+    try:
+        deadline = time.monotonic() + 60
+        while not leftover.exists():
+            assert proc.poll() is None and time.monotonic() < deadline, "the remux never started"
+            time.sleep(0.001)
+        kill_outright(proc, everything)
+    finally:
+        proc.kill()
+
+    assert leftover.exists(), "no temp file left: the remux finished before the kill"
+    for name in [killed, *waiting]:
+        assert digest(folder / name) == stop_files.digests[name], f"{name} was touched"
+    for name in done:
+        assert audio_defaults(folder / name) == FIXED, f"{name} wasn't done before the kill"
+
+    code, output = run_script(folder, *args, *(["--existing-backups", "replace"] if backup else []))
+
+    assert code == 0, output
+    assert f"Skipping leftover temp file from an interrupted run (safe to delete): {leftover}" in output, output
+    assert summary(output) == {"changed": 4, "unchanged": 2, "skipped": 0, "error": 0}, output
+    assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+    for name in names:
+        assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{output}"
+        assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{output}"
+        if backup:
+            assert digest(folder / f"{name}.bak") == stop_files.digests[name], f"{name}.bak isn't the original"
+    assert sorted(p.name for p in folder.glob("*.bak")) == ([f"{n}.bak" for n in names] if backup else [])
 
 
 AUDIO_CODECS = {
