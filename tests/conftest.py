@@ -14,14 +14,12 @@ import set_stereo_default as ssd
 
 
 def _reset():
-    """Clear everything the script keeps between calls: tracked remuxes, the
-    stop and owner-warning flags, which file printed last, and log handlers
-    added by main()."""
+    """Clear everything the script keeps between calls: what main() clears
+    at the start of each run (see _reset_run_state()), plus tracked remuxes
+    and the log handlers main() added. Records go back to propagating, so
+    caplog sees them."""
+    ssd._reset_run_state()
     ssd._active_procs.clear()
-    ssd._cancelled.clear()
-    ssd._ownership_failures.clear()
-    ssd._last_header[0] = None
-    ssd._file_context.header = None
     for handler in ssd.log.handlers:
         handler.close()
     ssd.log.handlers.clear()
@@ -33,12 +31,14 @@ def clean_module_state(monkeypatch):
     """Reset the script's state before and after every test, and put back
     the Ctrl+C and SIGTERM handlers that main() replaces. Tests run as if
     outside the Docker image, even when they run inside it, and each one
-    checks mkvmerge's options afresh."""
+    checks mkvmerge's options afresh. Whatever the test patched is put back
+    before the reset afterwards, since the reset uses the script's own
+    functions."""
     monkeypatch.delenv(ssd.IN_DOCKER_VAR, raising=False)
-    ssd.mkvmerge_can_keep_legacy_font_types.cache_clear()
     original_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     _reset()
     yield
+    monkeypatch.undo()
     _reset()
     for s, handler in original_handlers.items():
         signal.signal(s, handler)

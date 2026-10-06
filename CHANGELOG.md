@@ -8,6 +8,39 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 Nothing yet.
 
+## 2026-10-05 · [#12](https://github.com/tronyx/Set-Stereo-Default/pull/12)
+
+### Changed
+
+- A missing ffmpeg or ffprobe is reported before the search for files rather than after it, which on a large library or a network share could take minutes. mkvmerge is still checked only once the search shows there are MKV files to process.
+- With `--backup`, the check for existing `.bak` files before the run lists each folder once instead of checking every file on its own, which on a network share was one round trip per file.
+
+### Fixed
+
+- A symlink that someone had put at a file's temp name (`<name>.tmp_remux.<ext>`), or at a backup's staging name, was written through by mkvmerge, ffmpeg or the backup copy, and the link was then renamed over the original or into `.bak`, so the video itself became a symlink to wherever the link pointed. Whatever has the temp name is now removed before the remux, a remux that isn't a regular file is never swapped in, and a backup copy only ever writes a new file.
+- A file that another program replaced, edited or removed while it was being remuxed (e.g. Sonarr or Radarr importing an upgrade) was overwritten by the remux of the old version, silently losing the change. The script now checks that the file is unchanged before making its backup and again right before swapping the remux in (without hard links the backup is a full copy, which can take minutes on a share, so a change during it has to be caught too); if it changed, the file is left as it is now, any backup just made of the superseded version is removed, the file is reported as `changed by another program during the remux` and counted as an `Error`, and the next run fixes the new version.
+- Run on a relative path such as `.`, files whose names start with `-` or `@`, or contain a colon (`Movie: Part 2.mp4`), failed with errors like `Missing argument for option` or `Protocol not found`, because ffprobe, ffmpeg and mkvmerge read the bare name as an option or a web address. Every path is now made absolute before it's used, so these files are fixed like any other. File headers show the full path as a result.
+- With `--backup` on storage without hard links (exFAT, some network shares), where the backup is a full copy, a copy that failed partway (a full disk, a dropped share) left a partial `.bak` that looked complete, and with `--existing-backups replace` had already deleted the old one. Backups are now made under a temporary name and only renamed to `.bak` once complete, so a failed copy leaves the old backup, and the original, as they were.
+- The list of files that couldn't keep their owner could overwrite another list made in the same second, and, when written to a shared temp folder by a run as root, follow a symlink someone had planted at its name and overwrite the file it pointed to. The list is now always created as a new file, never over or through anything already at that name, and its name includes the process ID (`set_stereo_default-owners-<date>-<time>-<process ID>.log`).
+- On Linux, a file whose name isn't valid UTF-8 (old libraries can hold Latin-1 names) was fixed, but on most desktop locales each of its lines became a `--- Logging error ---` traceback on the console and was missing from `--log-file`. Such names are now written with the odd bytes as escapes, e.g. `caf\xe9.mkv`.
+- `--log-file` naming a folder that doesn't exist ended in a Python traceback instead of an error message. It's now reported like any other invalid option, with exit code 2, as is a log file that can't be written for another reason, such as permissions.
+- An MP4, MOV or AVI remux that lost a flag ffmpeg can't write (e.g. "commentary") and then failed a later check got both the `lost its ... flag` warning, which means the file was fixed, and the `post-remux check failed` error saying it was left untouched. The warning now only appears when the file really was fixed.
+
+### Project
+
+- The check before a remux replaces the original is split into one small function per rule, with no change in behavior, so it's easier to read and to change safely. Its complexity score went from E (36) to B (9).
+- That check returns its result as one `Verification` value, the problem (if any) and the warnings to log if the remux is used, instead of filling in a list passed to it, so a caller can't lose the warnings by mistake. No change in behavior.
+- Whether a file is an AVI reorder, and which stream is the target, are decided once and kept on the file's `Plan`, instead of being worked out again in each function that needs them. No change in behavior.
+- The summary's counts are kept in a `Counter`, which reads as zero for an outcome that never happened, instead of a dictionary seeded with every outcome by hand. No change in behavior.
+- mypy checks the script in strict mode, now that its last loose type hints (an untyped `dict`, and two lookups that returned a value of unknown type) are fixed. No change in behavior.
+- Every third-party GitHub Action is pinned to a commit instead of a version tag, which its owner could move to other code, and the actionlint image to its digest. The Docker actions get the Docker Hub token and push the published image, so this keeps a compromised or moved tag from reaching either. Dependabot still proposes updates, moving each pin and its version comment together.
+- The command-line options are passed around as one typed, read-only `Options` object instead of argparse's untyped one, with no change in behavior. mypy now checks every option the script reads, so a misspelled option name or a wrong type fails the checks instead of slipping through, and the backup setting no longer changes from yes/no to a mode partway through a run.
+- `main()` can be called more than once in the same Python process. A second call used to print every line twice, report the first run's ownership problems again, and, after a stopped run, cancel every file. Each run now starts clean. It must be called from the main thread, which Python requires for installing the Ctrl+C and SIGTERM handlers, and one run at a time; its docstring says so.
+- Removed an unused `position` setting from `process_file()` and `Progress`: nothing ever set it, so the file's progress bar was always on the top row, where it's now drawn directly.
+- What happened to each file (`changed`, `unchanged`, `skipped`, `error`, `cancelled`) has its own `Outcome` type instead of being any string, so mypy rejects a misspelled one, which would otherwise have been counted somewhere the summary never shows.
+- The README lists mkvmerge 45, the oldest version the tests run against, as the minimum instead of "any"; shows the lint and type-check commands next to the test command; and no longer says the coverage report misses the lines that run ffmpeg and mkvmerge, which the logic tests now reach.
+- The README's dry-run sample shows the `--track-order` option mkvmerge is now given, and its Troubleshooting section explains `changed by another program during the remux`; `--help` lists that check under "Safe by default".
+
 ## 2026-10-04 · [#11](https://github.com/tronyx/Set-Stereo-Default/pull/11)
 
 ### Added

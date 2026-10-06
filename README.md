@@ -41,7 +41,7 @@ The commentary is stereo too, but it's never picked (see [Picking the track](#-p
 | --- | --- | --- |
 | [Python](https://www.python.org) | 3.10 or newer | Everything |
 | [ffmpeg and ffprobe](https://ffmpeg.org) | 4.4 or newer | Everything |
-| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | Any; 54 or newer recommended | `.mkv` and `.webm` files |
+| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | 45 or newer; 54 or newer recommended | `.mkv` and `.webm` files |
 | [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
 
 The script is tested against ffmpeg 4.4, 5.1, 6.1, 7.1 and the newest release, and mkvmerge 45, 65, 74, 82, 92 and the newest release.
@@ -302,7 +302,7 @@ Found 8 file(s) (dry run).
 
 [1/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
   Awesome Show (2026) - S04E01 - Episode 25.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode --output-charset UTF-8 -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
+    [dry-run] mkvmerge --gui-mode --output-charset UTF-8 -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --track-order 0:0,0:1,0:2,0:3,0:4 --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
 
 ...
 
@@ -352,6 +352,8 @@ Every change is a **remux**: the audio and video are copied as-is into a new fil
 
 If the check fails, the original is kept and the file is counted as an `Error`. The one exception is a flag such as "commentary" in an MP4, MOV or AVI file: ffmpeg can't write those flags to these formats at all, so losing one is a warning rather than an error (see [Troubleshooting](#-troubleshooting)).
 
+The new file also isn't used if the original changed while it was being made, for example because Sonarr or Radarr imported an upgrade over it. Swapping it in would undo that change, so the file is left as it is now and counted as an `Error`; the next run fixes the new version.
+
 > [!NOTE]
 > A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
 
@@ -390,12 +392,12 @@ A remux creates a brand-new file, so the script copies the original's permission
 Changing a file's owner requires root. If the script can't do it, the permissions are still copied, and one warning at the end of the run, just before the summary, says how many files are affected, where the full list is, and which owner they should have:
 
 ```text
-Couldn't give 5 remuxed files their original owner (Operation not permitted). You can view the full list of files here: /home/tronyx/set_stereo_default-owners-20261002-153012.log
+Couldn't give 5 remuxed files their original owner (Operation not permitted). You can view the full list of files here: /home/tronyx/set_stereo_default-owners-20261002-153012-48213.log
 
 These files should belong to tronyx:users (1000:100) but belong to nobody:nogroup (65534:65534). Permissions were still copied. ...
 ```
 
-The list has one full path per line, sorted. It's saved next to your `--log-file` if you use one, otherwise in the folder you ran the script from (or your system's temp folder if that one isn't writable). Each run gets its own list, so an earlier one is never overwritten. If only one file is affected, the warning names it instead.
+The list has one full path per line, sorted. It's saved next to your `--log-file` if you use one, otherwise in the folder you ran the script from (or your system's temp folder if that one isn't writable). Its name has the date, time and the script's process ID, so each run gets its own list and an earlier one is never overwritten. If only one file is affected, the warning names it instead.
 
 > [!IMPORTANT]
 > **On an NFS share, run the script as the user that owns your media, not as root.** NFS servers usually turn root into `nobody` ("root squashing"), so files the script creates as root end up owned by `nobody`, and root can't change that from the client. The tools that manage your media may then be unable to rename or replace those files. Running as the media's owner avoids it, because NFS keeps that user's ID:
@@ -419,7 +421,7 @@ With `--keep-dates`, each changed file gets the original's modification and acce
 
 Ctrl+C and SIGTERM (what `docker stop`, `kill` and systemd send) stop the script cleanly: running remuxes are killed, their temp files are removed, and finished files are untouched. The partial summary counts every file that didn't finish as `Cancelled`.
 
-If the script is killed outright instead (`kill -9`, a power cut, a container that doesn't stop in time), a `<name>.tmp_remux.<ext>` file can be left next to the original. The next run skips these with a warning. They're safe to delete, since the original is only ever replaced by a finished, checked file.
+If the script is killed outright instead (`kill -9`, a power cut, a container that doesn't stop in time), a `<name>.tmp_remux.<ext>` file can be left next to the original, or a `<name>.bak.tmp_remux.<ext>` one if it was making a backup. The next run skips these with a warning. They're safe to delete, since the original is only ever replaced by a finished, checked file, and a backup only takes its real name once it's complete.
 
 ## ⚠️ Limitations
 
@@ -458,6 +460,8 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 **`stream#N lost its ... flag, which ffmpeg can't write to .mp4 files`.** A warning, not an error: the file was fixed, but ffmpeg can't store flags such as "commentary" in MP4, MOV or AVI files at all, so that flag is gone. The tracks themselves are unchanged, but players can no longer tell, for example, that a track is commentary unless its name says so.
 
+**`changed by another program during the remux, so it's left as it is now`.** Another program, such as Sonarr or Radarr importing an upgrade, replaced or edited the file while the script was remuxing it. The remux was made from the old version, so it was discarded and the file was left as it is now. Run the script again to fix the new version. See [Changing the file](#-changing-the-file).
+
 **`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
 
 **`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command to use, or in the Docker image, the `docker run --user` one. See [Permissions and ownership](#-permissions-and-ownership).
@@ -472,8 +476,12 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest
+python -m pytest          # the tests
+python -m ruff check .    # lint the code
+python -m mypy            # check the type hints
 ```
+
+GitHub runs all three on every push, so a pull request needs to pass each one.
 
 There are two sets of tests:
 
@@ -489,7 +497,7 @@ python -m coverage run -m pytest
 python -m coverage report
 ```
 
-The real-file tests run the script as a separate program, so the lines only they reach (the actual ffmpeg and mkvmerge runs, for example) show as missing in that report.
+Coverage only counts code that runs inside the test process. The logic tests reach almost every line, because they drive the script's own code for running ffmpeg and mkvmerge with small Python stand-ins. The real-file tests run the script as a separate program, so they don't add to the number.
 
 ## 🤖 A note on how this was built
 

@@ -145,10 +145,13 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run_script(*args):
-    """Run the script as a user would. Returns (exit code, combined output)."""
+def run_script(*args, env=None):
+    """Run the script as a user would, with env added to its environment.
+    Returns (exit code, combined output), decoded as strict UTF-8: the
+    script writes a name it can't encode as escapes, never as raw bytes."""
     res = subprocess.run([sys.executable, str(SCRIPT), "--no-progress", *map(str, args)],
-                         capture_output=True, text=True, check=False)
+                         capture_output=True, text=True, check=False,
+                         env=None if env is None else {**os.environ, **env})
     return res.returncode, res.stdout + res.stderr
 
 
@@ -545,6 +548,52 @@ def test_unreadable_file_is_an_error_and_left_alone(tmp_path):
     assert code == 1, output
     assert summary(output)["error"] == 1, output
     assert digest(video) == before
+
+
+@pytest.mark.parametrize("name", [
+    "-dash.mkv",
+    "@at.mkv",
+    pytest.param("Movie:Part2.mp4", marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows file names can't contain a colon")),
+])
+def test_a_name_like_an_option_is_fixed_when_run_on_its_folder(tmp_path, monkeypatch, name):
+    """Run on ".", the tools would get the bare name: ffprobe, ffmpeg and
+    mkvmerge read one starting with - as an option, mkvmerge one starting
+    with @ as a file of options, and ffmpeg one with a colon as a protocol.
+    Each must be fixed like any other file."""
+    need("ffmpeg", "ffprobe", *(["mkvmerge"] if name.endswith(".mkv") else []))
+    make_video(tmp_path / name, [Track(6, default=True), Track(2)])
+    monkeypatch.chdir(tmp_path)
+
+    code, output = run_script(".")
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(tmp_path / name) == [(6, False), (2, True)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows file names are always Unicode")
+def test_a_file_name_that_isnt_valid_utf8_is_fixed(tmp_path):
+    """Old Linux libraries hold Latin-1 names, which reach the script as
+    surrogate-escaped text. The name must round-trip to ffprobe and
+    mkvmerge, and show in the output as escapes, even on a console that
+    refuses anything but valid UTF-8 (forced here, since whether it does
+    depends on the locale)."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    name = os.fsdecode(b"caf\xe9.mkv")
+    try:
+        (tmp_path / name).touch()
+    except OSError as exc:
+        pytest.skip(f"this file system needs Unicode names: {exc}")
+    video = make_video(tmp_path / name, [Track(6, default=True), Track(2)])
+
+    code, output = run_script(video, env={"PYTHONIOENCODING": "utf-8:strict"})
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert "caf\\xe9.mkv: setting stream#2" in output, output
+    assert "Logging error" not in output, output
 
 
 @pytest.mark.parametrize("ext", [".mkv", ".mp4"])

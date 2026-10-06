@@ -42,6 +42,9 @@ Safe by default:
     the right track default, and no shorter than the original. --backup
     also keeps the original as <name>.bak, never deleting an existing
     backup unless you say so.
+  - A file that another program replaced or edited during its remux is
+    left as it is now, rather than overwritten with the remux of the old
+    version; the next run fixes the new one.
   - Ctrl+C or SIGTERM (docker stop, kill) stops cleanly and removes any
     half-written temp files.
   - A symlinked file is fixed through its link: the file it points to is
@@ -84,9 +87,12 @@ Full guide: https://github.com/tronyx/Set-Stereo-Default
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
+import dataclasses
 import functools
 import importlib
+import io
 import json
 import logging
 import os
@@ -94,18 +100,19 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType, ModuleType
-from typing import NoReturn
+from typing import Any, Literal, NoReturn
 
 try:
     from tqdm import tqdm
@@ -234,16 +241,50 @@ class TqdmLoggingHandler(logging.Handler):
             self.handleError(record)
 
 
+def _escape_bytes(error: UnicodeError) -> tuple[str, int]:
+    """How the console and the log file write text they can't encode (see
+    setup_logging()): each character they can't becomes an escape. A
+    surrogate escape (U+DC80 to U+DCFF), which is how a byte that isn't
+    valid UTF-8 in a Linux file name reaches Python, becomes that byte's
+    escape, e.g. "\\xe9", so the name reads as the file system has it;
+    anything else becomes its code point's, as backslashreplace gives."""
+    if not isinstance(error, UnicodeEncodeError):
+        raise error
+    escaped = "".join(f"\\x{ord(c) - 0xDC00:02x}" if 0xDC80 <= ord(c) <= 0xDCFF
+                      else c.encode("ascii", "backslashreplace").decode("ascii")
+                      for c in error.object[error.start:error.end])
+    return escaped, error.end
+
+
+codecs.register_error("escapebytes", _escape_bytes)
+
+
 def setup_logging(log_file: str | None) -> None:
     """Send log messages to the console, or with --log-file to that file.
     With a log file, warnings and errors still reach the console too, so a
-    failed run (e.g. a missing tool) never ends without saying why."""
+    failed run (e.g. a missing tool) never ends without saying why. Handlers
+    from an earlier call are closed and replaced, so a second run in the
+    same process doesn't print every line twice.
+
+    The console (both streams, since the progress bars go to the second)
+    and the log file write a character they can't encode as an escape, e.g.
+    caf\\xe9.mkv (see _escape_bytes()), rather than failing. A Linux file
+    name that isn't valid UTF-8 reaches the script as surrogate escapes,
+    which a strict UTF-8 console, the default in most locales, would
+    otherwise refuse, turning each of that file's lines into a logging
+    error and leaving them out of the log file."""
+    for old in log.handlers[:]:
+        log.removeHandler(old)
+        old.close()
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="escapebytes")
     log.setLevel(logging.INFO)
     log.propagate = False
     console = TqdmLoggingHandler() if HAVE_TQDM else logging.StreamHandler(sys.stdout)
     console.setFormatter(logging.Formatter("%(message)s"))
     if log_file:
-        handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        handler = logging.FileHandler(log_file, mode="a", encoding="utf-8", errors="escapebytes")
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         log.addHandler(handler)
         console.setLevel(logging.WARNING)
@@ -324,6 +365,21 @@ by report_ownership_failures()."""
 
 _ownership_lock = threading.Lock()
 """Guards _ownership_failures, which several --jobs threads add to at once."""
+
+
+def _reset_run_state() -> None:
+    """Forget what an earlier run in this process left behind, so main() can
+    run more than once, e.g. when called from other Python code: a stop
+    request (which would cancel every file), files that couldn't keep their
+    owner (which would be reported again), the header printed last, and
+    whether this mkvmerge can keep legacy font types. No remux outlives its
+    run, so _active_procs is already empty."""
+    _cancelled.clear()
+    with _ownership_lock:
+        _ownership_failures.clear()
+    _last_header[0] = None
+    _file_context.header = None
+    mkvmerge_can_keep_legacy_font_types.cache_clear()
 
 
 def _terminate_active_procs() -> None:
@@ -425,9 +481,10 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
 
     parse_pct(line) returns 0-100 for a progress line and None for anything
     else. With progress.show, a tqdm bar titled label shows this file's
-    progress at row progress.position. progress.on_progress(pct), if set,
-    is called on every increase and with 100 on success; process_all()
-    uses it to move the overall bar. Output is read as UTF-8, as in run().
+    progress on the top row, above process_all()'s overall bar.
+    progress.on_progress(pct), if set, is called on every increase and with
+    100 on success; process_all() uses it to move the overall bar. Output
+    is read as UTF-8, as in run().
 
     The process is listed in _active_procs while it runs and is killed if
     anything goes wrong, so it's never left running on its own. If a stop
@@ -449,8 +506,7 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
         if _cancelled.is_set():
             proc.kill()
         if progress.show and HAVE_TQDM:
-            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False,
-                       position=progress.position)
+            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=0)
         for line in stdout:
             pct = parse_pct(line)
             if pct is None:
@@ -519,7 +575,7 @@ class Stream:
     mimetype: str = ""
 
 
-def _stream_info(raw: dict) -> Stream:
+def _stream_info(raw: dict[str, Any]) -> Stream:
     """One stream from ffprobe's JSON (raw) as a Stream."""
     tags = raw.get("tags", {}) or {}
     disposition = raw.get("disposition", {}) or {}
@@ -659,8 +715,9 @@ def _stream_loss(was: Stream, now: Stream) -> str | None:
     """What a remux changed about one stream (was, before; now, after), as a
     short reason, or None if nothing it must keep. Its type, codec and
     channel count must match, a known language mustn't change, and every
-    name it had must still be there. Flags are checked by verify_remux(),
-    since whether losing one is acceptable depends on the container.
+    name it had must still be there. Flags are checked by
+    _streams_problem(), since whether losing one is acceptable depends on
+    the container.
 
     Only losses count. A tool may add a name (ffmpeg names MP4 tracks
     "SoundHandler" when they have none) or fill in "und" for a missing
@@ -681,42 +738,16 @@ def _stream_loss(was: Stream, now: Stream) -> str | None:
     return None
 
 
-def verify_remux(plan: Plan, reordered: bool) -> str | None:
-    """Check the finished remux at plan.tmp_path before it replaces the
-    original. Returns None if it looks right, otherwise a short reason why
-    not. The original isn't probed again: plan.layout and plan.duration
-    already describe it.
-
-    The new file must have as many streams as the original, so nothing was
-    lost, and must not be shorter than the original by more than
-    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds). A much
-    shorter result means the original contains less than its header
-    claims, e.g. an incomplete download, so it's left alone for a person
-    to look at. A longer one is fine: the original's header just
-    understated it. The check is skipped if either duration is unknown.
-
-    Every stream must then come through as it was (see _stream_loss()):
-    same type, codec and channels, no known language changed and no name
-    lost. Its flags (forced, commentary, hearing impaired, ...) must all
-    survive in MKV files: mkvmerge 54 and newer keep every one, but 52 and
-    older drop the commentary, audio-description, hearing-impaired and
-    original-language flags, which players use to label and choose tracks.
-    ffmpeg can't write any of these
-    flags to MP4, MOV or AVI files, so a flag lost there is unavoidable: it's
-    logged as a warning, and the remux is still used.
-
-    Then the target must be the only audio track flagged default. A
-    remux keeps audio tracks in order, so the target is found by its
-    position among them. After an AVI reorder (reordered=True) there's no
-    flag to check, so the first audio track must instead match the
-    target's codec, channel count and language (compared after
-    normalize_language(), as everywhere else). The streams are then in
-    apply_remux()'s order: video, the target, the other audio tracks,
-    subtitles, data."""
-    after, after_duration = probe_streams(plan.tmp_path, report=False)
-    if after is None:
-        return "ffprobe couldn't read the file"
-    before, before_duration, streams = plan.layout, plan.duration, plan.streams
+def _content_problem(plan: Plan, after: list[Stream], after_duration: float | None) -> str | None:
+    """Whether the remux (after, after_duration) lost anything outright: it
+    must have as many streams, and as many audio tracks, as the original,
+    and mustn't be shorter by more than MAX_DURATION_LOSS (and at least
+    MIN_DURATION_LOSS seconds). A much shorter result means the original
+    contains less than its header claims, e.g. an incomplete download, so
+    it's left alone for a person to look at. A longer one is fine: the
+    original's header just understated it. The duration check is skipped
+    if either duration is unknown."""
+    before, before_duration = plan.layout, plan.duration
     if len(after) != len(before):
         return f"stream count changed from {len(before)} to {len(after)}"
     if before_duration and after_duration is not None:
@@ -724,46 +755,128 @@ def verify_remux(plan: Plan, reordered: bool) -> str | None:
         if after_duration < before_duration - allowed:
             return (f"duration dropped from {before_duration:.1f}s to {after_duration:.1f}s; "
                     f"the original may be incomplete")
-
     audio = [s for s in after if s.type == "audio"]
-    if len(audio) != len(streams):
-        return f"expected {len(streams)} audio tracks, found {len(audio)}"
+    if len(audio) != len(plan.streams):
+        return f"expected {len(plan.streams)} audio tracks, found {len(audio)}"
+    return None
 
-    target = next(s for s in streams if s.index == plan.target_index)
-    if reordered:
-        first = audio[0]
-        if (first.codec != target.codec or first.channels != target.channels
-                or (target.language and normalize_language(first.language)
-                    != normalize_language(target.language))):
-            return "target audio track didn't end up first"
-        of_type = {t: [s for s in before if s.type == t] for t in ("video", "audio", "subtitle", "data")}
-        moved = next(s for s in of_type["audio"] if s.index == plan.target_index)
-        order = (of_type["video"] + [moved] + [s for s in of_type["audio"] if s is not moved]
-                 + of_type["subtitle"] + of_type["data"] + [s for s in before if s.type not in of_type])
-    else:
-        order = before
+
+def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
+    """After an AVI reorder, whether the target failed to end up as the
+    first audio track (audio, the remux's audio tracks). AVI has no default
+    flag to check, so the first track must match the target's codec,
+    channel count and language (compared after normalize_language(), as
+    everywhere else)."""
+    target = plan.target
+    first = audio[0]
+    if (first.codec != target.codec or first.channels != target.channels
+            or (target.language and normalize_language(first.language)
+                != normalize_language(target.language))):
+        return "target audio track didn't end up first"
+    return None
+
+
+def _expected_order(plan: Plan) -> list[Stream]:
+    """The original's streams in the order the remux should have them. A
+    remux keeps the order (mkvmerge is told to; see apply_mkv()), except
+    that an AVI reorder (plan.reordered) writes apply_remux()'s order:
+    video, the target, the other audio tracks, subtitles, data, then
+    anything else."""
+    before = plan.layout
+    if not plan.reordered:
+        return before
+    of_type = {t: [s for s in before if s.type == t] for t in ("video", "audio", "subtitle", "data")}
+    moved = next(s for s in of_type["audio"] if s.index == plan.target_index)
+    return (of_type["video"] + [moved] + [s for s in of_type["audio"] if s is not moved]
+            + of_type["subtitle"] + of_type["data"] + [s for s in before if s.type not in of_type])
+
+
+def _streams_problem(plan: Plan, order: list[Stream],
+                     after: list[Stream]) -> tuple[str | None, tuple[str, ...]]:
+    """Whether a stream failed to come through the remux as it was: each of
+    order (see _expected_order()) against the remux's stream in the same
+    place, by _stream_loss() and then by its flags (forced, commentary,
+    hearing impaired, ...). Returns (problem, notes): the first problem
+    found, or None and the warnings to log if the remux is used.
+
+    In MKV files every flag must survive: mkvmerge 54 and newer keep every
+    one, but 52 and older drop the commentary, audio-description,
+    hearing-impaired and original-language flags, which players use to
+    label and choose tracks. ffmpeg can't write any of these flags to MP4,
+    MOV or AVI files, so a flag lost there is unavoidable: it becomes a
+    note, and the remux is still used."""
     is_mkv = plan.path.suffix.lower() in MKV_EXTS
+    notes: list[str] = []
     for was, now in zip(order, after, strict=True):
         loss = _stream_loss(was, now)
         if loss:
-            return loss
+            return loss, ()
         lost = sorted(was.flags - now.flags)
         if not lost:
             continue
         what = f"stream#{was.index} lost its {', '.join(lost)} flag{'s' if len(lost) > 1 else ''}"
         if is_mkv:
-            return f"{what}; mkvmerge 52 and older drop it, so update MKVToolNix to 54 or newer"
-        log.warning(f"    {plan.path.name}: {what}, which ffmpeg can't write to "
-                    f"{plan.path.suffix.lower()} files")
-    if reordered:
-        return None
+            return f"{what}; mkvmerge 52 and older drop it, so update MKVToolNix to 54 or newer", ()
+        notes.append(f"    {plan.path.name}: {what}, which ffmpeg can't write to "
+                     f"{plan.path.suffix.lower()} files")
+    return None, tuple(notes)
 
-    expected = audio[streams.index(target)].index
+
+def _default_flag_problem(plan: Plan, audio: list[Stream]) -> str | None:
+    """Whether anything but the target is flagged default among the remux's
+    audio tracks (audio). A remux keeps audio tracks in order, so the
+    target is found by its position among them."""
+    expected = audio[plan.streams.index(plan.target)].index
     defaults = [s.index for s in audio if s.default]
     if defaults != [expected]:
         found = ", ".join(f"stream#{i}" for i in defaults) or "no track"
         return f"default flag is on {found}, expected only stream#{expected}"
     return None
+
+
+@dataclass(frozen=True)
+class Verification:
+    """verify_remux()'s result: problem, why the remux must be rejected (None
+    if it passed), and notes, warnings to log if the remux is then used (a
+    flag ffmpeg can't write; see _streams_problem()). A rejected remux
+    never carries notes, since they'd describe a change that isn't made."""
+    problem: str | None = None
+    notes: tuple[str, ...] = ()
+
+
+def verify_remux(plan: Plan) -> Verification:
+    """Check the finished remux at plan.tmp_path before it replaces the
+    original. Returns a Verification: no problem if it looks right,
+    otherwise a short reason why not. The original isn't probed again:
+    plan.layout and plan.duration already describe it.
+
+    Warnings worth giving if the remux is used come back as notes rather
+    than being logged, since a later check can still reject the remux.
+    check_and_swap_in() logs them once the remux has replaced the original.
+
+    The checks run in this order, each only once the ones before it have
+    passed, and the first problem found is the one reported:
+    - nothing lost outright: streams, audio tracks, duration
+      (_content_problem());
+    - after an AVI reorder (plan.reordered), the target is the first audio
+      track (_first_audio_problem());
+    - every stream came through as it was, in the expected order
+      (_expected_order(), _streams_problem());
+    - except after an AVI reorder, which has no default flag, the target
+      is the only audio track flagged default (_default_flag_problem())."""
+    after, after_duration = probe_streams(plan.tmp_path, report=False)
+    if after is None:
+        return Verification("ffprobe couldn't read the file")
+    audio = [s for s in after if s.type == "audio"]
+    notes: tuple[str, ...] = ()
+    problem = _content_problem(plan, after, after_duration)
+    if problem is None and plan.reordered:
+        problem = _first_audio_problem(plan, audio)
+    if problem is None:
+        problem, notes = _streams_problem(plan, _expected_order(plan), after)
+    if problem is None and not plan.reordered:
+        problem = _default_flag_problem(plan, audio)
+    return Verification(problem, notes if problem is None else ())
 
 
 def backup_path(path: Path, replace: bool) -> Path:
@@ -784,14 +897,40 @@ def make_backup(path: Path, replace: bool = False) -> Path:
     is instant and needs no room while the remux runs; once the new file
     replaces the original, the backup holds the original's data on its
     own, so it takes the original's full size until it's deleted. Where
-    hard links aren't supported, a full copy is made instead."""
+    hard links aren't supported, a full copy is made instead.
+
+    The backup is made under a staging name, <name>.bak.tmp_remux.<ext>,
+    and renamed into place in one step once it's complete. So a copy that
+    fails partway (a full disk, a dropped share) never leaves a partial
+    backup that looks whole, nor removes the <name>.bak it was replacing.
+    The staging file is removed if anything goes wrong, and if the run is
+    killed outright, the next run reports it as a leftover temp file.
+
+    Whatever already has the staging name is removed first, and the copy
+    only ever writes a new file (see _copy_new()), so a symlink someone put
+    at that name is never written through."""
     bak_path = backup_path(path, replace)
-    bak_path.unlink(missing_ok=True)
+    staging = bak_path.with_name(bak_path.name + TMP_MARKER + path.suffix)
+    staging.unlink(missing_ok=True)
     try:
-        os.link(path, bak_path)
-    except OSError:
-        shutil.copy2(path, bak_path)
+        try:
+            os.link(path, staging)
+        except OSError:
+            _copy_new(path, staging)
+        os.replace(staging, bak_path)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
     return bak_path
+
+
+def _copy_new(src: Path, dst: Path) -> None:
+    """Copy src to dst, with its permissions and dates, like shutil.copy2(),
+    except that dst must not exist yet: copy2() opens whatever is there,
+    following a symlink to wherever it points, while this fails instead."""
+    with open(src, "rb") as source, open(dst, "xb") as target:
+        shutil.copyfileobj(source, target, 1024 * 1024)
+    shutil.copystat(src, dst)
 
 
 def _owner(path: Path) -> tuple[int, int]:
@@ -805,7 +944,7 @@ def _user_name(uid: int) -> str | None:
     if pwd is None:
         return None
     try:
-        return pwd.getpwuid(uid).pw_name
+        return str(pwd.getpwuid(uid).pw_name)
     except KeyError:
         return None
 
@@ -815,7 +954,7 @@ def _group_name(gid: int) -> str | None:
     if grp is None:
         return None
     try:
-        return grp.getgrgid(gid).gr_name
+        return str(grp.getgrgid(gid).gr_name)
     except KeyError:
         return None
 
@@ -856,21 +995,29 @@ def copy_ownership(src: Path, dst: Path) -> None:
 
 def _write_ownership_list(folder: Path | str) -> Path | None:
     """Write the full path of every file in _ownership_failures to a new
-    set_stereo_default-owners-<date>-<time>.log in folder, one per line in
-    path order (they're recorded in whatever order --jobs finishes them),
-    and return its path. If the files don't all share one wanted and one actual
-    owner, each line also says which. Falls back to the system's temp
-    folder if folder can't be written to; returns None if that fails too.
-    The timestamp means a later run never overwrites an earlier list."""
+    set_stereo_default-owners-<date>-<time>-<process ID>.log in folder, one
+    per line in path order (they're recorded in whatever order --jobs
+    finishes them), and return its path. If the files don't all share one
+    wanted and one actual owner, each line also says which. Falls back to
+    the system's temp folder if folder can't be written to; returns None if
+    that fails too.
+
+    The file is always created new, never written over or through something
+    already at that name: an earlier list, or a symlink someone planted in a
+    shared temp folder so that a run as root would overwrite the file it
+    points to. If the name is taken, the next place is tried. The time and
+    process ID in the name mean a later run never finds its name taken by
+    an earlier one."""
     owners = {(wanted, got) for _, wanted, got, _ in _ownership_failures}
     lines = [path if len(owners) == 1
              else f"{path}  (should belong to {_owner_name(*wanted)}, belongs to {_owner_name(*got)})"
              for path, wanted, got, _ in sorted(_ownership_failures)]
-    name = f"set_stereo_default-owners-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    name = f"set_stereo_default-owners-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}.log"
     for place in (Path(folder), Path(tempfile.gettempdir())):
-        target = (place / name).resolve()
+        target = place.resolve() / name
         try:
-            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with open(target, "x", encoding="utf-8") as listing:
+                listing.write("\n".join(lines) + "\n")
             return target
         except OSError:
             continue
@@ -923,44 +1070,83 @@ def report_ownership_failures(folder: Path | str = ".") -> None:
                 f"{where}\n\n{owners} {advice}")
 
 
-def swap_in(path: Path, tmp_path: Path, backup: str | bool, keep_dates: bool = False) -> None:
-    """Replace path with the checked remux at tmp_path. Copies the original's
-    permissions and owner (and with keep_dates, its access and modification
-    times), keeps the original as a backup if backup is set, then swaps the
-    new file in with a single atomic rename.
+class Superseded(Exception):
+    """Raised by swap_in() when the original changed after it was probed: the
+    remux was made from the old version, and swapping it in would undo
+    whatever replaced it, such as an upgrade a media manager imported (see
+    _snapshot())."""
 
-    backup is falsy for no backup, "replace" to overwrite an existing
-    <name>.bak, or anything else to number the new one if <name>.bak
-    exists (see backup_path()).
+
+def _changed_since(path: Path, snapshot: tuple[int, int] | None) -> bool:
+    """True if path no longer matches snapshot, its _snapshot() from when it
+    was probed. Never true without a snapshot to compare."""
+    return snapshot is not None and _snapshot(path) != snapshot
+
+
+def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
+            keep_dates: bool = False, snapshot: tuple[int, int] | None = None) -> None:
+    """Replace path with the checked remux at tmp_path: keep the original as
+    a backup if backup is set, copy its permissions and owner (and with
+    keep_dates, its access and modification times) onto the new file, then
+    swap the new file in with a single atomic rename.
+
+    backup is None for no backup, "replace" to overwrite an existing
+    <name>.bak, or "number" to number the new one if <name>.bak exists
+    (see backup_path()).
+
+    snapshot, if given, is the file's _snapshot() from when it was probed,
+    and the file is checked against it twice: before the backup, so a file
+    already replaced doesn't get a pointless one, and right after it, just
+    before the swap. The backup comes first because without hard links it's
+    a full copy, which can take minutes on a network share, and a change
+    during it must be caught too. If the file changed, Superseded is raised
+    with nothing touched, except that a backup just made is removed, since
+    it holds a version that has been superseded.
 
     keep_dates is off by default because tools that spot changed files by
     size and modification time (rsync's default, some backup software)
     could skip a remux that kept both, leaving a stale copy."""
+    if _changed_since(path, snapshot):
+        raise Superseded
+    bak_path = make_backup(path, replace=(backup == "replace")) if backup else None
+    if bak_path is not None and _changed_since(path, snapshot):
+        bak_path.unlink(missing_ok=True)
+        raise Superseded
     copy_ownership(path, tmp_path)
     if keep_dates:
         st = os.stat(path)
         os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
-    if backup:
-        bak_path = make_backup(path, replace=(backup == "replace"))
-        if bak_path.suffix != ".bak":
-            log.info(f"    {path.name}: kept the original as {bak_path.name}")
+    if bak_path is not None and bak_path.suffix != ".bak":
+        log.info(f"    {path.name}: kept the original as {bak_path.name}")
     os.replace(tmp_path, path)
 
 
 @dataclass
 class Plan:
     """What's going to happen to one file, as decided by _process_file():
-    its audio streams, the index of the one to make default, its duration
-    in seconds (None if unknown), intro, the "setting stream#N ..." line
-    logged as the remux starts (see _announce()), and layout, every stream
-    in the file, which verify_remux() compares the remux against. The
-    streams, duration and layout all come from one probe_streams() call."""
+    its audio streams, the index of the one to make default (target gives
+    the stream itself), its duration in seconds (None if unknown), intro,
+    the "setting stream#N ..." line logged as the remux starts (see
+    _announce()), layout, every stream in the file, which verify_remux()
+    compares the remux against, snapshot, the file's _snapshot() from
+    before it was probed, which swap_in() compares again before the swap
+    (None skips that), and reordered, True for an AVI reorder, where the
+    target is moved to the first audio track instead of flagged default
+    (see apply_remux()). The streams, duration and layout all come from one
+    probe_streams() call."""
     path: Path
     streams: list[Stream]
     target_index: int
     duration: float | None = None
     intro: str | None = None
     layout: list[Stream] = field(default_factory=list)
+    snapshot: tuple[int, int] | None = None
+    reordered: bool = False
+
+    @property
+    def target(self) -> Stream:
+        """The audio stream to make default (or, reordered, to move first)."""
+        return next(s for s in self.streams if s.index == self.target_index)
 
     @property
     def tmp_path(self) -> Path:
@@ -968,35 +1154,77 @@ class Plan:
         return self.path.with_name(self.path.name + TMP_MARKER + self.path.suffix)
 
 
+def _snapshot(path: Path) -> tuple[int, int] | None:
+    """path's size and modification time (in nanoseconds), or None if it's
+    gone. If these differ by the time a remux is ready to replace the file,
+    another program replaced, edited or removed it in the meantime, e.g.
+    Sonarr or Radarr importing an upgrade.
+
+    The file's inode isn't compared: some network and FUSE file systems
+    don't keep it stable, which would make every file look replaced. A
+    replacement or an edit changes the size or modification time anyway."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return st.st_size, st.st_mtime_ns
+
+
 @dataclass
 class Progress:
-    """How to show a remux's progress: show its own bar at row position
-    (--jobs 1 only), and call on_progress(pct) to move the overall bar."""
+    """How to show a remux's progress: show its own bar (--jobs 1 only; see
+    run_with_progress()), and call on_progress(pct) to move the overall bar."""
     show: bool = False
-    position: int = 0
     on_progress: Callable[[int], None] | None = None
 
 
-def check_and_swap_in(plan: Plan, reordered: bool, args: argparse.Namespace) -> bool:
+def check_and_swap_in(plan: Plan, opts: Options) -> bool:
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
-    (already logged).
+    (already logged). The check's warnings (see verify_remux()) are only
+    logged once the remux has replaced the original, so a rejected remux
+    never warns about a file it didn't change.
+
+    It's also not swapped in if the original changed since it was probed,
+    which swap_in() checks before the backup and again just before the swap
+    (see Superseded): the remux was made from the old version, and swapping
+    it in would silently undo whatever replaced it, such as an upgrade a
+    media manager imported. The file is left as it is now, to be fixed on
+    the next run.
+
+    Nor is it swapped in unless it's a regular file. _remux_and_swap()
+    removes whatever has the temp name before the remux, but a symlink
+    planted there after that would have been written through by the tool,
+    and renaming it over the original would turn the video into a link.
 
     The temp file is removed if the check fails or anything interrupts this
     (Ctrl+C, SIGTERM, an unexpected error), so it's never left behind. After
     a successful swap there's no temp file left to remove."""
     path, tmp_path = plan.path, plan.tmp_path
     try:
-        problem = verify_remux(plan, reordered)
-        if problem:
-            log.error(f"    {path.name}: post-remux check failed ({problem}), keeping original untouched")
+        if not stat.S_ISREG(os.lstat(tmp_path).st_mode):
+            log.error(f"    {path.name}: {tmp_path.name} isn't a regular file, "
+                      f"keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        swap_in(path, tmp_path, args.backup, args.keep_dates)
-        return True
+        checked = verify_remux(plan)
+        if checked.problem:
+            log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
+                      f"keeping original untouched")
+            tmp_path.unlink(missing_ok=True)
+            return False
+        swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
+    except Superseded:
+        log.error(f"    {path.name}: changed by another program during the remux, so it's "
+                  f"left as it is now; run the script again to fix the new version")
+        tmp_path.unlink(missing_ok=True)
+        return False
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+    for note in checked.notes:
+        log.warning(note)
+    return True
 
 
 def mkvmerge_tracks(path: Path) -> list[tuple[int, str]] | None:
@@ -1074,12 +1302,14 @@ def _ffmpeg_pct(duration: float | None) -> Callable[[str], int | None]:
 
 
 def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int | None],
-                    args: argparse.Namespace, progress: Progress, *, reordered: bool = False,
+                    opts: Options, progress: Progress, *,
                     warnings_exit: int | None = None) -> bool:
     """Run a remux command written to plan.tmp_path, then check it and swap it
     in. Returns True on success (or after a dry run, which only logs the
     command), False on failure (already logged). Shared by apply_mkv() and
-    apply_remux(), which only build the command.
+    apply_remux(), which only build the command. parse_pct reads a
+    percentage from one line of the tool's output, or None for any other
+    line (see run_with_progress()).
 
     plan.intro is logged with the dry-run command, or just before the remux
     starts (see _announce()). warnings_exit is an exit code that means the
@@ -1088,14 +1318,17 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     also exit with that code (mkvmerge on Windows), so it only counts as
     finished if no stop was requested.
 
-    The temp file is removed whatever stops the remux: a failure, a stop
-    (Ctrl+C, SIGTERM) or an unexpected error. Until check_and_swap_in()
-    has checked it, the original isn't touched."""
+    Whatever already has the temp name is removed before the remux, so the
+    tool writes a new file rather than through a symlink someone left there
+    (see check_and_swap_in()). The temp file is removed whatever stops the
+    remux: a failure, a stop (Ctrl+C, SIGTERM) or an unexpected error. Until
+    check_and_swap_in() has checked it, the original isn't touched."""
     path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
-    if args.dry_run:
+    if opts.dry_run:
         _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
         return True
     _announce(plan.intro)
+    tmp_path.unlink(missing_ok=True)
 
     try:
         returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)
@@ -1117,12 +1350,12 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         log.warning(f"    {path.name}: {tool} finished with warnings: "
                     + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
-    return check_and_swap_in(plan, reordered, args)
+    return check_and_swap_in(plan, opts)
 
 
-def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = None) -> bool:
+def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
     """Remux an MKV/WebM file with mkvmerge so only plan.target_index is
-    flagged default, using args.dry_run, args.backup and args.keep_dates.
+    flagged default, using opts.dry_run, opts.backup_mode and opts.keep_dates.
     Returns True on success, False on failure (already logged). The steps
     shared with apply_remux() are in _remux_and_swap().
 
@@ -1177,27 +1410,26 @@ def apply_mkv(plan: Plan, args: argparse.Namespace, progress: Progress | None = 
         flag = "yes" if s.index == plan.target_index else "no"
         cmd += ["--default-track", f"{track_id}:{flag}"]
     cmd.append(str(path))
-    return _remux_and_swap(plan, cmd, _mkvmerge_pct, args, progress or Progress(),
+    return _remux_and_swap(plan, cmd, _mkvmerge_pct, opts, progress or Progress(),
                            warnings_exit=1)
 
 
-def apply_remux(plan: Plan, args: argparse.Namespace, progress: Progress | None = None) -> bool:
+def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
     """Remux any non-MKV file with ffmpeg (-c copy, so nothing is re-encoded)
-    so only plan.target_index is flagged default, using args.dry_run,
-    args.backup, args.keep_dates and args.avi_reorder. Returns True on
-    success, False on failure (already logged). The steps shared with
-    apply_mkv() are in _remux_and_swap().
+    so only plan.target_index is flagged default, using opts.dry_run,
+    opts.backup_mode and opts.keep_dates. Returns True on success, False on
+    failure (already logged). The steps shared with apply_mkv() are in
+    _remux_and_swap().
 
-    With --avi-reorder, an AVI file instead gets the target moved to the
-    first audio track, since AVI has no default flag. MP4/M4V/MOV files get
-    -movflags +faststart, which keeps the index at the front of the file
-    where thumbnailers expect it. plan.duration drives the progress bar.
-    """
+    For an AVI reorder (plan.reordered), the target is moved to the first
+    audio track instead, since AVI has no default flag. MP4/M4V/MOV files
+    get -movflags +faststart, which keeps the index at the front of the
+    file where thumbnailers expect it. plan.duration drives the progress
+    bar."""
     path, target_index = plan.path, plan.target_index
     ext = path.suffix.lower()
-    reordered = args.avi_reorder and ext in AVI_EXTS
 
-    if reordered:
+    if plan.reordered:
         others = [s.index for s in plan.streams if s.index != target_index]
         map_args = ["-map", "0:v?", "-map", f"0:{target_index}"]
         for i in others:
@@ -1217,21 +1449,25 @@ def apply_remux(plan: Plan, args: argparse.Namespace, progress: Progress | None 
     cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
            "-i", str(path), *map_args, "-c", "copy", "-map_metadata", "0",
            *disp_args, *faststart, str(plan.tmp_path)]
-    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), args,
-                           progress or Progress(), reordered=reordered)
+    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), opts, progress or Progress())
 
 
-def process_file(path: Path, args: argparse.Namespace, position: int = 0,
-                 on_progress: Callable[[int], None] | None = None) -> str:
+Outcome = Literal["changed", "unchanged", "skipped", "error", "cancelled"]
+"""What happened to one file. print_summary() gives each but "cancelled" its
+own line, and counts cancelled files only in a stopped run."""
+
+
+def process_file(path: Path, opts: Options,
+                 on_progress: Callable[[int], None] | None = None) -> Outcome:
     """Check one file, fix it if needed, and return "changed", "unchanged",
     "skipped" or "error", or "cancelled" if a stop interrupted it (see
     Cancelled). An unexpected error is logged and returned as "error" so
-    one bad file doesn't stop the run. position is the progress bar's row
-    (--jobs 1 only). Run it inside file_context(), which puts the file's
-    header above its lines.
+    one bad file doesn't stop the run. on_progress(pct), if given, is
+    called as the remux progresses (see run_with_progress()). Run it inside
+    file_context(), which puts the file's header above its lines.
     """
     try:
-        return _process_file(path, args, position, on_progress)
+        return _process_file(path, opts, on_progress)
     except Cancelled:
         log.info(f"  {path.name}: cancelled")
         return "cancelled"
@@ -1240,8 +1476,8 @@ def process_file(path: Path, args: argparse.Namespace, position: int = 0,
         return "error"
 
 
-def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
-                  on_progress: Callable[[int], None] | None = None) -> str:
+def _process_file(path: Path, opts: Options,
+                  on_progress: Callable[[int], None] | None = None) -> Outcome:
     """The work behind process_file(). For AVI files with --avi-reorder,
     "already correct" means the target is already the first audio track.
     --force remuxes even files that are already correct. When --prefer-lang
@@ -1253,13 +1489,14 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
     command, or as the remux starts, so in a --jobs dry run each file's
     lines come out together under one header."""
     ext = path.suffix.lower()
-    is_avi_reorder = ext in AVI_EXTS and args.avi_reorder
+    is_avi_reorder = ext in AVI_EXTS and opts.avi_reorder
 
-    if ext in AVI_EXTS and not args.avi_reorder:
+    if ext in AVI_EXTS and not opts.avi_reorder:
         log.info(f"  {path.name}: SKIP (AVI has no reliable default-track flag; re-run "
                  f"with --avi-reorder to reorder streams instead, or convert to mkv)")
         return "skipped"
 
+    snapshot = _snapshot(path)
     layout, duration = probe_streams(path)
     if layout is None:
         return "error"
@@ -1268,7 +1505,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
         log.info(f"  {path.name}: SKIP (no audio streams found)")
         return "skipped"
 
-    target, note = choose_target(streams, args.prefer_lang)
+    target, note = choose_target(streams, opts.prefer_lang)
     if target is None:
         log.info(f"  {path.name}: SKIP ({note})")
         return "skipped"
@@ -1279,7 +1516,7 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
     else:
         changed = needs_change(streams, target.index)
 
-    if not changed and not args.force:
+    if not changed and not opts.force:
         what = "is first audio stream" if is_avi_reorder else "is default"
         log.info(f"  {path.name}: already correct (stream#{target.index} {what}), skipping{fallback}")
         return "unchanged"
@@ -1289,11 +1526,10 @@ def _process_file(path: Path, args: argparse.Namespace, position: int = 0,
     plan = Plan(path, streams, target.index, duration,
                 intro=f"  {path.name}: {action} stream#{target.index} "
                       f"({target.language or 'und'}, {target.codec}) {outcome}{fallback}",
-                layout=layout)
-    progress = Progress(show=_show_bars(args) and args.jobs == 1,
-                        position=position, on_progress=on_progress)
+                layout=layout, snapshot=snapshot, reordered=is_avi_reorder)
+    progress = Progress(show=_show_bars(opts) and opts.jobs == 1, on_progress=on_progress)
     apply = apply_mkv if ext in MKV_EXTS else apply_remux
-    return "changed" if apply(plan, args, progress) else "error"
+    return "changed" if apply(plan, opts, progress) else "error"
 
 
 def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
@@ -1365,10 +1601,17 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
     A path that doesn't exist (a typo, an unmounted share) is skipped with a
     warning, so a mistake in one of several paths doesn't go unnoticed. In
     the Docker image, a path in DOCKER_VIDEOS when nothing is mounted there
-    (a forgotten -v) also gets the fix."""
+    (a forgotten -v) also gets the fix.
+
+    Every path is made absolute first (without following symlinks), so the
+    files found are too. ffprobe, ffmpeg and mkvmerge read a relative name
+    starting with "-" as an option, mkvmerge reads one starting with "@" as
+    a file of options, and ffmpeg reads one with a colon ("Movie:Part2.mp4")
+    as a protocol, like "http:". Running the script on "." gives such
+    names, since pathlib drops the leading "./"."""
     seen = set()
     videos = Path(DOCKER_VIDEOS)
-    for p in map(Path, paths):
+    for p in (Path(os.path.abspath(x)) for x in paths):
         candidates: Iterable[tuple[Path, os.DirEntry[str] | None, str | None]]
         if p.is_file():
             candidates = [(p, None, None)]
@@ -1428,7 +1671,7 @@ def _can_ask() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def ask_about_existing_backups(count: int) -> str:
+def ask_about_existing_backups(count: int) -> Literal["replace", "number", "quit"]:
     """Ask once what to do about files that already have a <name>.bak.
     Returns "replace", "number" or "quit". Asks again on any other answer.
     End of input (Ctrl+D, or no one there after all) counts as "number",
@@ -1440,7 +1683,8 @@ def ask_about_existing_backups(count: int) -> str:
     twice."""
     question = (f"{count} file(s) already have a backup. If they're changed: [d]elete and "
                 f"replace the old backup, [n]umber the new one (.bak.1, .bak.2...), or [q]uit? ")
-    choices = {"d": "replace", "n": "number", "q": "quit"}
+    choices: dict[str, Literal["replace", "number", "quit"]] = {
+        "d": "replace", "n": "number", "q": "quit"}
     while True:
         try:
             answer = input(question).strip().lower()
@@ -1499,16 +1743,64 @@ def read_input_file(name: str) -> list[str]:
     return paths
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+BackupMode = Literal["replace", "number"]
+"""What to do when a file's <name>.bak already exists: replace it, or number
+the new backup (.bak.1, .bak.2, ...)."""
+
+
+@dataclass(frozen=True)
+class Options:
+    """The command line, as parse_args() checked it: one field per option,
+    named as argparse names it (--dry-run is dry_run), and paths, the paths
+    given followed by --input-file's. Frozen, so no option changes partway
+    through a run. The one thing settled later, the answer to the backup
+    question, goes into a copy made with dataclasses.replace() (see
+    main()).
+
+    The defaults are those of a run with no options, so code that builds
+    one, as the tests do, only names the options that matter."""
+    paths: list[str] = field(default_factory=list)
+    input_file: str | None = None
+    ext: str | None = None
+    no_recursive: bool = False
+    skip_symlinks: bool = False
+    follow_symlinks: bool = False
+    dry_run: bool = False
+    backup: bool = False
+    existing_backups: BackupMode | None = None
+    prefer_lang: str | None = None
+    avi_reorder: bool = False
+    keep_dates: bool = False
+    force: bool = False
+    log_file: str | None = None
+    no_progress: bool = False
+    jobs: int = 1
+
+    @property
+    def backup_mode(self) -> BackupMode | None:
+        """None without --backup. Otherwise what to do about an existing
+        <name>.bak: replace it if told to, or else number the new backup,
+        since numbering never deletes anything."""
+        if not self.backup:
+            return None
+        return self.existing_backups or "number"
+
+
+def parse_args(argv: list[str] | None = None) -> Options:
     """Parse and check the command line (sys.argv's, unless argv is given).
-    Invalid options exit with argparse's usage message and code 2.
+    Invalid options exit with argparse's usage message and code 2. That
+    includes a --log-file in a folder that doesn't exist, which would
+    otherwise only fail, with a traceback, once logging starts.
 
     The paths to process are the ones given on the command line, then the
     ones listed in --input-file (see read_input_file()). At least one is
     needed, except in the Docker image, where with neither they default to
     DOCKER_VIDEOS, the folder the image documents mounting your videos at.
     The image itself runs --help when given no arguments at all, so a bare
-    docker run never starts changing files."""
+    docker run never starts changing files.
+
+    Every option argparse parses becomes the Options field of the same
+    name, so a new option needs a new field too."""
     in_docker = _in_docker()
     paths_help = "Video files and folders to process"
     paths_help += f" (default: {DOCKER_VIDEOS})" if in_docker else " (or use --input-file)"
@@ -1588,39 +1880,58 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                                                          normalize_language(args.prefer_lang)):
         ap.error(f"--prefer-lang {args.prefer_lang!r} isn't a language code; use a 2- or "
                  f"3-letter code such as en or eng")
-    return args
+    if args.log_file is not None and not Path(args.log_file).parent.is_dir():
+        ap.error(f"--log-file's folder doesn't exist: {Path(args.log_file).parent}")
+    return Options(**vars(args))
 
 
-def _tell(args: argparse.Namespace, line: str) -> None:
+def _tell(opts: Options, line: str) -> None:
     """Log line, and with --log-file print it too, so it stays on the console
     (where a log file only sends warnings and errors)."""
     log.info(line)
-    if args.log_file:
+    if opts.log_file:
         print(line)
 
 
-def find_files(args: argparse.Namespace) -> list[Path]:
-    """Every file to process: the ones under args.paths with an extension
+def find_files(opts: Options) -> list[Path]:
+    """Every file to process: the ones under opts.paths with an extension
     from --ext (or DEFAULT_EXTS), in the order the paths were given, each
     path's files sorted. So listing one show before another processes it
     first. See iter_files()."""
-    if args.ext:
-        exts = {("." + e.strip().lstrip(".")).lower() for e in args.ext.split(",")}
+    if opts.ext:
+        exts = {("." + e.strip().lstrip(".")).lower() for e in opts.ext.split(",")}
     else:
         exts = DEFAULT_EXTS
-    return list(iter_files(args.paths, exts, not args.no_recursive,
-                           args.skip_symlinks, args.follow_symlinks))
+    return list(iter_files(opts.paths, exts, not opts.no_recursive,
+                           opts.skip_symlinks, opts.follow_symlinks))
 
 
-def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:
+def _files_with_backups(files: list[Path]) -> int:
+    """How many of files have a <name>.bak next to them, found with one
+    listing per folder rather than one check per file: on a network share
+    each check is a round trip, and a library can hold tens of thousands of
+    files. A folder that can't be listed counts as having none; the run
+    reports it when it searches the folder."""
+    wanted: dict[Path, set[str]] = {}
+    for f in files:
+        wanted.setdefault(f.parent, set()).add(f.name + ".bak")
+    count = 0
+    for folder, names in wanted.items():
+        with contextlib.suppress(OSError), os.scandir(folder) as listing:
+            count += sum(1 for entry in listing if entry.name in names)
+    return count
+
+
+def choose_backup_mode(opts: Options,
+                       files: list[Path]) -> Literal["replace", "number", "quit"]:
     """What to do with backups when <name>.bak already exists: "replace",
     "number" or "quit". --existing-backups decides if given. Otherwise,
-    if any of files has one, the user is asked (see
-    ask_about_existing_backups()), or new backups are numbered when no one
-    can answer, since that never deletes anything."""
-    if args.existing_backups:
-        return args.existing_backups
-    with_backup = sum(1 for f in files if f.with_name(f.name + ".bak").exists())
+    if any of files has one (see _files_with_backups()), the user is asked
+    (see ask_about_existing_backups()), or new backups are numbered when no
+    one can answer, since that never deletes anything."""
+    if opts.existing_backups:
+        return opts.existing_backups
+    with_backup = _files_with_backups(files)
     if not with_backup:
         return "number"
     if _can_ask():
@@ -1630,16 +1941,16 @@ def choose_backup_mode(args: argparse.Namespace, files: list[Path]) -> str:
     return "number"
 
 
-def _show_bars(args: argparse.Namespace) -> bool:
+def _show_bars(opts: Options) -> bool:
     """True if progress bars should be drawn: tqdm is installed, --no-progress
     wasn't given, and the bars' output (stderr) is a terminal. Anywhere else
     (cron, docker run without -t, docker logs, a pipe), the codes that move
     the cursor to redraw a bar would land in the output as junk."""
-    return HAVE_TQDM and not args.no_progress and sys.stderr.isatty()
+    return HAVE_TQDM and not opts.no_progress and sys.stderr.isatty()
 
 
-def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, int]) -> None:
-    """Process every file, adding each outcome to stats ("changed": 3, ...).
+def process_all(files: list[Path], opts: Options, stats: Counter[Outcome]) -> None:
+    """Process every file, counting each outcome in stats ("changed": 3, ...).
     A stop (Ctrl+C, SIGTERM) comes out as KeyboardInterrupt, with the
     progress bars closed and stats holding the files that finished.
 
@@ -1662,11 +1973,11 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
       (_FileHeaderFilter).
     - Once a stop is requested, files still waiting their turn return
       "cancelled" straight away instead of starting."""
-    use_bar = _show_bars(args)
-    counter = args.log_file and not use_bar and sys.stdout.isatty()
+    use_bar = _show_bars(opts)
+    counter = opts.log_file and not use_bar and sys.stdout.isatty()
     bars, overall = [], None
     if use_bar:
-        first_row = 1 if args.jobs == 1 else 0
+        first_row = 1 if opts.jobs == 1 else 0
         bars.append(tqdm(total=1, position=first_row, bar_format="{desc}", desc="", leave=False))
         overall = tqdm(total=len(files), unit="file", desc="Processing", position=first_row + 1,
                        bar_format="{l_bar}{bar}| {n:.2f}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
@@ -1683,7 +1994,7 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
             overall.n = min(round(overall.n + delta, 6), overall.total)
             overall.refresh()
 
-    def run_one(i: int, f: Path) -> str:
+    def run_one(i: int, f: Path) -> Outcome:
         """Process file number i, keeping the overall bar in step."""
         if _cancelled.is_set():
             return "cancelled"
@@ -1697,7 +2008,7 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
             last_reported = pct / 100.0
 
         with file_context(f"[{i}/{len(files)}] {f}"):
-            result = process_file(f, args, on_progress=on_progress if overall else None)
+            result = process_file(f, opts, on_progress=on_progress if overall else None)
         if overall:
             advance_overall(1.0 - last_reported)
         return result
@@ -1708,18 +2019,18 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
             print(f"\rProcessing {n}/{len(files)}...", end="", flush=True)
 
     try:
-        if args.jobs == 1:
+        if opts.jobs == 1:
             for i, f in enumerate(files, 1):
                 show_counter(i)
                 result = run_one(i, f)
-                stats[result] = stats.get(result, 0) + 1
+                stats[result] += 1
         else:
-            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
                 futures = [pool.submit(run_one, i, f) for i, f in enumerate(files, 1)]
                 for done, fut in enumerate(as_completed(futures), 1):
                     show_counter(done)
                     result = fut.result()
-                    stats[result] = stats.get(result, 0) + 1
+                    stats[result] += 1
     finally:
         for bar in reversed(bars):
             with contextlib.suppress(Exception):
@@ -1728,7 +2039,7 @@ def process_all(files: list[Path], args: argparse.Namespace, stats: dict[str, in
         print()
 
 
-def print_summary(stats: dict[str, int], args: argparse.Namespace, partial: bool = False,
+def print_summary(stats: Counter[Outcome], opts: Options, partial: bool = False,
                   cancelled: int = 0) -> None:
     """Log the counts, printing them too with --log-file (see _tell()). In a
     dry run nothing was changed, so the heading says so and "Changed" reads
@@ -1736,16 +2047,17 @@ def print_summary(stats: dict[str, int], args: argparse.Namespace, partial: bool
     files didn't finish. Each line, and the heading's note, starts with a
     capital letter."""
     notes = (["partial -- interrupted"] if partial else []) + (
-        ["dry run, nothing was changed"] if args.dry_run else [])
+        ["dry run, nothing was changed"] if opts.dry_run else [])
     note = "; ".join(notes)
     heading = "Summary" + (f" ({note[:1].upper()}{note[1:]})" if note else "")
-    _tell(args, "")
-    _tell(args, f"----- {heading} -----")
-    for k in ("changed", "unchanged", "skipped", "error"):
-        name = "would change" if k == "changed" and args.dry_run else k
-        _tell(args, f"{name.capitalize()}: {stats[k]}")
+    _tell(opts, "")
+    _tell(opts, f"----- {heading} -----")
+    lines: tuple[Outcome, ...] = ("changed", "unchanged", "skipped", "error")
+    for k in lines:
+        name = "would change" if k == "changed" and opts.dry_run else k
+        _tell(opts, f"{name.capitalize()}: {stats[k]}")
     if cancelled:
-        _tell(args, f"Cancelled: {cancelled}")
+        _tell(opts, f"Cancelled: {cancelled}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1753,7 +2065,13 @@ def main(argv: list[str] | None = None) -> int:
     summary. Returns the exit code: 0 when done, 1 if no files were found,
     a tool is missing or any file had an error, or 128 + the signal number
     when stopped (130 for Ctrl+C, 143 for SIGTERM). Invalid options exit
-    with 2 straight from parse_args().
+    with 2 straight from parse_args(), and a --log-file that can't be
+    written (no permission, or a folder rather than a file) returns 2 too.
+
+    ffmpeg and ffprobe are checked before the search for files, which can
+    take minutes on a large library or a network share, so a missing tool is
+    reported at once. mkvmerge is checked once the search shows there are
+    MKV files to process.
 
     When stopped while files are being processed, the stop handler has
     already killed every remux and each one has removed its temp file.
@@ -1763,14 +2081,30 @@ def main(argv: list[str] | None = None) -> int:
     couldn't be given their original owner are reported in one warning
     just before the summary (report_ownership_failures()), with the full
     list saved next to --log-file, or in the current folder.
+
+    The answer to the backup question goes into opts.existing_backups, in
+    a copy of opts (Options is frozen), so the rest of the run reads it from
+    opts.backup_mode like any other option.
+
+    Call it from the main thread, since it installs the Ctrl+C and SIGTERM
+    handlers, which Python only allows there, and one run at a time: runs
+    share the module's state, which each one resets as it starts (see
+    _reset_run_state()).
     """
-    args = parse_args(argv)
-    setup_logging(args.log_file)
+    _reset_run_state()
+    opts = parse_args(argv)
+    try:
+        setup_logging(opts.log_file)
+    except OSError as exc:
+        print(f"Can't write --log-file {opts.log_file}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
+    if not check_tools(need_mkvmerge=False):
+        return 1
     try:
-        files = find_files(args)
+        files = find_files(opts)
     except KeyboardInterrupt as exc:
         signum, reason = _stop_reason(exc)
         log.error(f"{reason} while looking for files. No files were changed.")
@@ -1778,37 +2112,38 @@ def main(argv: list[str] | None = None) -> int:
     if not files:
         log.error("No matching files found.")
         return 1
-    if not check_tools(need_mkvmerge=any(f.suffix.lower() in MKV_EXTS for f in files)):
+    if any(f.suffix.lower() in MKV_EXTS for f in files) and not check_tools(need_mkvmerge=True):
         return 1
-    _tell(args, f"Found {len(files)} file(s){' (dry run)' if args.dry_run else ''}.")
+    _tell(opts, f"Found {len(files)} file(s){' (dry run)' if opts.dry_run else ''}.")
 
-    if args.backup and not args.dry_run:
+    if opts.backup and not opts.dry_run:
         try:
-            args.backup = choose_backup_mode(args, files)
+            answer = choose_backup_mode(opts, files)
         except KeyboardInterrupt as exc:
             signum, reason = _stop_reason(exc)
             print()
             log.error(f"{reason}. No files were changed.")
             return 128 + signum
-        if args.backup == "quit":
-            _tell(args, "Quit before changing any files.")
+        if answer == "quit":
+            _tell(opts, "Quit before changing any files.")
             return 0
+        opts = dataclasses.replace(opts, existing_backups=answer)
 
-    stats = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
-    list_folder = Path(args.log_file).parent if args.log_file else Path.cwd()
+    stats: Counter[Outcome] = Counter()
+    list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
     try:
-        process_all(files, args, stats)
+        process_all(files, opts, stats)
     except KeyboardInterrupt as exc:
         signum, reason = _stop_reason(exc)
         print()
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
-        print_summary(stats, args, partial=True, cancelled=len(files) - sum(stats.values()))
+        print_summary(stats, opts, partial=True, cancelled=len(files) - sum(stats.values()))
         return 128 + signum
 
     report_ownership_failures(list_folder)
-    print_summary(stats, args)
+    print_summary(stats, opts)
     return 1 if stats["error"] else 0
 
 
