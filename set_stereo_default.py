@@ -107,7 +107,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType, ModuleType
-from typing import Literal, NoReturn
+from typing import Any, Literal, NoReturn
 
 try:
     from tqdm import tqdm
@@ -541,7 +541,7 @@ class Stream:
     mimetype: str = ""
 
 
-def _stream_info(raw: dict) -> Stream:
+def _stream_info(raw: dict[str, Any]) -> Stream:
     """One stream from ffprobe's JSON (raw) as a Stream."""
     tags = raw.get("tags", {}) or {}
     disposition = raw.get("disposition", {}) or {}
@@ -910,7 +910,7 @@ def _user_name(uid: int) -> str | None:
     if pwd is None:
         return None
     try:
-        return pwd.getpwuid(uid).pw_name
+        return str(pwd.getpwuid(uid).pw_name)
     except KeyError:
         return None
 
@@ -920,7 +920,7 @@ def _group_name(gid: int) -> str | None:
     if grp is None:
         return None
     try:
-        return grp.getgrgid(gid).gr_name
+        return str(grp.getgrgid(gid).gr_name)
     except KeyError:
         return None
 
