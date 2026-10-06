@@ -442,6 +442,40 @@ def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
     assert contents(video) == before
 
 
+@pytest.mark.parametrize("ext", [".mp4", ".m4v", ".mov"])
+def test_a_chapter_track_comes_through_once(tmp_path, ext):
+    """MP4 and MOV files keep their chapters in a text track, which ffprobe
+    lists as a data stream, and ffmpeg writes a new one from the chapter
+    list on every remux. With B-frames in the video and AAC audio, as most
+    web releases have, the original's track used to come through as well,
+    as an extra data stream, so the remux was rejected with "stream count
+    changed from 4 to 5" and the file couldn't be fixed. The chapters
+    must come through, in one chapter track."""
+    need("ffmpeg", "ffprobe")
+    chapters = tmp_path / "chapters.txt"
+    chapters.write_text(CHAPTERS, encoding="utf-8")
+    video = tmp_path / f"video{ext}"
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=2",
+                    "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+                    "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-i", str(chapters), "-map", "0", "-map", "1", "-map", "2",
+                    "-map_metadata", "3", "-map_chapters", "3",
+                    "-c:v", "mpeg4", "-bf", "2", "-c:a", "aac",
+                    "-disposition:a:0", "default", "-disposition:a:1", "0", str(video)],
+                   check=True, capture_output=True, text=True)
+    before = contents(video)
+    assert [s["type"] for s in before["streams"]] == ["video", "audio", "audio", "data"], before
+    assert len(before["chapters"]) == 2, before
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert contents(video) == before
+
+
 FUZZ_SEED = os.environ.get("SSD_FUZZ_SEED") or str(int(time.time()))
 """Where the random layouts start from: the time, so every run tries new
 ones, unless SSD_FUZZ_SEED says otherwise (CI gives each job its own). A

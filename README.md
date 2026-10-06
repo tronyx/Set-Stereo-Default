@@ -346,7 +346,7 @@ A file is **skipped** (and counted under `Skipped` in the summary) when:
 
 Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked before it replaces the original:
 
-- every stream must still be there, with the same codec, language, name and flags;
+- every stream must still be there, with the same codec, language, name and flags (except an MP4 or MOV chapter track, which ffmpeg writes afresh: there must just still be one);
 - the right track must be the default;
 - it mustn't be noticeably shorter than the original.
 
@@ -360,7 +360,7 @@ The new file also isn't used if the original changed while it was being made, fo
 | Format | How it's changed |
 | --- | --- |
 | `.mkv` `.webm` | Remuxed with `mkvmerge`. The script doesn't edit the file in place, because in-place edits can move the track list to the end of the file, which breaks Windows Explorer thumbnails even though the video plays fine. |
-| `.mp4` `.m4v` `.mov` | Remuxed with `ffmpeg`, with the file's index kept at the front where thumbnailers expect it (`-movflags +faststart`). |
+| `.mp4` `.m4v` `.mov` | Remuxed with `ffmpeg`, with the file's index kept at the front where thumbnailers expect it (`-movflags +faststart`). The chapter track is written afresh from the file's chapters rather than copied. |
 | `.avi` | AVI has no "default track" flag. With `--avi-reorder`, the stereo track is moved to the front instead, which most players treat the same way. Without it, AVI files are skipped. |
 
 ### 🛟 Backups

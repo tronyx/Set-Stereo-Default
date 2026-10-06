@@ -591,9 +591,10 @@ class Stream:
     codec, channel count (None if not audio), language tag ("" if none),
     names (from NAME_TAGS), its default, commentary and audio-description
     flags, every other flag it has (flags, e.g. {"forced",
-    "hearing_impaired"}, as ffprobe names them; never "default"), and its
-    MIME type ("" if none; attachments, such as fonts, have one). Frozen, so
-    streams can be shared freely."""
+    "hearing_impaired"}, as ffprobe names them; never "default"), its MIME
+    type ("" if none; attachments, such as fonts, have one), and its codec
+    tag (tag, e.g. "avc1"; "" if none). Frozen, so streams can be shared
+    freely."""
     index: int
     type: str = ""
     codec: str = ""
@@ -605,6 +606,7 @@ class Stream:
     names: tuple[str, ...] = ()
     flags: frozenset[str] = frozenset()
     mimetype: str = ""
+    tag: str = ""
 
 
 def _stream_info(raw: dict[str, Any]) -> Stream:
@@ -623,6 +625,7 @@ def _stream_info(raw: dict[str, Any]) -> Stream:
         names=tuple(tags[k] for k in NAME_TAGS if tags.get(k)),
         flags=frozenset(k for k, on in disposition.items() if on and k != "default"),
         mimetype=tags.get("mimetype", ""),
+        tag=raw.get("codec_tag_string", ""),
     )
 
 
@@ -664,6 +667,15 @@ def is_commentary(stream: Stream) -> bool:
     file's own flags, or failing that by the track's name."""
     return (stream.comment or stream.visual_impaired
             or any(COMMENTARY_NAME_RE.search(n) for n in stream.names))
+
+
+def is_chapter_track(stream: Stream) -> bool:
+    """True for an MP4 or MOV chapter track: a text track holding the
+    chapter titles, which ffprobe lists as a data stream. ffmpeg writes a
+    new one from the file's chapter list on every remux, so apply_remux()
+    leaves the original's out, and the post-remux check takes the new one
+    in its place (see verify_remux())."""
+    return stream.type == "data" and stream.tag in ("text", "tx3g")
 
 
 def normalize_language(code: str | None) -> str:
@@ -773,16 +785,19 @@ def _stream_loss(was: Stream, now: Stream) -> str | None:
 
 def _content_problem(plan: Plan, after: list[Stream], after_duration: float | None) -> str | None:
     """Whether the remux (after, after_duration) lost anything outright: it
-    must have as many streams, and as many audio tracks, as the original,
-    and mustn't be shorter by more than MAX_DURATION_LOSS (and at least
-    MIN_DURATION_LOSS seconds). A much shorter result means the original
-    contains less than its header claims, e.g. an incomplete download, so
-    it's left alone for a person to look at. A longer one is fine: the
-    original's header just understated it. The duration check is skipped
-    if either duration is unknown."""
+    must have as many streams, chapter tracks (see is_chapter_track()) and
+    audio tracks as the original, and mustn't be shorter by more than
+    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds). A much
+    shorter result means the original contains less than its header
+    claims, e.g. an incomplete download, so it's left alone for a person to
+    look at. A longer one is fine: the original's header just understated
+    it. The duration check is skipped if either duration is unknown."""
     before, before_duration = plan.layout, plan.duration
     if len(after) != len(before):
         return f"stream count changed from {len(before)} to {len(after)}"
+    had, has = (sum(1 for s in streams if is_chapter_track(s)) for streams in (before, after))
+    if has != had:
+        return f"chapter track count changed from {had} to {has}"
     if before_duration and after_duration is not None:
         allowed = max(before_duration * MAX_DURATION_LOSS, MIN_DURATION_LOSS)
         if after_duration < before_duration - allowed:
@@ -810,12 +825,14 @@ def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
 
 
 def _expected_order(plan: Plan) -> list[Stream]:
-    """The original's streams in the order the remux should have them. A
+    """The original's streams in the order the remux should have them,
+    except chapter tracks: ffmpeg writes those afresh (see
+    is_chapter_track()), with a name, language and place of its own. A
     remux keeps the order (mkvmerge is told to; see apply_mkv()), except
     that an AVI reorder (plan.reordered) writes apply_remux()'s order:
     video, the target, the other audio tracks, subtitles, data, then
     anything else."""
-    before = plan.layout
+    before = [s for s in plan.layout if not is_chapter_track(s)]
     if not plan.reordered:
         return before
     of_type = {t: [s for s in before if s.type == t] for t in ("video", "audio", "subtitle", "data")}
@@ -889,12 +906,12 @@ def verify_remux(plan: Plan) -> Verification:
 
     The checks run in this order, each only once the ones before it have
     passed, and the first problem found is the one reported:
-    - nothing lost outright: streams, audio tracks, duration
-      (_content_problem());
+    - nothing lost outright: streams, chapter tracks, audio tracks,
+      duration (_content_problem());
     - after an AVI reorder (plan.reordered), the target is the first audio
       track (_first_audio_problem());
-    - every stream came through as it was, in the expected order
-      (_expected_order(), _streams_problem());
+    - every stream but a chapter track came through as it was, in the
+      expected order (_expected_order(), _streams_problem());
     - except after an AVI reorder, which has no default flag, the target
       is the only audio track flagged default (_default_flag_problem())."""
     after, after_duration = probe_streams(plan.tmp_path, report=False)
@@ -906,7 +923,8 @@ def verify_remux(plan: Plan) -> Verification:
     if problem is None and plan.reordered:
         problem = _first_audio_problem(plan, audio)
     if problem is None:
-        problem, notes = _streams_problem(plan, _expected_order(plan), after)
+        problem, notes = _streams_problem(plan, _expected_order(plan),
+                                          [s for s in after if not is_chapter_track(s)])
     if problem is None and not plan.reordered:
         problem = _default_flag_problem(plan, audio)
     return Verification(problem, notes if problem is None else ())
@@ -1483,8 +1501,10 @@ def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> 
     For an AVI reorder (plan.reordered), the target is moved to the first
     audio track instead, since AVI has no default flag. MP4/M4V/MOV files
     get -movflags +faststart, which keeps the index at the front of the
-    file where thumbnailers expect it. plan.duration drives the progress
-    bar."""
+    file where thumbnailers expect it. Their chapter track (see
+    is_chapter_track()) is left out, since ffmpeg writes a new one from
+    the chapter list: copying the original's too either fails or leaves
+    it as an extra data stream. plan.duration drives the progress bar."""
     path, target_index = plan.path, plan.target_index
     ext = path.suffix.lower()
 
@@ -1499,6 +1519,9 @@ def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> 
             disp_args += [f"-disposition:a:{out_idx}", "-default"]
     else:
         map_args = ["-map", "0"]
+        for s in plan.layout:
+            if is_chapter_track(s):
+                map_args += ["-map", f"-0:{s.index}"]
         disp_args = []
         for out_idx, s in enumerate(plan.streams):
             flag = "+default" if s.index == target_index else "-default"
