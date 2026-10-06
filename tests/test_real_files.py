@@ -7,6 +7,8 @@ can encode Opus and VP8. Without them the tests are skipped, unless
 REQUIRE_MEDIA_TOOLS is set -- as it is in CI -- in which case a missing tool
 fails the run instead of quietly skipping everything."""
 
+import contextlib
+import ctypes
 import hashlib
 import json
 import os
@@ -713,6 +715,105 @@ def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files,
         if backup:
             bak = folder / f"{name}.bak"
             assert digest(bak) == stop_files.digests[name], f"{bak.name} isn't the original\n{report}"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows' MAX_PATH limit")
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_path_longer_than_max_path_is_fixed(tmp_path, ext):
+    """Windows limits a path to 260 characters unless long paths are
+    enabled, as they are on recent versions. The script, ffprobe, ffmpeg
+    and mkvmerge must all cope with a longer one."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    folder = tmp_path
+    while len(str(folder)) < 270:
+        folder = folder / ("x" * 50)
+    try:
+        folder.mkdir(parents=True)
+    except OSError:
+        pytest.skip("long paths aren't enabled on this Windows")
+    video = make_video(folder / f"movie{ext}", [Track(6, default=True), Track(2)])
+    before = contents(video)
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert contents(video) == before
+
+
+@contextlib.contextmanager
+def hold_open(path, exclusive):
+    """Keep path open while the block runs, the way another program would:
+    for reading with sharing, like a player, or exclusively, like some
+    scanners, which stops even reads. Windows only."""
+    if not exclusive:
+        with open(path, "rb"):
+            yield
+        return
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                     ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    generic_read, no_sharing, open_existing, normal = 0x80000000, 0, 3, 0x80
+    handle = kernel32.CreateFileW(str(path), generic_read, no_sharing, None, open_existing, normal, None)
+    assert handle != ctypes.c_void_p(-1).value, ctypes.get_last_error()
+    try:
+        yield
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows stops a rename over an open file")
+@pytest.mark.parametrize("backup", [False, True], ids=["no backup", "backup"])
+@pytest.mark.parametrize("exclusive", [False, True], ids=["open for reading", "open exclusively"])
+def test_a_file_open_in_another_program_is_reported_and_left_alone(tmp_path, exclusive, backup):
+    """On Windows a file another program has open can't be renamed over (a
+    player, or Plex scanning it), and one opened exclusively can't even be
+    read. Either way the file is reported, left as it was with no temp
+    file or backup next to it, and the rest of the folder is still fixed."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    locked = make_video(tmp_path / "locked.mkv", [Track(6, default=True), Track(2)])
+    other = make_video(tmp_path / "other.mp4", [Track(6, default=True), Track(2)])
+    before = digest(locked)
+
+    with hold_open(locked, exclusive):
+        code, output = run_script(tmp_path, *(["--backup"] if backup else []))
+
+    assert code == 1, output
+    assert summary(output) == {"changed": 1, "unchanged": 0, "skipped": 0, "error": 1}, output
+    expected = ("ffprobe failed on locked.mkv" if exclusive else
+                "locked.mkv: couldn't swap the new file in (Access is denied), so it's left as it was"
+                " -- is it read-only, or open in another program?")
+    assert expected in output, output
+    assert "unexpected error" not in output, output
+    assert digest(locked) == before
+    assert audio_defaults(other) == [(6, False), (2, True)]
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert sorted(p.name for p in tmp_path.glob("*.bak")) == (["other.mp4.bak"] if backup else [])
+
+
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_name_too_long_for_its_temp_name_is_reported(tmp_path, ext):
+    """A name at the file system's limit (255 characters) leaves no room for
+    the temp name's suffix. The file can't be fixed, so it's reported as
+    such, and left as it is with nothing else next to it."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    try:
+        video = make_video(tmp_path / ("n" * (255 - len(ext)) + ext), [Track(6, default=True), Track(2)])
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("can't make a 255-character name here")
+    before = digest(video)
+
+    code, output = run_script(video)
+
+    assert code == 1, output
+    assert summary(output)["error"] == 1, output
+    assert f"can't use the temp name {video.name}.tmp_remux{ext}" in output, output
+    assert "unexpected error" not in output, output
+    assert digest(video) == before
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
 
 
 AUDIO_CODECS = {

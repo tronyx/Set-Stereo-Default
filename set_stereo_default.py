@@ -1100,8 +1100,15 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     before the swap. The backup comes first because without hard links it's
     a full copy, which can take minutes on a network share, and a change
     during it must be caught too. If the file changed, Superseded is raised
-    with nothing touched, except that a backup just made is removed, since
-    it holds a version that has been superseded.
+    with nothing touched.
+
+    If anything stops the swap once the backup is made (the file changed,
+    the rename failed because another program has the file open, a stop),
+    the backup is removed again: the original is untouched, and a backup
+    would only suggest it had been changed. A backup it replaced is gone,
+    though. Whether the swap happened is read from the file system, since
+    a stop can land right after the rename, so the backup of a file that
+    was replaced is never removed.
 
     keep_dates is off by default because tools that spot changed files by
     size and modification time (rsync's default, some backup software)
@@ -1109,16 +1116,20 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     if _changed_since(path, snapshot):
         raise Superseded
     bak_path = make_backup(path, replace=(backup == "replace")) if backup else None
-    if bak_path is not None and _changed_since(path, snapshot):
-        bak_path.unlink(missing_ok=True)
-        raise Superseded
-    copy_ownership(path, tmp_path)
-    if keep_dates:
-        st = os.stat(path)
-        os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
-    if bak_path is not None and bak_path.suffix != ".bak":
-        log.info(f"    {path.name}: kept the original as {bak_path.name}")
-    os.replace(tmp_path, path)
+    try:
+        if bak_path is not None and _changed_since(path, snapshot):
+            raise Superseded
+        copy_ownership(path, tmp_path)
+        if keep_dates:
+            st = os.stat(path)
+            os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        if bak_path is not None and bak_path.suffix != ".bak":
+            log.info(f"    {path.name}: kept the original as {bak_path.name}")
+        os.replace(tmp_path, path)
+    except BaseException:
+        if bak_path is not None and tmp_path.exists():
+            bak_path.unlink(missing_ok=True)
+        raise
 
 
 @dataclass
@@ -1213,7 +1224,14 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
                       f"keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
+        try:
+            swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
+        except OSError as exc:
+            hint = " -- is it read-only, or open in another program?" if isinstance(exc, PermissionError) else ""
+            log.error(f"    {path.name}: couldn't swap the new file in ({exc.strerror or exc}), "
+                      f"so it's left as it was{hint}")
+            tmp_path.unlink(missing_ok=True)
+            return False
     except Superseded:
         log.error(f"    {path.name}: changed by another program during the remux, so it's "
                   f"left as it is now; run the script again to fix the new version")
@@ -1320,15 +1338,23 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
 
     Whatever already has the temp name is removed before the remux, so the
     tool writes a new file rather than through a symlink someone left there
-    (see check_and_swap_in()). The temp file is removed whatever stops the
-    remux: a failure, a stop (Ctrl+C, SIGTERM) or an unexpected error. Until
-    check_and_swap_in() has checked it, the original isn't touched."""
+    (see check_and_swap_in()). A temp name the file system refuses, because
+    the file's name is already near its length limit (255 characters on
+    most), is reported, and the file left alone. The temp file is removed
+    whatever stops the remux: a failure, a stop (Ctrl+C, SIGTERM) or an
+    unexpected error. Until check_and_swap_in() has checked it, the
+    original isn't touched."""
     path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
     if opts.dry_run:
         _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
         return True
     _announce(plan.intro)
-    tmp_path.unlink(missing_ok=True)
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.error(f"    {path.name}: can't use the temp name {tmp_path.name} ({exc.strerror or exc}); "
+                  f"the name may be too long for this file system")
+        return False
 
     try:
         returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)

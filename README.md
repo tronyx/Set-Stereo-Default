@@ -462,6 +462,10 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 **`changed by another program during the remux, so it's left as it is now`.** Another program, such as Sonarr or Radarr importing an upgrade, replaced or edited the file while the script was remuxing it. The remux was made from the old version, so it was discarded and the file was left as it is now. Run the script again to fix the new version. See [Changing the file](#-changing-the-file).
 
+**`couldn't swap the new file in (Access is denied), so it's left as it was -- is it read-only, or open in another program?`.** On Windows, a file another program has open can't be replaced: a media player, or Plex, Jellyfin or Emby while it scans the file. The remux was discarded and the file left as it was, with no backup made. Close the other program, or wait for the scan to finish, and run the script again. A read-only file gives the same error; clear the attribute first. A file another program has opened exclusively can't even be read, and is reported as `ffprobe failed on <name>: ... Permission denied` instead.
+
+**`can't use the temp name <name>.tmp_remux.<ext> (...); the name may be too long for this file system`.** The remux is written next to the original under its name plus `.tmp_remux.<ext>`, and most file systems allow names of 255 characters at most, so a file whose name is already close to that can't be fixed. Shorten the name and run the script again.
+
 **`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
 
 **`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command to use, or in the Docker image, the `docker run --user` one. See [Permissions and ownership](#-permissions-and-ownership).

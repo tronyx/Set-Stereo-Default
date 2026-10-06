@@ -1369,6 +1369,56 @@ def test_swap_in_keeps_the_original_permissions(tmp_path):
     assert video.stat().st_mode & 0o777 == 0o764
 
 
+@pytest.mark.parametrize("backup", ["replace", "number"])
+def test_a_backup_made_for_a_swap_that_failed_is_removed(tmp_path, monkeypatch, backup):
+    """When the rename over the original fails (on Windows, another program
+    has it open), the original is untouched, so the backup just made is
+    removed again: it would only suggest the file had been changed."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+    real_replace = os.replace
+
+    def denied_for_the_original(src, dst):
+        if Path(dst) == video:
+            raise PermissionError(13, "Access is denied", str(src), None, str(dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(ssd.os, "replace", denied_for_the_original)
+
+    with pytest.raises(PermissionError):
+        ssd.swap_in(video, tmp, backup=backup)
+
+    assert video.read_bytes() == b"original"
+    assert tmp.read_bytes() == b"remuxed"
+    assert not list(tmp_path.glob("*.bak*"))
+
+
+def test_a_backup_is_kept_when_a_stop_lands_right_after_the_swap(tmp_path, monkeypatch):
+    """A stop can arrive just after the rename went through. The file has
+    been replaced, so its backup must stay: whether the swap happened is
+    read from the file system, not assumed from where the stop landed."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+    real_replace = os.replace
+
+    def replace_then_stop(src, dst):
+        real_replace(src, dst)
+        if Path(dst) == video:
+            raise ssd.Stopped(signal.SIGINT)
+
+    monkeypatch.setattr(ssd.os, "replace", replace_then_stop)
+
+    with pytest.raises(KeyboardInterrupt):
+        ssd.swap_in(video, tmp, backup="replace")
+
+    assert video.read_bytes() == b"remuxed"
+    assert (tmp_path / "v.mkv.bak").read_bytes() == b"original"
+
+
 OLD_TIMES_NS = (1_577_880_000_000_000_000, 1_577_890_000_123_456_000)
 
 
@@ -1954,6 +2004,54 @@ def test_cancelled_remux_names_the_file(remux, caplog):
     assert apply() is False
     assert f"{video.name}: cancelled" in caplog.text
     assert "remux failed" not in caplog.text
+
+
+@pytest.mark.parametrize("apply, ext", [(remux_with_mkvmerge, ".mkv"), (remux_with_ffmpeg, ".mp4")],
+                         ids=["mkvmerge", "ffmpeg"])
+def test_a_name_too_long_for_its_temp_name_is_reported(tmp_path, monkeypatch, caplog, apply, ext):
+    """File systems allow names of 255 characters at most, and the temp
+    name adds 14 to the file's. A file whose name is at the limit can't be
+    fixed; it's reported as such rather than as an unexpected error, and
+    nothing happens to it."""
+    video = tmp_path / ("n" * (255 - len(ext)) + ext)
+    try:
+        video.write_bytes(b"original")
+    except OSError as exc:
+        pytest.skip(f"can't make a 255-character name here ({exc.strerror})")
+    monkeypatch.setattr(ssd, "run_with_progress", lambda *a, **k: pytest.fail("the remux ran"))
+
+    assert apply(video) is False
+
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert f"can't use the temp name {video.name}.tmp_remux{ext}" in caplog.text
+    assert "the name may be too long for this file system" in caplog.text
+
+
+def test_a_file_that_cant_be_replaced_is_reported_and_left_alone(remux, monkeypatch, caplog):
+    """On Windows the rename over the original fails with "Access is denied"
+    when another program has the file open (a player, or a media server
+    scanning it), or it's read-only. That's reported as such, not as an
+    unexpected error; the original is untouched, the temp file removed,
+    and the backup just made removed too, since nothing changed."""
+    apply, video, _ = remux
+    real_replace = os.replace
+
+    def denied_for_the_original(src, dst):
+        if Path(dst) == video:
+            raise PermissionError(13, "Access is denied", str(src), None, str(dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(ssd.os, "replace", denied_for_the_original)
+
+    assert apply() is False
+
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert not list(video.parent.glob("*.bak*"))
+    assert ("couldn't swap the new file in (Access is denied), so it's left as it was"
+            " -- is it read-only, or open in another program?") in caplog.text
+    assert "unexpected error" not in caplog.text
 
 
 def test_interrupted_remux_keeps_the_original(remux):
