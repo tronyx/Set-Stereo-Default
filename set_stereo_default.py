@@ -733,7 +733,7 @@ def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
     flag to check, so the first track must match the target's codec,
     channel count and language (compared after normalize_language(), as
     everywhere else)."""
-    target = next(s for s in plan.streams if s.index == plan.target_index)
+    target = plan.target
     first = audio[0]
     if (first.codec != target.codec or first.channels != target.channels
             or (target.language and normalize_language(first.language)
@@ -742,13 +742,14 @@ def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
     return None
 
 
-def _expected_order(plan: Plan, reordered: bool) -> list[Stream]:
+def _expected_order(plan: Plan) -> list[Stream]:
     """The original's streams in the order the remux should have them. A
     remux keeps the order (mkvmerge is told to; see apply_mkv()), except
-    that an AVI reorder writes apply_remux()'s order: video, the target,
-    the other audio tracks, subtitles, data, then anything else."""
+    that an AVI reorder (plan.reordered) writes apply_remux()'s order:
+    video, the target, the other audio tracks, subtitles, data, then
+    anything else."""
     before = plan.layout
-    if not reordered:
+    if not plan.reordered:
         return before
     of_type = {t: [s for s in before if s.type == t] for t in ("video", "audio", "subtitle", "data")}
     moved = next(s for s in of_type["audio"] if s.index == plan.target_index)
@@ -791,8 +792,7 @@ def _default_flag_problem(plan: Plan, audio: list[Stream]) -> str | None:
     """Whether anything but the target is flagged default among the remux's
     audio tracks (audio). A remux keeps audio tracks in order, so the
     target is found by its position among them."""
-    target = next(s for s in plan.streams if s.index == plan.target_index)
-    expected = audio[plan.streams.index(target)].index
+    expected = audio[plan.streams.index(plan.target)].index
     defaults = [s.index for s in audio if s.default]
     if defaults != [expected]:
         found = ", ".join(f"stream#{i}" for i in defaults) or "no track"
@@ -810,7 +810,7 @@ class Verification:
     notes: tuple[str, ...] = ()
 
 
-def verify_remux(plan: Plan, reordered: bool) -> Verification:
+def verify_remux(plan: Plan) -> Verification:
     """Check the finished remux at plan.tmp_path before it replaces the
     original. Returns a Verification: no problem if it looks right,
     otherwise a short reason why not. The original isn't probed again:
@@ -824,7 +824,7 @@ def verify_remux(plan: Plan, reordered: bool) -> Verification:
     passed, and the first problem found is the one reported:
     - nothing lost outright: streams, audio tracks, duration
       (_content_problem());
-    - after an AVI reorder (reordered=True), the target is the first audio
+    - after an AVI reorder (plan.reordered), the target is the first audio
       track (_first_audio_problem());
     - every stream came through as it was, in the expected order
       (_expected_order(), _streams_problem());
@@ -836,11 +836,11 @@ def verify_remux(plan: Plan, reordered: bool) -> Verification:
     audio = [s for s in after if s.type == "audio"]
     notes: tuple[str, ...] = ()
     problem = _content_problem(plan, after, after_duration)
-    if problem is None and reordered:
+    if problem is None and plan.reordered:
         problem = _first_audio_problem(plan, audio)
     if problem is None:
-        problem, notes = _streams_problem(plan, _expected_order(plan, reordered), after)
-    if problem is None and not reordered:
+        problem, notes = _streams_problem(plan, _expected_order(plan), after)
+    if problem is None and not plan.reordered:
         problem = _default_flag_problem(plan, audio)
     return Verification(problem, notes if problem is None else ())
 
@@ -1090,14 +1090,16 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
 @dataclass
 class Plan:
     """What's going to happen to one file, as decided by _process_file():
-    its audio streams, the index of the one to make default, its duration
-    in seconds (None if unknown), intro, the "setting stream#N ..." line
-    logged as the remux starts (see _announce()), layout, every stream in
-    the file, which verify_remux() compares the remux against, and
-    snapshot, the file's _snapshot() from before it was probed, which
-    check_and_swap_in() compares again before the swap (None skips that).
-    The streams, duration and layout all come from one probe_streams()
-    call."""
+    its audio streams, the index of the one to make default (target gives
+    the stream itself), its duration in seconds (None if unknown), intro,
+    the "setting stream#N ..." line logged as the remux starts (see
+    _announce()), layout, every stream in the file, which verify_remux()
+    compares the remux against, snapshot, the file's _snapshot() from
+    before it was probed, which swap_in() compares again before the swap
+    (None skips that), and reordered, True for an AVI reorder, where the
+    target is moved to the first audio track instead of flagged default
+    (see apply_remux()). The streams, duration and layout all come from one
+    probe_streams() call."""
     path: Path
     streams: list[Stream]
     target_index: int
@@ -1105,6 +1107,12 @@ class Plan:
     intro: str | None = None
     layout: list[Stream] = field(default_factory=list)
     snapshot: tuple[int, int] | None = None
+    reordered: bool = False
+
+    @property
+    def target(self) -> Stream:
+        """The audio stream to make default (or, reordered, to move first)."""
+        return next(s for s in self.streams if s.index == self.target_index)
 
     @property
     def tmp_path(self) -> Path:
@@ -1136,7 +1144,7 @@ class Progress:
     on_progress: Callable[[int], None] | None = None
 
 
-def check_and_swap_in(plan: Plan, reordered: bool, opts: Options) -> bool:
+def check_and_swap_in(plan: Plan, opts: Options) -> bool:
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged). The check's warnings (see verify_remux()) are only
@@ -1165,7 +1173,7 @@ def check_and_swap_in(plan: Plan, reordered: bool, opts: Options) -> bool:
                       f"keeping original untouched")
             tmp_path.unlink(missing_ok=True)
             return False
-        checked = verify_remux(plan, reordered)
+        checked = verify_remux(plan)
         if checked.problem:
             log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
                       f"keeping original untouched")
@@ -1260,7 +1268,7 @@ def _ffmpeg_pct(duration: float | None) -> Callable[[str], int | None]:
 
 
 def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int | None],
-                    opts: Options, progress: Progress, *, reordered: bool = False,
+                    opts: Options, progress: Progress, *,
                     warnings_exit: int | None = None) -> bool:
     """Run a remux command written to plan.tmp_path, then check it and swap it
     in. Returns True on success (or after a dry run, which only logs the
@@ -1306,7 +1314,7 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         log.warning(f"    {path.name}: {tool} finished with warnings: "
                     + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
-    return check_and_swap_in(plan, reordered, opts)
+    return check_and_swap_in(plan, opts)
 
 
 def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
@@ -1373,20 +1381,19 @@ def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bo
 def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
     """Remux any non-MKV file with ffmpeg (-c copy, so nothing is re-encoded)
     so only plan.target_index is flagged default, using opts.dry_run,
-    opts.backup_mode, opts.keep_dates and opts.avi_reorder. Returns True on
-    success, False on failure (already logged). The steps shared with
-    apply_mkv() are in _remux_and_swap().
+    opts.backup_mode and opts.keep_dates. Returns True on success, False on
+    failure (already logged). The steps shared with apply_mkv() are in
+    _remux_and_swap().
 
-    With --avi-reorder, an AVI file instead gets the target moved to the
-    first audio track, since AVI has no default flag. MP4/M4V/MOV files get
-    -movflags +faststart, which keeps the index at the front of the file
-    where thumbnailers expect it. plan.duration drives the progress bar.
-    """
+    For an AVI reorder (plan.reordered), the target is moved to the first
+    audio track instead, since AVI has no default flag. MP4/M4V/MOV files
+    get -movflags +faststart, which keeps the index at the front of the
+    file where thumbnailers expect it. plan.duration drives the progress
+    bar."""
     path, target_index = plan.path, plan.target_index
     ext = path.suffix.lower()
-    reordered = opts.avi_reorder and ext in AVI_EXTS
 
-    if reordered:
+    if plan.reordered:
         others = [s.index for s in plan.streams if s.index != target_index]
         map_args = ["-map", "0:v?", "-map", f"0:{target_index}"]
         for i in others:
@@ -1406,8 +1413,7 @@ def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> 
     cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
            "-i", str(path), *map_args, "-c", "copy", "-map_metadata", "0",
            *disp_args, *faststart, str(plan.tmp_path)]
-    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), opts,
-                           progress or Progress(), reordered=reordered)
+    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), opts, progress or Progress())
 
 
 Outcome = Literal["changed", "unchanged", "skipped", "error", "cancelled"]
@@ -1484,7 +1490,7 @@ def _process_file(path: Path, opts: Options,
     plan = Plan(path, streams, target.index, duration,
                 intro=f"  {path.name}: {action} stream#{target.index} "
                       f"({target.language or 'und'}, {target.codec}) {outcome}{fallback}",
-                layout=layout, snapshot=snapshot)
+                layout=layout, snapshot=snapshot, reordered=is_avi_reorder)
     progress = Progress(show=_show_bars(opts) and opts.jobs == 1, on_progress=on_progress)
     apply = apply_mkv if ext in MKV_EXTS else apply_remux
     return "changed" if apply(plan, opts, progress) else "error"

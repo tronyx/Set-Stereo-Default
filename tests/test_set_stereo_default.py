@@ -1053,12 +1053,13 @@ ORIGINAL_AUDIO = [audio(1, 6, "eac3", default=True), audio(2, 2, "aac")]
 REMUX = str(Path("v.mkv" + ssd.TMP_MARKER + ".mkv"))
 
 
-def plan_to_check(duration=None):
+def plan_to_check(duration=None, reordered=False):
     """The Plan _process_file() would make for v.mkv: ORIGINAL_LAYOUT's
     streams, of which ORIGINAL_AUDIO are the audio ones, making stream 2
-    default. verify_remux() probes its remux, REMUX."""
+    default, or with reordered, moving it first as for an AVI.
+    verify_remux() probes its remux, REMUX."""
     return ssd.Plan(Path("v.mkv"), ORIGINAL_AUDIO, 2, duration,
-                    layout=[ssd._stream_info(s) for s in ORIGINAL_LAYOUT])
+                    layout=[ssd._stream_info(s) for s in ORIGINAL_LAYOUT], reordered=reordered)
 
 
 @pytest.mark.parametrize("remuxed, expected", [
@@ -1077,7 +1078,7 @@ def plan_to_check(duration=None):
         "unreadable"])
 def test_verify_remux(fake_ffprobe, remuxed, expected):
     fake_ffprobe[REMUX] = remuxed
-    problem = ssd.verify_remux(plan_to_check(), reordered=False).problem
+    problem = ssd.verify_remux(plan_to_check()).problem
     if expected is None:
         assert problem is None
     else:
@@ -1087,10 +1088,10 @@ def test_verify_remux(fake_ffprobe, remuxed, expected):
 def test_verify_remux_avi_reorder(fake_ffprobe):
     fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, "eng"),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
-    assert ssd.verify_remux(plan_to_check(), reordered=True).problem is None
+    assert ssd.verify_remux(plan_to_check(reordered=True)).problem is None
 
     fake_ffprobe[REMUX] = ORIGINAL_LAYOUT
-    assert "didn't end up first" in ssd.verify_remux(plan_to_check(), reordered=True).problem
+    assert "didn't end up first" in ssd.verify_remux(plan_to_check(reordered=True)).problem
 
 
 @pytest.mark.parametrize("tagged, accepted", [("en", True), ("ENG", True), ("spa", False)])
@@ -1100,7 +1101,7 @@ def test_verify_remux_avi_reorder_compares_languages_however_theyre_written(fake
     language another way."""
     fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, tagged),
                            stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
-    problem = ssd.verify_remux(plan_to_check(), reordered=True).problem
+    problem = ssd.verify_remux(plan_to_check(reordered=True)).problem
     assert (problem is None) is accepted
 
 
@@ -1159,7 +1160,7 @@ def rich_plan(name):
 def test_verify_remux_checks_every_stream_came_through(fake_ffprobe, remuxed, problem):
     plan, remux = rich_plan("v.mkv")
     fake_ffprobe[remux] = remuxed
-    assert ssd.verify_remux(plan, reordered=False).problem == problem
+    assert ssd.verify_remux(plan).problem == problem
 
 
 def test_verify_remux_rejects_a_flag_lost_from_an_mkv_file(fake_ffprobe):
@@ -1167,7 +1168,7 @@ def test_verify_remux_rejects_a_flag_lost_from_an_mkv_file(fake_ffprobe):
     newer keep, so the remux is rejected and the fix named."""
     plan, remux = rich_plan("v.mkv")
     fake_ffprobe[remux] = rich_layout(stream3=described(3, "audio", "aac", 0, 2, title="Director"))
-    assert ssd.verify_remux(plan, reordered=False).problem == (
+    assert ssd.verify_remux(plan).problem == (
         "stream#3 lost its comment flag; mkvmerge 52 and older drop it, so update MKVToolNix "
         "to 54 or newer")
 
@@ -1182,7 +1183,7 @@ def test_verify_remux_notes_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
         stream3=described(3, "audio", "aac", 0, 2, title="Director"),
         stream4=described(4, "subtitle", "subrip", title="Signs"))
 
-    checked = ssd.verify_remux(plan, reordered=False)
+    checked = ssd.verify_remux(plan)
 
     assert checked.problem is None
     assert checked.notes == (
@@ -1199,7 +1200,7 @@ def test_a_rejected_remux_carries_no_notes(fake_ffprobe):
         stream2=described(2, "audio", "aac", 0, 2, title="Stereo"),
         stream3=described(3, "audio", "aac", 0, 2, title="Director"))
 
-    checked = ssd.verify_remux(plan, reordered=False)
+    checked = ssd.verify_remux(plan)
 
     assert checked.problem == "default flag is on no track, expected only stream#2"
     assert checked.notes == ()
@@ -1222,7 +1223,7 @@ def test_a_lost_mp4_flag_is_only_warned_about_if_the_remux_is_kept(fake_ffprobe,
         stream2=described(2, "audio", "aac", int(default_on == 2), 2, title="Stereo"),
         stream3=described(3, "audio", "aac", 0, 2, title="Director"))
 
-    assert ssd.check_and_swap_in(plan, False, file_args(dry_run=False)) is kept
+    assert ssd.check_and_swap_in(plan, file_args(dry_run=False)) is kept
 
     warned = "stream#3 lost its comment flag, which ffmpeg can't write" in caplog.text
     assert warned is kept
@@ -1258,7 +1259,7 @@ def test_verify_remux_rejects_a_remux_much_shorter_than_the_original(fake_ffprob
                                                                      rejected):
     fake_ffprobe[REMUX] = (REMUXED_LAYOUT, after)
 
-    problem = ssd.verify_remux(plan_to_check(before), reordered=False).problem
+    problem = ssd.verify_remux(plan_to_check(before)).problem
 
     if rejected:
         assert problem == (f"duration dropped from {before:.1f}s to {after:.1f}s; "
