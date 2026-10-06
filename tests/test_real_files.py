@@ -895,14 +895,37 @@ def test_a_full_disk_is_reported_and_the_partial_remux_removed(tmp_path, ext):
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def group_still_running(pgid):
+    """Whether any process in the process group pgid is still running: on
+    Linux read from /proc, elsewhere from ps. A zombie doesn't count: in a
+    container nothing may ever reap it, and it's done writing. (Asking
+    with a signal won't do: a zombie still answers, and macOS can answer
+    EPERM for a group with a process on its way out.)"""
+    if Path("/proc").is_dir():
+        for stat in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                state, _, group = stat.read_text().rsplit(")", 1)[1].split()[:3]
+            except (OSError, ValueError):
+                continue
+            if int(group) == pgid and state != "Z":
+                return True
+        return False
+    listing = subprocess.run(["ps", "-eo", "pid=,pgid=,stat="], check=True, capture_output=True,
+                             text=True).stdout
+    return any(int(fields[1]) == pgid and not fields[2].startswith("Z")
+               for fields in map(str.split, listing.splitlines()) if len(fields) == 3)
+
+
 def kill_outright(proc, everything):
     """Kill the script the way nothing can be caught: with everything it
     started too (a reboot, the OOM killer), or alone (kill -9 on the
     script, End task in Task Manager). Alone, the remux it was waiting
     for is on its own: it may finish, or die writing its progress to a
     script that's gone. This waits until it has ended either way, since
-    the next run must not find it still writing. On Windows the orphan
-    is found by its parent's ID, which it keeps after the parent dies."""
+    the next run must not find it still writing. The script is its
+    group's leader (start_new_session), so the remux is found by the
+    group; on Windows by its parent's ID, which it keeps after the parent
+    dies."""
     if everything:
         os.killpg(proc.pid, signal.SIGKILL)
     else:
@@ -915,13 +938,9 @@ def kill_outright(proc, everything):
                        capture_output=True)
         return
     deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(proc.pid, 0)
-        except ProcessLookupError:
-            return
+    while group_still_running(proc.pid):
+        assert time.monotonic() < deadline, "the remux the script started didn't end"
         time.sleep(0.01)
-    pytest.fail("the remux the script started didn't end")
 
 
 @pytest.mark.parametrize("backup", [False, True], ids=["no backup", "backup"])
