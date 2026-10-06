@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-06 · [#13](https://github.com/tronyx/Set-Stereo-Default/pull/13)
+
 ### Fixed
 
 - Ctrl+C or SIGTERM arriving once every file was done, while the summary was being printed, or in the moment between the search and the first file, ended the run with a Python traceback instead of the summary. A stop is now ignored once the files are done, since only the summary is left, and one that lands anywhere else in the run is reported like any other stop. The script also puts back the signal handlers it found when it returns, for programs that call it from Python.
