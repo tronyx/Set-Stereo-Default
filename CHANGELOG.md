@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-05 · [#12](https://github.com/tronyx/Set-Stereo-Default/pull/12)
+
 ### Changed
 
 - A missing ffmpeg or ffprobe is reported before the search for files rather than after it, which on a large library or a network share could take minutes. mkvmerge is still checked only once the search shows there are MKV files to process.
@@ -13,15 +17,14 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ### Fixed
 
-- Run on a relative path such as `.`, files whose names start with `-` or `@`, or contain a colon (`Movie: Part 2.mp4`), failed with errors like `Missing argument for option` or `Protocol not found`, because ffprobe, ffmpeg and mkvmerge read the bare name as an option or a web address. Every path is now made absolute before it's used, so these files are fixed like any other. File headers show the full path as a result.
+- A symlink that someone had put at a file's temp name (`<name>.tmp_remux.<ext>`), or at a backup's staging name, was written through by mkvmerge, ffmpeg or the backup copy, and the link was then renamed over the original or into `.bak`, so the video itself became a symlink to wherever the link pointed. Whatever has the temp name is now removed before the remux, a remux that isn't a regular file is never swapped in, and a backup copy only ever writes a new file.
 - A file that another program replaced, edited or removed while it was being remuxed (e.g. Sonarr or Radarr importing an upgrade) was overwritten by the remux of the old version, silently losing the change. The script now checks that the file is unchanged before making its backup and again right before swapping the remux in (without hard links the backup is a full copy, which can take minutes on a share, so a change during it has to be caught too); if it changed, the file is left as it is now, any backup just made of the superseded version is removed, the file is reported as `changed by another program during the remux` and counted as an `Error`, and the next run fixes the new version.
+- Run on a relative path such as `.`, files whose names start with `-` or `@`, or contain a colon (`Movie: Part 2.mp4`), failed with errors like `Missing argument for option` or `Protocol not found`, because ffprobe, ffmpeg and mkvmerge read the bare name as an option or a web address. Every path is now made absolute before it's used, so these files are fixed like any other. File headers show the full path as a result.
 - With `--backup` on storage without hard links (exFAT, some network shares), where the backup is a full copy, a copy that failed partway (a full disk, a dropped share) left a partial `.bak` that looked complete, and with `--existing-backups replace` had already deleted the old one. Backups are now made under a temporary name and only renamed to `.bak` once complete, so a failed copy leaves the old backup, and the original, as they were.
 - The list of files that couldn't keep their owner could overwrite another list made in the same second, and, when written to a shared temp folder by a run as root, follow a symlink someone had planted at its name and overwrite the file it pointed to. The list is now always created as a new file, never over or through anything already at that name, and its name includes the process ID (`set_stereo_default-owners-<date>-<time>-<process ID>.log`).
-- An MP4, MOV or AVI remux that lost a flag ffmpeg can't write (e.g. "commentary") and then failed a later check got both the `lost its ... flag` warning, which means the file was fixed, and the `post-remux check failed` error saying it was left untouched. The warning now only appears when the file really was fixed.
-
-- A symlink that someone had put at a file's temp name (`<name>.tmp_remux.<ext>`), or at a backup's staging name, was written through by mkvmerge, ffmpeg or the backup copy, and the link was then renamed over the original or into `.bak`, so the video itself became a symlink to wherever the link pointed. Whatever has the temp name is now removed before the remux, a remux that isn't a regular file is never swapped in, and a backup copy only ever writes a new file.
-- `--log-file` naming a folder that doesn't exist ended in a Python traceback instead of an error message. It's now reported like any other invalid option, with exit code 2, as is a log file that can't be written for another reason, such as permissions.
 - On Linux, a file whose name isn't valid UTF-8 (old libraries can hold Latin-1 names) was fixed, but on most desktop locales each of its lines became a `--- Logging error ---` traceback on the console and was missing from `--log-file`. Such names are now written with the odd bytes as escapes, e.g. `caf\xe9.mkv`.
+- `--log-file` naming a folder that doesn't exist ended in a Python traceback instead of an error message. It's now reported like any other invalid option, with exit code 2, as is a log file that can't be written for another reason, such as permissions.
+- An MP4, MOV or AVI remux that lost a flag ffmpeg can't write (e.g. "commentary") and then failed a later check got both the `lost its ... flag` warning, which means the file was fixed, and the `post-remux check failed` error saying it was left untouched. The warning now only appears when the file really was fixed.
 
 ### Project
 
