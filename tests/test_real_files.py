@@ -816,6 +816,82 @@ def test_a_name_too_long_for_its_temp_name_is_reported(tmp_path, ext):
     assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows ignores permissions set with chmod")
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+@pytest.mark.parametrize("what", ["folder not writable", "file not readable"])
+def test_a_file_without_the_needed_permissions_is_reported(tmp_path, what, ext):
+    """Run as a user who can't write to the folder (a read-only share, or
+    files owned by someone else), the remux can't be written next to the
+    original; a file the user can't read can't even be probed. Either way
+    the file is reported with the tool's own error and left as it was, and
+    nothing is left behind. --dry-run writes nothing, so it still works on
+    the unwritable folder."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    if os.geteuid() == 0:
+        pytest.skip("root can read and write anywhere")
+    folder = tmp_path / "shared"
+    folder.mkdir()
+    video = make_video(folder / f"movie{ext}", [Track(6, default=True), Track(2)])
+    before = digest(video)
+    locked = folder if what == "folder not writable" else video
+    locked.chmod(0o555 if locked.is_dir() else 0o000)
+    try:
+        code, output = run_script(video)
+        dry_code, dry_output = run_script(video, "--dry-run")
+    finally:
+        locked.chmod(0o755 if locked.is_dir() else 0o644)
+
+    assert code == 1, output
+    assert summary(output)["error"] == 1, output
+    expected = "remux failed" if what == "folder not writable" else f"ffprobe failed on movie{ext}"
+    assert expected in output and "unexpected error" not in output, output
+    assert digest(video) == before
+    assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+    if what == "folder not writable":
+        assert dry_code == 0 and summary(dry_output)["would change"] == 1, dry_output
+    else:
+        assert dry_code == 1 and summary(dry_output)["error"] == 1, dry_output
+
+
+FULL_DISK = os.environ.get("SSD_FULL_DISK")
+"""A writable folder on a file system too small for the remux of a file
+that takes more than half of it, for the full-disk test; unset, that
+test is skipped. CI mounts a 2 MB tmpfs there in the Docker image."""
+
+
+@pytest.mark.parametrize("ext", [".mkv", ".mp4"])
+def test_a_full_disk_is_reported_and_the_partial_remux_removed(tmp_path, ext):
+    """A file whose remux doesn't fit on the disk. The tool fails partway,
+    and the half-written temp file must be removed, so a disk that's
+    already full isn't left even fuller; the original is left as it was.
+    Needs SSD_FULL_DISK (see FULL_DISK)."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    if not FULL_DISK:
+        pytest.skip("SSD_FULL_DISK isn't set")
+    folder = Path(FULL_DISK) / f"full{ext[1:]}"
+    folder.mkdir()
+    try:
+        tracks = [Track(6, default=True), Track(2)]
+        free = shutil.disk_usage(folder).free
+        per_second = make_video(tmp_path / f"probe{ext}", tracks, seconds=1).stat().st_size
+        video = make_video(folder / f"movie{ext}", tracks, seconds=max(2, int(free * 0.6 / per_second)))
+        free = shutil.disk_usage(folder).free
+        assert video.stat().st_size > free, "the remux would fit: is SSD_FULL_DISK on a small enough file system?"
+        before = digest(video)
+
+        code, output = run_script(video)
+
+        assert code == 1, output
+        assert summary(output)["error"] == 1, output
+        assert "remux failed" in output and "No space left" in output, output
+        assert "unexpected error" not in output, output
+        assert digest(video) == before
+        assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+        assert shutil.disk_usage(folder).free >= free, "the space wasn't given back"
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 AUDIO_CODECS = {
     "aac": (("aac",), "aac"),
     "e-ac3": (("eac3",), "eac3"),
