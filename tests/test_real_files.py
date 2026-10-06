@@ -582,9 +582,10 @@ def test_a_file_name_that_isnt_valid_utf8_is_fixed(tmp_path):
     need("ffmpeg", "ffprobe", "mkvmerge")
     name = os.fsdecode(b"caf\xe9.mkv")
     try:
-        video = make_video(tmp_path / name, [Track(6, default=True), Track(2)])
-    except (OSError, subprocess.CalledProcessError) as exc:
+        (tmp_path / name).touch()
+    except OSError as exc:
         pytest.skip(f"this file system needs Unicode names: {exc}")
+    video = make_video(tmp_path / name, [Track(6, default=True), Track(2)])
 
     code, output = run_script(video, env={"PYTHONIOENCODING": "utf-8:strict"})
 
