@@ -637,10 +637,11 @@ def is_commentary(stream: Stream) -> bool:
 def normalize_language(code: str | None) -> str:
     """Return code in one standard form, so different tags for the same
     language compare equal: lowercased, with any region or script part
-    dropped ("pt-BR" -> "pt"), then mapped to its ISO 639-2/T code through
-    LANGUAGE_ALIASES ("de" and "ger" -> "deu"). Codes that aren't in the
-    table come back lowercased; an empty tag stays empty."""
-    base = re.split(r"[-_]", (code or "").strip().lower(), maxsplit=1)[0]
+    dropped ("pt-BR" -> "pt") and any spaces around it removed, then
+    mapped to its ISO 639-2/T code through LANGUAGE_ALIASES ("de" and
+    "ger" -> "deu"). Codes that aren't in the table come back lowercased;
+    an empty tag stays empty."""
+    base = re.split(r"[-_]", (code or "").lower(), maxsplit=1)[0].strip()
     return LANGUAGE_ALIASES.get(base, base)
 
 
@@ -766,12 +767,12 @@ def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
     first audio track (audio, the remux's audio tracks). AVI has no default
     flag to check, so the first track must match the target's codec,
     channel count and language (compared after normalize_language(), as
-    everywhere else)."""
-    target = plan.target
-    first = audio[0]
+    everywhere else, and only when both are known: a tool may drop a
+    language or fill one in, as in _stream_loss())."""
+    target, first = plan.target, audio[0]
+    wanted, got = normalize_language(target.language), normalize_language(first.language)
     if (first.codec != target.codec or first.channels != target.channels
-            or (target.language and normalize_language(first.language)
-                != normalize_language(target.language))):
+            or (wanted not in ("", "und") and got not in ("", "und") and got != wanted)):
         return "target audio track didn't end up first"
     return None
 

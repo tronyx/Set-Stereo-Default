@@ -75,6 +75,6 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 - **Docstrings, not comments.** Explain code in the docstring of the function it belongs to. Module-level settings get a docstring on the line after them. Don't add `#` comments.
 - **Keep docstrings short and plain.** Say what something does and, where it isn't obvious, why.
 - **Type hints on every function.** `mypy` checks them in strict mode, so they stay accurate and complete. If it objects to something, fix the code rather than silencing it: a `# type: ignore` is a comment, which the rule above rules out.
-- **Add or update tests** for any change in behavior. Logic tests go in `tests/test_set_stereo_default.py`. Anything that depends on how ffmpeg or mkvmerge really behave goes in `tests/test_real_files.py`.
+- **Add or update tests** for any change in behavior. Logic tests go in `tests/test_set_stereo_default.py`. A rule that must hold for every input, not just a few chosen examples, can be a property in `tests/test_properties.py` (Hypothesis). Anything that depends on how ffmpeg or mkvmerge really behave goes in `tests/test_real_files.py`.
 - **Update the README** if you add an option or change what the script does.
 - **Add a line to the changelog** under **Unreleased** in `CHANGELOG.md`, saying what changes for someone using the script.
