@@ -355,6 +355,44 @@ def test_input_file_from_standard_input_is_relative_to_the_current_folder(shows,
     assert [Path(p) for p in ssd.read_input_file("-")] == [shows / "Billions", shows / "Black Bird"]
 
 
+def test_a_list_from_standard_input_never_leaves_the_backup_question_reading_it(tmp_path,
+                                                                               monkeypatch):
+    """With --input-file -, standard input is the list, not a person, so the
+    backup question must not be asked: new backups are numbered."""
+    make_videos(tmp_path, 1)
+    (tmp_path / "e00.mkv.bak").write_text("old")
+    monkeypatch.setattr(ssd.sys, "stdin", types.SimpleNamespace(
+        buffer=io.BytesIO(str(tmp_path).encode("utf-8")), isatty=lambda: False))
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("asked a question"))
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    seen = []
+    monkeypatch.setattr(ssd, "process_file",
+                        lambda path, opts, **kwargs: seen.append(opts.backup_mode) or "changed")
+
+    assert ssd.main(["--input-file", "-", "--backup", "--no-progress"]) == 0
+
+    assert seen == ["number"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows file names are always Unicode")
+def test_a_file_name_that_isnt_valid_utf8_is_found_from_a_list(tmp_path):
+    """Old Linux libraries hold Latin-1 names. They reach the script as
+    surrogate-escaped text, which must survive the list, the search and
+    the path handed to the tools, byte for byte."""
+    name = os.fsdecode(b"caf\xe9.mkv")
+    try:
+        (tmp_path / name).write_bytes(b"x")
+    except OSError as exc:
+        pytest.skip(f"this file system needs Unicode names: {exc}")
+    listing = tmp_path / "list.txt"
+    listing.write_bytes(b"caf\xe9.mkv\n")
+
+    found = ssd.find_files(ssd.parse_args(["--input-file", str(listing)]))
+
+    assert [p.name for p in found] == [name]
+    assert os.fsencode(found[0].name) == b"caf\xe9.mkv"
+
+
 def test_input_file_paths_come_after_the_command_lines(shows):
     (shows / "shows.txt").write_text("Black Bird\nBillions\n", encoding="utf-8")
 
@@ -2988,6 +3026,31 @@ def test_overall_bar_never_drifts_past_the_total(tmp_path, monkeypatch):
     ssd.main()
 
     assert finals and set(finals) == {2}
+
+
+def test_a_name_the_console_cant_encode_is_written_as_escapes(tmp_path, capsys):
+    """A Linux file name that isn't valid UTF-8 reaches the script with
+    surrogate escapes, which a strict UTF-8 console or log file would
+    refuse, turning each of the file's lines into a logging error. They're
+    written with the odd bytes as escapes instead, on the console and in
+    the log file alike."""
+    log_file = tmp_path / "run.log"
+    ssd.setup_logging(str(log_file))
+
+    ssd.log.warning("caf\udce9.mkv: careful")
+
+    assert "caf\\xe9.mkv: careful" in capsys.readouterr().out
+    assert "caf\\xe9.mkv: careful" in log_file.read_text(encoding="utf-8")
+
+
+def test_escape_bytes_shows_a_byte_as_itself_and_anything_else_as_its_code_point():
+    """The handler setup_logging() registers: a surrogate escape becomes its
+    byte, as the file system has it; any other character the stream can't
+    encode becomes its code point, as backslashreplace gives; and it's for
+    writing only, so an undecodable byte still fails."""
+    assert "caf\udce9 日.mkv".encode("ascii", "escapebytes") == b"caf\\xe9 \\u65e5.mkv"
+    with pytest.raises(UnicodeDecodeError):
+        b"\xe9".decode("ascii", "escapebytes")
 
 
 def test_log_file_gets_everything_but_the_console_only_warnings_and_errors(tmp_path, capsys):

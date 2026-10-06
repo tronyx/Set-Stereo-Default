@@ -87,10 +87,12 @@ Full guide: https://github.com/tronyx/Set-Stereo-Default
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import dataclasses
 import functools
 import importlib
+import io
 import json
 import logging
 import os
@@ -239,21 +241,50 @@ class TqdmLoggingHandler(logging.Handler):
             self.handleError(record)
 
 
+def _escape_bytes(error: UnicodeError) -> tuple[str, int]:
+    """How the console and the log file write text they can't encode (see
+    setup_logging()): each character they can't becomes an escape. A
+    surrogate escape (U+DC80 to U+DCFF), which is how a byte that isn't
+    valid UTF-8 in a Linux file name reaches Python, becomes that byte's
+    escape, e.g. "\\xe9", so the name reads as the file system has it;
+    anything else becomes its code point's, as backslashreplace gives."""
+    if not isinstance(error, UnicodeEncodeError):
+        raise error
+    escaped = "".join(f"\\x{ord(c) - 0xDC00:02x}" if 0xDC80 <= ord(c) <= 0xDCFF
+                      else c.encode("ascii", "backslashreplace").decode("ascii")
+                      for c in error.object[error.start:error.end])
+    return escaped, error.end
+
+
+codecs.register_error("escapebytes", _escape_bytes)
+
+
 def setup_logging(log_file: str | None) -> None:
     """Send log messages to the console, or with --log-file to that file.
     With a log file, warnings and errors still reach the console too, so a
     failed run (e.g. a missing tool) never ends without saying why. Handlers
     from an earlier call are closed and replaced, so a second run in the
-    same process doesn't print every line twice."""
+    same process doesn't print every line twice.
+
+    The console (both streams, since the progress bars go to the second)
+    and the log file write a character they can't encode as an escape, e.g.
+    caf\\xe9.mkv (see _escape_bytes()), rather than failing. A Linux file
+    name that isn't valid UTF-8 reaches the script as surrogate escapes,
+    which a strict UTF-8 console, the default in most locales, would
+    otherwise refuse, turning each of that file's lines into a logging
+    error and leaving them out of the log file."""
     for old in log.handlers[:]:
         log.removeHandler(old)
         old.close()
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="escapebytes")
     log.setLevel(logging.INFO)
     log.propagate = False
     console = TqdmLoggingHandler() if HAVE_TQDM else logging.StreamHandler(sys.stdout)
     console.setFormatter(logging.Formatter("%(message)s"))
     if log_file:
-        handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        handler = logging.FileHandler(log_file, mode="a", encoding="utf-8", errors="escapebytes")
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         log.addHandler(handler)
         console.setLevel(logging.WARNING)

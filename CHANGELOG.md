@@ -21,6 +21,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - A symlink that someone had put at a file's temp name (`<name>.tmp_remux.<ext>`), or at a backup's staging name, was written through by mkvmerge, ffmpeg or the backup copy, and the link was then renamed over the original or into `.bak`, so the video itself became a symlink to wherever the link pointed. Whatever has the temp name is now removed before the remux, a remux that isn't a regular file is never swapped in, and a backup copy only ever writes a new file.
 - `--log-file` naming a folder that doesn't exist ended in a Python traceback instead of an error message. It's now reported like any other invalid option, with exit code 2, as is a log file that can't be written for another reason, such as permissions.
+- On Linux, a file whose name isn't valid UTF-8 (old libraries can hold Latin-1 names) was fixed, but on most desktop locales each of its lines became a `--- Logging error ---` traceback on the console and was missing from `--log-file`. Such names are now written with the odd bytes as escapes, e.g. `caf\xe9.mkv`.
 
 ### Project
 
