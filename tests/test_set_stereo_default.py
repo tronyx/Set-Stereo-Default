@@ -1024,6 +1024,30 @@ def test_no_backup_question_without_existing_backups(backed_up):
     assert seen == ["number", "number"]
 
 
+def test_backups_are_counted_with_one_listing_per_folder(tmp_path, monkeypatch):
+    """Each folder is listed once, however many files it holds, instead of
+    each file's .bak being checked on its own: on a network share every
+    check is a round trip. A .bak only counts for the file next to it, and
+    a folder that can't be listed counts as having none."""
+    a, b = tmp_path / "Show A", tmp_path / "Show B"
+    for folder in (a, b):
+        folder.mkdir()
+        for i in range(3):
+            (folder / f"e{i}.mkv").write_text("x")
+    (a / "e0.mkv.bak").write_text("old")
+    (a / "e1.mkv.bak").write_text("old")
+    (b / "e0.mkv.bak.1").write_text("not a plain .bak")
+    (b / "e9.mkv.bak").write_text("no e9.mkv next to it")
+    files = [a / f"e{i}.mkv" for i in range(3)] + [b / f"e{i}.mkv" for i in range(3)]
+    listed = []
+    real_scandir = os.scandir
+    monkeypatch.setattr(ssd.os, "scandir", lambda folder: listed.append(folder) or real_scandir(folder))
+
+    assert ssd._files_with_backups(files) == 2
+    assert sorted(map(str, listed)) == sorted(map(str, [a, b]))
+    assert ssd._files_with_backups([tmp_path / "missing" / "e0.mkv"]) == 0
+
+
 @pytest.fixture
 def fake_ffprobe(monkeypatch):
     """Replace run() with a stand-in ffprobe. Set layouts[path] to the

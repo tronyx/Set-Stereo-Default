@@ -1870,16 +1870,32 @@ def find_files(opts: Options) -> list[Path]:
                            opts.skip_symlinks, opts.follow_symlinks))
 
 
+def _files_with_backups(files: list[Path]) -> int:
+    """How many of files have a <name>.bak next to them, found with one
+    listing per folder rather than one check per file: on a network share
+    each check is a round trip, and a library can hold tens of thousands of
+    files. A folder that can't be listed counts as having none; the run
+    reports it when it searches the folder."""
+    wanted: dict[Path, set[str]] = {}
+    for f in files:
+        wanted.setdefault(f.parent, set()).add(f.name + ".bak")
+    count = 0
+    for folder, names in wanted.items():
+        with contextlib.suppress(OSError), os.scandir(folder) as listing:
+            count += sum(1 for entry in listing if entry.name in names)
+    return count
+
+
 def choose_backup_mode(opts: Options,
                        files: list[Path]) -> Literal["replace", "number", "quit"]:
     """What to do with backups when <name>.bak already exists: "replace",
     "number" or "quit". --existing-backups decides if given. Otherwise,
-    if any of files has one, the user is asked (see
-    ask_about_existing_backups()), or new backups are numbered when no one
-    can answer, since that never deletes anything."""
+    if any of files has one (see _files_with_backups()), the user is asked
+    (see ask_about_existing_backups()), or new backups are numbered when no
+    one can answer, since that never deletes anything."""
     if opts.existing_backups:
         return opts.existing_backups
-    with_backup = sum(1 for f in files if f.with_name(f.name + ".bak").exists())
+    with_backup = _files_with_backups(files)
     if not with_backup:
         return "number"
     if _can_ask():

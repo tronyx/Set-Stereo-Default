@@ -9,6 +9,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 ### Changed
 
 - A missing ffmpeg or ffprobe is reported before the search for files rather than after it, which on a large library or a network share could take minutes. mkvmerge is still checked only once the search shows there are MKV files to process.
+- With `--backup`, the check for existing `.bak` files before the run lists each folder once instead of checking every file on its own, which on a network share was one round trip per file.
 
 ### Fixed
 
