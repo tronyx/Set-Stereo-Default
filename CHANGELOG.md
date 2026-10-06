@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Project
+
+- The real-file tests also try random track layouts, 30 per job on every push and 300 on the weekly run: an MKV or MP4 with up to four audio tracks of random channels, codecs, languages, names and flags, in random order, with or without subtitles and a font attachment. What the script does with each is checked against a separate restatement of the README's track-picking rules, and the file must come through with only the default flags changed, or byte for byte as it was. Each test's ID shows the seed, so `SSD_FUZZ_SEED=<seed>` replays a failure and `SSD_FUZZ_CASES=<count>` tries more.
 
 ## 2026-10-05 · [#12](https://github.com/tronyx/Set-Stereo-Default/pull/12)
 

@@ -10,10 +10,12 @@ fails the run instead of quietly skipping everything."""
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,8 +24,13 @@ import pytest
 SCRIPT = Path(__file__).resolve().parent.parent / "set_stereo_default.py"
 """The script under test, run as a separate program like a user would."""
 
-LAYOUTS = {2: "stereo", 6: "5.1"}
+LAYOUTS = {1: "mono", 2: "stereo", 6: "5.1"}
 """ffmpeg's channel layout name for each channel count make_video() supports."""
+
+SAME_LANGUAGE = {"en": "eng", "fre": "fra"}
+"""Language codes the tests use that mean the same as another, in the form
+the script compares them in. A remux may change the spelling: mkvmerge
+writes a 2-letter code ffmpeg stored as it was given as its 3-letter form."""
 
 
 def _unavailable(message):
@@ -324,7 +331,10 @@ def contents(path):
     or picture size, language, name, attachment file name and MIME type,
     and every disposition flag except the audio default flag, which is the
     one thing the script changes. Chapter times are rounded to the
-    millisecond, since containers store them with different precision."""
+    millisecond, since containers store them with different precision.
+    Languages are compared the way the script compares them: "und" counts
+    as no language, since ffmpeg's MP4 muxer writes "und" for a track that
+    had none, and "en" is the same as "eng" (see SAME_LANGUAGE)."""
     res = subprocess.run(["ffprobe", "-v", "error", "-of", "json", "-show_streams",
                           "-show_chapters", "-show_format", str(path)],
                          check=True, capture_output=True, text=True)
@@ -332,6 +342,9 @@ def contents(path):
     streams = []
     for s in data["streams"]:
         tags = {k.lower(): v for k, v in s.get("tags", {}).items()}
+        language = tags.pop("language", "")
+        if language not in ("", "und"):
+            tags["language"] = SAME_LANGUAGE.get(language, language)
         disposition = dict(s.get("disposition", {}))
         if s["codec_type"] == "audio":
             disposition.pop("default", None)
@@ -420,6 +433,157 @@ def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
     assert summary(output)["changed"] == 1, output
     assert audio_defaults(video) == [(2, True), (6, False)]
     assert contents(video) == before
+
+
+FUZZ_SEED = os.environ.get("SSD_FUZZ_SEED") or str(int(time.time()))
+"""Where the random layouts start from: the time, so every run tries new
+ones, unless SSD_FUZZ_SEED says otherwise (CI gives each job its own). A
+failure's test ID names the seed, and SSD_FUZZ_SEED=<seed> replays it."""
+
+FUZZ_CASES = int(os.environ.get("SSD_FUZZ_CASES", "30"))
+"""How many random layouts to try. The weekly CI run tries more."""
+
+RANDOM_NAMES = ["", "", "Stereo", "Surround 5.1", "Director's Commentary", "Audio Description",
+                "Español", "日本語", "Signs"]
+"""Track names for random layouts, some of which mark commentary."""
+
+RANDOM_LANGUAGES = ["", "und", "eng", "en", "spa", "jpn", "fre"]
+"""Language tags for random layouts: missing, unknown, and the same language
+written two ways."""
+
+COMMENTARY_NAME = re.compile(r"commentary|audio[ -]?description|descriptive|described|\bdvs\b",
+                             re.IGNORECASE)
+"""The names the README says mark a commentary or audio-description track."""
+
+
+def make_random_video(folder, ext, rng):
+    """Write folder/random<ext> with a layout drawn from rng: one to four
+    audio tracks, each with random channels (mono, stereo or 5.1), codec,
+    language, name and flags; up to two subtitles; in MKV, sometimes a font
+    attachment; and the streams in random order after the video. Returns
+    (path, a description of the layout for a failure message). What the
+    file actually holds is read back with ffprobe afterwards, since MP4
+    can't store some of it and ffmpeg versions differ."""
+    audio = [{"channels": rng.choice([1, 2, 2, 6]), "codec": rng.choice(["ac3", "aac"]),
+              "language": rng.choice(RANDOM_LANGUAGES), "title": rng.choice(RANDOM_NAMES),
+              "flags": [name for name, chance in (("default", 0.4), ("comment", 0.15),
+                                                  ("visual_impaired", 0.1))
+                        if rng.random() < chance]}
+             for _ in range(rng.randint(1, 4))]
+    subtitles = [{"language": rng.choice(["eng", "spa"]), "flags": rng.choice(["0", "default", "forced"])}
+                 for _ in range(rng.randint(0, 2))]
+    order = [("audio", i) for i in range(len(audio))] + [("subtitle", i) for i in range(len(subtitles))]
+    rng.shuffle(order)
+    attach = ext == ".mkv" and rng.random() < 0.3
+
+    srt = folder / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1"]
+    for a in audio:
+        cmd += ["-f", "lavfi", "-t", "1", "-i",
+                f"anullsrc=channel_layout={LAYOUTS[a['channels']]}:sample_rate=48000"]
+    cmd += ["-i", str(srt)] * len(subtitles)
+    if attach:
+        font = folder / "font.ttf"
+        font.write_bytes(b"\x00\x01\x00\x00" + bytes(64))
+        cmd += ["-attach", str(font), "-metadata:s:t", "mimetype=font/ttf",
+                "-metadata:s:t", "filename=font.ttf"]
+    cmd += ["-map", "0:v"]
+    settings = ["-c:v", "mpeg4", "-c:s", "mov_text" if ext == ".mp4" else "srt",
+                "-disposition:v:0", "default"]
+    out = {"audio": 0, "subtitle": 0}
+    for kind, i in order:
+        n = out[kind]
+        out[kind] += 1
+        if kind == "audio":
+            a = audio[i]
+            cmd += ["-map", f"{1 + i}:a"]
+            settings += [f"-c:a:{n}", a["codec"], f"-disposition:a:{n}", "+".join(a["flags"]) or "0"]
+            if a["language"]:
+                settings += [f"-metadata:s:a:{n}", f"language={a['language']}"]
+            if a["title"]:
+                settings += [f"-metadata:s:a:{n}", f"title={a['title']}",
+                             f"-metadata:s:a:{n}", f"handler_name={a['title']}"]
+        else:
+            s = subtitles[i]
+            cmd += ["-map", f"{1 + len(audio) + i}:s"]
+            settings += [f"-disposition:s:{n}", s["flags"],
+                         f"-metadata:s:s:{n}", f"language={s['language']}"]
+    if ext == ".mp4":
+        settings += ["-movflags", "+faststart"]
+    path = folder / f"random{ext}"
+    subprocess.run(cmd + settings + [str(path)], check=True, capture_output=True, text=True)
+    layout = ", ".join(f"{kind}#{i}" + (f" {audio[i]}" if kind == "audio" else f" {subtitles[i]}")
+                       for kind, i in order)
+    return path, f"{ext}{' +font' if attach else ''}: video, {layout}"
+
+
+def expected_outcome(path):
+    """What the README's "Picking the track" rules say should happen to the
+    file at path, worked out from what ffprobe reads back: ("changed",
+    position of the stereo track among the audio tracks), ("unchanged",
+    position) if it's already the only default, or ("skipped", None). A
+    restatement of the rules, independent of the script, so the two can
+    disagree."""
+    def language(tags):
+        code = tags.get("language", "").lower().split("-")[0]
+        return SAME_LANGUAGE.get(code, code)
+
+    audio = [(s, default) for s, (_, default) in zip(
+        [s for s in contents(path)["streams"] if s["type"] == "audio"], audio_defaults(path))]
+    candidates = [
+        (s, default) for s, default in audio
+        if s["channels"] == 2 and not s["disposition"].get("comment")
+        and not s["disposition"].get("visual_impaired")
+        and not COMMENTARY_NAME.search(s["tags"].get("title", "") + s["tags"].get("handler_name", ""))]
+    current = next((s for s, default in audio if default), audio[0][0])
+    wanted = language(current["tags"])
+    if wanted not in ("", "und"):
+        candidates = [(s, d) for s, d in candidates if language(s["tags"]) in ("", "und", wanted)]
+        exact = [(s, d) for s, d in candidates if language(s["tags"]) == wanted]
+        if len(exact) == 1:
+            candidates = exact
+    if len(candidates) != 1:
+        return "skipped", None
+    target = candidates[0][0]
+    position = [s for s, _ in audio].index(target)
+    already = all((s is target) == default for s, default in audio)
+    return ("unchanged" if already else "changed"), position
+
+
+@pytest.mark.parametrize("case", range(FUZZ_CASES),
+                         ids=[f"seed={FUZZ_SEED}-{i}" for i in range(FUZZ_CASES)])
+def test_a_random_layout_is_fixed_or_left_alone(tmp_path, case):
+    """A file with a layout nobody wrote a test for. Whatever it holds, the
+    script must do what the README's rules say (see expected_outcome()):
+    change exactly the right track's default flag and nothing else, or
+    leave the file byte for byte as it was. With mkvmerge 52 or older,
+    which drops the commentary and audio-description flags, an MKV that
+    has one must be rejected and left alone instead. Replay a failing case
+    with SSD_FUZZ_SEED set to the seed in its ID."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    rng = random.Random(f"{FUZZ_SEED}-{case}")
+    ext = rng.choice([".mkv", ".mp4"])
+    video, layout = make_random_video(tmp_path, ext, rng)
+    expected, position = expected_outcome(video)
+    before, before_digest = contents(video), digest(video)
+    if expected == "changed" and ext == ".mkv" and mkvmerge_version() < 54 and any(
+            s["disposition"].get(flag) for s in before["streams"] for flag in ("comment", "visual_impaired")):
+        expected = "error"
+
+    code, output = run_script(video)
+
+    assert code == (1 if expected == "error" else 0), f"{layout}\n{output}"
+    assert summary(output)[expected] == 1, f"expected {expected}\n{layout}\n{output}"
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    if expected != "changed":
+        assert digest(video) == before_digest, f"the file changed\n{layout}\n{output}"
+        return
+    assert contents(video) == before, f"something besides the default flags changed\n{layout}"
+    defaults = [default for _, default in audio_defaults(video)]
+    assert defaults == [i == position for i in range(len(defaults))], f"{layout}\n{output}"
+    if ext == ".mkv":
+        assert mkvmerge_defaults(video) == defaults, layout
 
 
 AUDIO_CODECS = {

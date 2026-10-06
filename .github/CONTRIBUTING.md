@@ -40,7 +40,7 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
    python -m mypy
    ```
 
-   The real-file tests are skipped unless ffmpeg, ffprobe and mkvmerge are installed. GitHub runs them for you on every pull request, but it's quicker to catch problems locally. To see which lines your tests reach, run `python -m coverage run -m pytest` and then `python -m coverage report`.
+   The real-file tests are skipped unless ffmpeg, ffprobe and mkvmerge are installed. GitHub runs them for you on every pull request, but it's quicker to catch problems locally. Some of them try random track layouts: a failing one's test ID shows the seed, and running pytest with `SSD_FUZZ_SEED=<seed>` tries the same layouts again (`SSD_FUZZ_CASES=<count>` sets how many). To see which lines your tests reach, run `python -m coverage run -m pytest` and then `python -m coverage report`.
 
    `ruff` is a linter and `mypy` checks the type hints; both are set up in `pyproject.toml`, and GitHub runs them on every push too.
 

@@ -21,6 +21,11 @@ on:
 permissions:
   contents: read
 
+# How many random layouts each real-file job tries (tests/test_real_files.py):
+# a few on every push, many more on the weekly run.
+env:
+  SSD_FUZZ_CASES: ${{ github.event_name == 'schedule' && '300' || '30' }}
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -180,6 +185,9 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
       # Fail, rather than skip, if a tool is missing.
       REQUIRE_MEDIA_TOOLS: "1"
+      # Where the random layouts start from: new ones in every run and every
+      # job. A failure's test ID names the seed, for replaying it.
+      SSD_FUZZ_SEED: ${{ github.run_id }}-${{ strategy.job-index }}
     steps:
       - uses: actions/checkout@v7
       - name: Install tools
@@ -244,6 +252,7 @@ jobs:
     env:
       # Fail, rather than skip, if a tool is missing.
       REQUIRE_MEDIA_TOOLS: "1"
+      SSD_FUZZ_SEED: ${{ github.run_id }}-windows
     defaults:
       run:
         shell: bash
@@ -296,6 +305,7 @@ jobs:
     env:
       # Fail, rather than skip, if a tool is missing.
       REQUIRE_MEDIA_TOOLS: "1"
+      SSD_FUZZ_SEED: ${{ github.run_id }}-macos
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v7
@@ -339,6 +349,7 @@ jobs:
       packages: write
     env:
       IMAGE: set-stereo-default:ci
+      SSD_FUZZ_SEED: ${{ github.run_id }}-docker-${{ matrix.arch }}
       PUBLISH: >-
         ${{ github.repository == 'tronyx/Set-Stereo-Default'
         && github.event_name != 'pull_request'
@@ -383,7 +394,8 @@ jobs:
       # The repo is copied inside, so the read-only mount stays untouched.
       - name: Tests inside the image
         run: |
-          docker run --rm -v "$PWD:/src:ro" -e REQUIRE_MEDIA_TOOLS=1 --entrypoint sh "$IMAGE" -c \
+          docker run --rm -v "$PWD:/src:ro" -e REQUIRE_MEDIA_TOOLS=1 -e SSD_FUZZ_SEED -e SSD_FUZZ_CASES \
+            --entrypoint sh "$IMAGE" -c \
             'apk add --no-cache -q py3-pytest && cp -r /src /tmp/repo && cd /tmp/repo && python3 -m pytest -v'
       # As the runner's own user, like docker run --user on an NFS share, and
       # without -t, like cron: the output must have no progress-bar codes.
