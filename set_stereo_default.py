@@ -101,7 +101,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -1897,8 +1897,8 @@ def _show_bars(opts: Options) -> bool:
     return HAVE_TQDM and not opts.no_progress and sys.stderr.isatty()
 
 
-def process_all(files: list[Path], opts: Options, stats: dict[Outcome, int]) -> None:
-    """Process every file, adding each outcome to stats ("changed": 3, ...).
+def process_all(files: list[Path], opts: Options, stats: Counter[Outcome]) -> None:
+    """Process every file, counting each outcome in stats ("changed": 3, ...).
     A stop (Ctrl+C, SIGTERM) comes out as KeyboardInterrupt, with the
     progress bars closed and stats holding the files that finished.
 
@@ -1971,14 +1971,14 @@ def process_all(files: list[Path], opts: Options, stats: dict[Outcome, int]) -> 
             for i, f in enumerate(files, 1):
                 show_counter(i)
                 result = run_one(i, f)
-                stats[result] = stats.get(result, 0) + 1
+                stats[result] += 1
         else:
             with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
                 futures = [pool.submit(run_one, i, f) for i, f in enumerate(files, 1)]
                 for done, fut in enumerate(as_completed(futures), 1):
                     show_counter(done)
                     result = fut.result()
-                    stats[result] = stats.get(result, 0) + 1
+                    stats[result] += 1
     finally:
         for bar in reversed(bars):
             with contextlib.suppress(Exception):
@@ -1987,7 +1987,7 @@ def process_all(files: list[Path], opts: Options, stats: dict[Outcome, int]) -> 
         print()
 
 
-def print_summary(stats: dict[Outcome, int], opts: Options, partial: bool = False,
+def print_summary(stats: Counter[Outcome], opts: Options, partial: bool = False,
                   cancelled: int = 0) -> None:
     """Log the counts, printing them too with --log-file (see _tell()). In a
     dry run nothing was changed, so the heading says so and "Changed" reads
@@ -2070,7 +2070,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         opts = dataclasses.replace(opts, existing_backups=answer)
 
-    stats: dict[Outcome, int] = {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0}
+    stats: Counter[Outcome] = Counter()
     list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
     try:
         process_all(files, opts, stats)

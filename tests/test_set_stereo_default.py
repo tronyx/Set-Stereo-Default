@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import types
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -2422,7 +2423,7 @@ def test_log_file_counter_only_shows_on_a_terminal(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(ssd, "_show_bars", lambda args: False)
     monkeypatch.setattr(ssd, "process_file", lambda path, args, **kwargs: "unchanged")
     monkeypatch.setattr(sys.stdout, "isatty", lambda: terminal)
-    stats = {}
+    stats = Counter()
 
     ssd.process_all([tmp_path / "a.mkv", tmp_path / "b.mkv"],
                     file_args(log_file=str(tmp_path / "run.log")), stats)
