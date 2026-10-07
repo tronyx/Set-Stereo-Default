@@ -838,6 +838,25 @@ def test_make_backup_uses_plain_bak_when_its_free(tmp_path):
     assert ssd.make_backup(video) == tmp_path / "v.mkv.bak"
 
 
+def test_replacing_a_backup_that_is_already_a_link_to_the_file_leaves_nothing_behind(tmp_path):
+    """A run stopped just after making a backup leaves <name>.bak as a hard
+    link to the untouched original. Renaming the next backup's staging
+    link over it then does nothing, since both are the same file, so the
+    staging file must not be left behind."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    bak = tmp_path / "v.mkv.bak"
+    try:
+        os.link(video, bak)
+    except OSError as exc:
+        pytest.skip(f"can't create hard links here: {exc}")
+
+    assert ssd.make_backup(video, replace=True) == bak
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["v.mkv", "v.mkv.bak"]
+    assert bak.read_bytes() == b"original"
+
+
 def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypatch):
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")

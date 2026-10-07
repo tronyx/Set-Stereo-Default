@@ -955,7 +955,10 @@ def make_backup(path: Path, replace: bool = False) -> Path:
     fails partway (a full disk, a dropped share) never leaves a partial
     backup that looks whole, nor removes the <name>.bak it was replacing.
     The staging file is removed if anything goes wrong, and if the run is
-    killed outright, the next run reports it as a leftover temp file.
+    killed outright, the next run reports it as a leftover temp file. It's
+    also removed after the rename: renaming it over a <name>.bak that is
+    already a hard link to the file (left by a run stopped just after its
+    backup) does nothing, but succeeds, so it would otherwise stay behind.
 
     Whatever already has the staging name is removed first, and the copy
     only ever writes a new file (see _copy_new()), so a symlink someone put
@@ -969,6 +972,7 @@ def make_backup(path: Path, replace: bool = False) -> Path:
         except OSError:
             _copy_new(path, staging)
         os.replace(staging, bak_path)
+        staging.unlink(missing_ok=True)
     except BaseException:
         staging.unlink(missing_ok=True)
         raise

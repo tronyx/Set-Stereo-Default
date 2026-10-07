@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+### Fixed
+
+- With `--backup --existing-backups replace`, a run stopped just after making a file's backup, then run again, left a stray `<name>.bak.tmp_remux.<ext>` next to the file, which later runs reported as a leftover temp file. The stopped run's `.bak` was a hard link to the untouched file, and renaming the new backup over another link to the same file does nothing, but succeeds. The new backup's temp name is now always removed. The backup itself was always a true copy of the original. Found by the random-stop tests on macOS.
+
 ### Project
 
 - ruff also checks pycodestyle's rules now, including its whitespace checks, which need ruff's preview mode, and a line length of 120. A missing space around `=` had slipped into the property tests unnoticed. Preview mode's other rules found a few small things, now fixed: docstrings that show a backslash are raw strings, and `file_context()` is typed as the generator it is.
