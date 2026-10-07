@@ -1,0 +1,60 @@
+name: Scan
+
+# Rescans the published Docker images for known vulnerabilities midweek,
+# between the Monday rebuilds (see tests.yml), so one found after an image was
+# built shows up without waiting for its next rebuild. GitHub only runs this on
+# the default branch, develop; it scans both images from there.
+on:
+  schedule:
+    - cron: "23 6 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan ${{ matrix.tag }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [develop, latest]
+        arch: [amd64, arm64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      # The same pin as the docker job in tests.yml; Dependabot can't update it.
+      TRIVY: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+      IMAGE: docker.io/tronyx/set-stereo-default:${{ matrix.tag }}
+    steps:
+      # Only to know the branch's current commit, which the results are filed under.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.tag == 'latest' && 'master' || 'develop' }}
+          persist-credentials: false
+      - id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      # As in tests.yml: every vulnerability with a fix listed here, and the
+      # results filed in the Security tab, then a critical one fails the run,
+      # which emails whoever last changed the schedule above.
+      - name: Scan for vulnerabilities
+        run: |
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" image --image-src remote --platform "linux/${{ matrix.arch }}" \
+            --scanners vuln --ignore-unfixed --format json --output /out/trivy.json "$IMAGE"
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --scanners vuln --format table /out/trivy.json
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --format sarif --output /out/trivy.sarif /out/trivy.json
+      # The same category as the docker job, under the branch and its commit, so
+      # these results replace the ones from the image's build.
+      - name: Upload the scan to the Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ runner.temp }}/trivy.sarif
+          category: trivy-${{ matrix.arch }}
+          ref: refs/heads/${{ matrix.tag == 'latest' && 'master' || 'develop' }}
+          sha: ${{ steps.commit.outputs.sha }}
+      - name: Fail on fixable critical vulnerabilities
+        run: |
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --quiet --format table \
+            --severity CRITICAL --exit-code 1 /out/trivy.json

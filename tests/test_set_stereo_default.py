@@ -313,8 +313,8 @@ def shows(tmp_path):
 
 
 def test_input_file_reads_a_path_however_its_written(shows, tmp_path, monkeypatch):
-    """Every way a list line can come: quoted as ls shows names on a
-    terminal (with '\\'' for an apostrophe), double quoted, plain with
+    r"""Every way a list line can come: quoted as ls shows names on a
+    terminal (with '\'' for an apostrophe), double quoted, plain with
     spaces, plain with an apostrophe (which a shell would reject), with
     backslash-escaped spaces, relative to the list's folder, from ~, and
     with a missing path, which comes back unquoted so its warning is
@@ -836,6 +836,25 @@ def test_make_backup_uses_plain_bak_when_its_free(tmp_path):
     video.write_bytes(b"original")
 
     assert ssd.make_backup(video) == tmp_path / "v.mkv.bak"
+
+
+def test_replacing_a_backup_that_is_already_a_link_to_the_file_leaves_nothing_behind(tmp_path):
+    """A run stopped just after making a backup leaves <name>.bak as a hard
+    link to the untouched original. Renaming the next backup's staging
+    link over it then does nothing, since both are the same file, so the
+    staging file must not be left behind."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    bak = tmp_path / "v.mkv.bak"
+    try:
+        os.link(video, bak)
+    except OSError as exc:
+        pytest.skip(f"can't create hard links here: {exc}")
+
+    assert ssd.make_backup(video, replace=True) == bak
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["v.mkv", "v.mkv.bak"]
+    assert bak.read_bytes() == b"original"
 
 
 def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypatch):

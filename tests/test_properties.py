@@ -10,6 +10,7 @@ import dataclasses
 import os
 import random
 import shlex
+import string
 import tempfile
 from pathlib import Path
 
@@ -351,7 +352,7 @@ def test_ffmpeg_leaves_out_exactly_the_chapter_tracks(case):
     assert maps == ["-map", "0"] + [arg for i in chapters for arg in ("-map", f"-0:{i}")]
 
 
-NAME_CHARS ="abcdefghijklmnopqrstuvwxyz0123456789 -_'.éß日本"
+NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789 -_'.éß日本"
 """Characters file names are made of here: safe on every file system, in
 one case only (so two names can't collide on a case-insensitive one), and
 with spaces and apostrophes, which --input-file lines may quote."""
@@ -409,7 +410,7 @@ def no_file_is_also_a_folder(paths):
 
 relative_paths = st.lists(
     st.builds(lambda parts, stem, ext: str(Path(*parts, stem + ext)),
-              parts=st.lists(st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=4),
+              parts=st.lists(st.text(alphabet=string.ascii_lowercase, min_size=1, max_size=4),
                              max_size=2),
               stem=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789 _-", min_size=1, max_size=8)
               .filter(lambda s: s.strip() == s),

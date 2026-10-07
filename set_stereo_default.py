@@ -107,7 +107,7 @@ import tempfile
 import threading
 import time
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -242,11 +242,11 @@ class TqdmLoggingHandler(logging.Handler):
 
 
 def _escape_bytes(error: UnicodeError) -> tuple[str, int]:
-    """How the console and the log file write text they can't encode (see
+    r"""How the console and the log file write text they can't encode (see
     setup_logging()): each character they can't becomes an escape. A
     surrogate escape (U+DC80 to U+DCFF), which is how a byte that isn't
     valid UTF-8 in a Linux file name reaches Python, becomes that byte's
-    escape, e.g. "\\xe9", so the name reads as the file system has it;
+    escape, e.g. "\xe9", so the name reads as the file system has it;
     anything else becomes its code point's, as backslashreplace gives."""
     if not isinstance(error, UnicodeEncodeError):
         raise error
@@ -260,7 +260,7 @@ codecs.register_error("escapebytes", _escape_bytes)
 
 
 def setup_logging(log_file: str | None) -> None:
-    """Send log messages to the console, or with --log-file to that file.
+    r"""Send log messages to the console, or with --log-file to that file.
     With a log file, warnings and errors still reach the console too, so a
     failed run (e.g. a missing tool) never ends without saying why. Handlers
     from an earlier call are closed and replaced, so a second run in the
@@ -268,7 +268,7 @@ def setup_logging(log_file: str | None) -> None:
 
     The console (both streams, since the progress bars go to the second)
     and the log file write a character they can't encode as an escape, e.g.
-    caf\\xe9.mkv (see _escape_bytes()), rather than failing. A Linux file
+    caf\xe9.mkv (see _escape_bytes()), rather than failing. A Linux file
     name that isn't valid UTF-8 reaches the script as surrogate escapes,
     which a strict UTF-8 console, the default in most locales, would
     otherwise refuse, turning each of that file's lines into a logging
@@ -337,7 +337,7 @@ log.addFilter(_FileHeaderFilter())
 
 
 @contextlib.contextmanager
-def file_context(header: str) -> Iterator[None]:
+def file_context(header: str) -> Generator[None, None, None]:
     """Mark this thread as working on the file with this "[i/N] path" header
     until the block ends, so its lines are kept under that header (see
     _FileHeaderFilter)."""
@@ -955,7 +955,10 @@ def make_backup(path: Path, replace: bool = False) -> Path:
     fails partway (a full disk, a dropped share) never leaves a partial
     backup that looks whole, nor removes the <name>.bak it was replacing.
     The staging file is removed if anything goes wrong, and if the run is
-    killed outright, the next run reports it as a leftover temp file.
+    killed outright, the next run reports it as a leftover temp file. It's
+    also removed after the rename: renaming it over a <name>.bak that is
+    already a hard link to the file (left by a run stopped just after its
+    backup) does nothing, but succeeds, so it would otherwise stay behind.
 
     Whatever already has the staging name is removed first, and the copy
     only ever writes a new file (see _copy_new()), so a symlink someone put
@@ -969,6 +972,7 @@ def make_backup(path: Path, replace: bool = False) -> Path:
         except OSError:
             _copy_new(path, staging)
         os.replace(staging, bak_path)
+        staging.unlink(missing_ok=True)
     except BaseException:
         staging.unlink(missing_ok=True)
         raise
@@ -1779,11 +1783,11 @@ def ask_about_existing_backups(count: int) -> Literal["replace", "number", "quit
 
 
 def _input_path(line: str, base: Path) -> str:
-    """One line of an --input-file as a path, relative to base if it isn't
+    r"""One line of an --input-file as a path, relative to base if it isn't
     absolute. Lists come written in different ways, so the line is tried as
     it is first (a plain path, spaces and all, or a Windows path, whose
     backslashes a shell would eat), then the way a shell would read it: in
-    single or double quotes, with '\\'' for an apostrophe (how ls shows names
+    single or double quotes, with '\'' for an apostrophe (how ls shows names
     on a terminal), or with backslash-escaped spaces. A leading ~ is your
     home folder. The first reading that exists is used. If none does, the
     path is returned anyway, unquoted if it was quoted, so the warning that

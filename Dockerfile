@@ -13,7 +13,10 @@ LABEL org.opencontainers.image.title="set-stereo-default" \
       org.opencontainers.image.source="https://github.com/tronyx/Set-Stereo-Default" \
       org.opencontainers.image.licenses="MIT"
 
-RUN apk add --no-cache ffmpeg mkvtoolnix python3 py3-tqdm
+# apk upgrade updates the packages alpine:3.24 itself comes with (zlib, musl,
+# OpenSSL, ...), which apk add leaves as they were, so each build, the weekly
+# one too, has their security fixes without waiting for a new alpine image.
+RUN apk upgrade --no-cache && apk add --no-cache ffmpeg mkvtoolnix python3 py3-tqdm
 
 COPY set_stereo_default.py /app/set_stereo_default.py
 

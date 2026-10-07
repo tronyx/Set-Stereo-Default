@@ -1297,8 +1297,8 @@ def test_a_mixed_folder_with_jobs_and_a_second_run_changes_nothing_more(tmp_path
 
 
 def test_input_file_fixes_each_listed_folder_in_order(tmp_path):
-    """The list names the shows in reverse alphabetical order, quoted the
-    way ls shows names on a terminal, including '\\'' for an apostrophe.
+    r"""The list names the shows in reverse alphabetical order, quoted the
+    way ls shows names on a terminal, including '\'' for an apostrophe.
     Both must be fixed, in the list's order."""
     need("ffmpeg", "ffprobe")
     shows = ["Blue's Clues (1996)", "Billions"]

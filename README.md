@@ -140,7 +140,7 @@ The image has the script, Python, ffmpeg, MKVToolNix and tqdm, so there's nothin
 | Docker Hub | `tronyx/set-stereo-default` |
 | GitHub | `ghcr.io/tronyx/set-stereo-default` |
 
-`latest` is built from `master`, and rebuilt every week for Alpine's security fixes. `develop` is built from the `develop` branch.
+`latest` is built from `master`, and `develop` from the `develop` branch. Both are rebuilt every week for Alpine's security fixes: `develop` first, then `latest` once `develop` has passed every test. Before an image is published, it's scanned with [Trivy](https://trivy.dev) for known vulnerabilities that have a fix, and one with a critical vulnerability isn't published. Both images are scanned again midweek, so a vulnerability found after they were built is caught before the next rebuild.
 
 ```bash
 # 1. See what would change, without touching anything
