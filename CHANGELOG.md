@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Project
+
+- After each release, a new workflow moves `develop` up to `master`'s merge commit (a fast-forward, with no new commit), so the two branches stay level and GitHub no longer offers to merge `master` back into `develop`. If `develop` can't be fast-forwarded, the run fails and says so.
 
 ## 2026-10-07 · [#15](https://github.com/tronyx/Set-Stereo-Default/pull/15)
 
