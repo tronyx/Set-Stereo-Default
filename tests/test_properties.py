@@ -10,6 +10,7 @@ import dataclasses
 import os
 import random
 import shlex
+import string
 import tempfile
 from pathlib import Path
 
@@ -409,7 +410,7 @@ def no_file_is_also_a_folder(paths):
 
 relative_paths = st.lists(
     st.builds(lambda parts, stem, ext: str(Path(*parts, stem + ext)),
-              parts=st.lists(st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=4),
+              parts=st.lists(st.text(alphabet=string.ascii_lowercase, min_size=1, max_size=4),
                              max_size=2),
               stem=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789 _-", min_size=1, max_size=8)
               .filter(lambda s: s.strip() == s),

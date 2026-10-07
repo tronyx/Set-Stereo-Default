@@ -3,12 +3,24 @@
 
 [tool.ruff]
 target-version = "py310"
+line-length = 120
 
 [tool.ruff.lint]
+# pycodestyle's rules (E) on top of ruff's defaults. Its whitespace checks
+# (missing spaces around an operator, and the like) are still preview rules,
+# so preview is on; ruff is pinned, so a change to them arrives in a
+# Dependabot pull request rather than unannounced.
+preview = true
+extend-select = ["E"]
 # Catching a broad Exception is deliberate in the three places it's done: a log
 # handler that must never crash, best-effort cleanup when stopping, and
 # process_file()'s guard that keeps one bad file from ending the whole run.
 ignore = ["BLE001"]
+
+[tool.ruff.lint.per-file-ignores]
+# The tests compare floats exactly where the value is exact by design: parsed
+# from "60.0", or rounded to two places.
+"tests/*" = ["RUF069"]
 
 [tool.mypy]
 python_version = "3.10"

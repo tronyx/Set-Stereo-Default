@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Project
+
+- ruff also checks pycodestyle's rules now, including its whitespace checks, which need ruff's preview mode, and a line length of 120. A missing space around `=` had slipped into the property tests unnoticed. Preview mode's other rules found a few small things, now fixed: docstrings that show a backslash are raw strings, and `file_context()` is typed as the generator it is.
 
 ## 2026-10-07 · [#14](https://github.com/tronyx/Set-Stereo-Default/pull/14)
 

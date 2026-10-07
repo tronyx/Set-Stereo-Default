@@ -313,8 +313,8 @@ def shows(tmp_path):
 
 
 def test_input_file_reads_a_path_however_its_written(shows, tmp_path, monkeypatch):
-    """Every way a list line can come: quoted as ls shows names on a
-    terminal (with '\\'' for an apostrophe), double quoted, plain with
+    r"""Every way a list line can come: quoted as ls shows names on a
+    terminal (with '\'' for an apostrophe), double quoted, plain with
     spaces, plain with an apostrophe (which a shell would reject), with
     backslash-escaped spaces, relative to the list's folder, from ~, and
     with a missing path, which comes back unquoted so its warning is
