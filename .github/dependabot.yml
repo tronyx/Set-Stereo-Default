@@ -15,11 +15,14 @@ updates:
         patterns: ["*"]
 
   # The Alpine version the Dockerfile is built on, when a new one comes out.
+  # Weekly, since a security fix that's only in a new Alpine release can't
+  # reach the image any other way: the weekly rebuild only updates packages
+  # within the current one.
   - package-ecosystem: docker
     directory: /
     target-branch: develop
     schedule:
-      interval: monthly
+      interval: weekly
 
   # Only the pinned checkers in requirements-dev.txt. Everything else there
   # is a minimum version (>=), which new releases already satisfy. A new ruff

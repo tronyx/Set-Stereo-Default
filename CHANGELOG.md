@@ -17,6 +17,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 - The weekly run is ready for `develop` as the default branch, where GitHub runs it: it tests and rebuilds `develop`, and once every job has passed, starts the same run on `master`, which rebuilds `latest`. So both Docker images get Alpine's security fixes every week, `develop` first, and nothing is ever pushed to `master`.
 - Each Docker image is now scanned with Trivy before it's published, on each architecture. Every known vulnerability with a fix is listed in the run's log and, except for pull requests, in the repository's Security tab; a critical one fails the run, so that image isn't published. Trivy is pinned by digest, like actionlint, and a Trivy outage only skips the scan.
 - The published `develop` and `latest` images are scanned with Trivy again every Thursday, midway between the Monday rebuilds, on both architectures, so a vulnerability found after an image was built shows up in the Security tab without waiting for its next rebuild; a fixable critical one fails the run, which emails the maintainer.
+- Dependabot checks for a new Alpine release weekly instead of monthly, since a security fix that's only in a new release can't reach the image through the weekly rebuild.
 
 ## 2026-10-07 · [#14](https://github.com/tronyx/Set-Stereo-Default/pull/14)
 
