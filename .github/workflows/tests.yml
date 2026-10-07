@@ -4,15 +4,16 @@ on:
   push:
   pull_request:
   # Weekly, so a new ffmpeg release that breaks the script shows up even
-  # without a push. GitHub only runs this from the default branch's copy of
-  # this file, and pauses it after 60 days without repository activity.
+  # without a push. GitHub only runs this on the default branch, develop, from
+  # its copy of this file, and pauses it after 60 days without repository
+  # activity. master is rebuilt afterwards (see rebuild-latest).
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
-# Every job can only read the repository, except the three that need more:
-# coverage-badge (writes the badges branch), and docker and publish (push
-# the image to the GitHub Container Registry).
+# Every job can only read the repository, except the four that need more:
+# coverage-badge (writes the badges branch), docker and publish (push the
+# image to the GitHub Container Registry), and rebuild-latest (starts a run).
 #
 # Actions from anyone but GitHub are pinned to a commit, not a tag, since a
 # tag can be moved to other code: docker and publish hand them the Docker Hub
@@ -508,8 +509,9 @@ jobs:
   # Registry, once every test job has passed: master as "latest", develop as
   # "develop", each covering amd64 and arm64. Nothing is built here; it only
   # tags the digests the docker jobs pushed. The weekly run rebuilds and
-  # retests "latest" from scratch, so it picks up Alpine's security fixes even
-  # without a push. Pull requests never publish.
+  # retests both from scratch, develop first (see rebuild-latest), so they
+  # pick up Alpine's security fixes even without a push. Pull requests never
+  # publish.
   #
   # Needs two repository secrets: DOCKERHUB_USERNAME, and DOCKERHUB_TOKEN, a
   # Docker Hub personal access token with Read & Write access.
@@ -564,3 +566,19 @@ jobs:
               "${digests[@]/#/$repo@sha256:}"
             docker buildx imagetools inspect "$repo:$TAG"
           done
+
+  # The weekly run only tests and rebuilds develop. Once all of it has passed,
+  # this starts the workflow on master, from master's own copy of this file,
+  # so "latest" is rebuilt and retested too. Nothing is pushed to master: a
+  # started run needs no commit. If develop's run fails, latest waits a week.
+  rebuild-latest:
+    name: Rebuild latest from master
+    needs: publish
+    if: github.event_name == 'schedule' && github.ref_name == 'develop'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh workflow run tests.yml --repo "$GITHUB_REPOSITORY" --ref master
+        env:
+          GH_TOKEN: ${{ github.token }}
