@@ -351,7 +351,7 @@ def test_ffmpeg_leaves_out_exactly_the_chapter_tracks(case):
     assert maps == ["-map", "0"] + [arg for i in chapters for arg in ("-map", f"-0:{i}")]
 
 
-NAME_CHARS ="abcdefghijklmnopqrstuvwxyz0123456789 -_'.éß日本"
+NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789 -_'.éß日本"
 """Characters file names are made of here: safe on every file system, in
 one case only (so two names can't collide on a case-insensitive one), and
 with spaces and apostrophes, which --input-file lines may quote."""
