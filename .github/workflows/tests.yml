@@ -503,7 +503,7 @@ jobs:
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP:/out" "$TRIVY" \
             image --scanners vuln --ignore-unfixed --format json --output /out/trivy.json "$IMAGE"
-          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --format table /out/trivy.json
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --scanners vuln --format table /out/trivy.json
           docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --format sarif --output /out/trivy.sarif /out/trivy.json
       - name: Upload the scan to the Security tab
         if: github.event_name != 'pull_request' && steps.trivy.outcome == 'success'
