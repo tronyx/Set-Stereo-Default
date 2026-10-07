@@ -8,6 +8,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ### Fixed
 
+- The Docker image only got Alpine's security fixes for the packages it adds (ffmpeg, MKVToolNix, Python), not for the ones the `alpine` base image itself comes with, such as zlib, musl and OpenSSL: those waited for Alpine to publish a new base image, however often the image was rebuilt. Each build now upgrades them too. Trivy's first scan found one such fix waiting, in zlib.
 - With `--backup --existing-backups replace`, a run stopped just after making a file's backup, then run again, left a stray `<name>.bak.tmp_remux.<ext>` next to the file, which later runs reported as a leftover temp file. The stopped run's `.bak` was a hard link to the untouched file, and renaming the new backup over another link to the same file does nothing, but succeeds. The new backup's temp name is now always removed. The backup itself was always a true copy of the original. Found by the random-stop tests on macOS.
 
 ### Project
