@@ -161,13 +161,24 @@ def test_normalize_language_drops_any_region_or_script(code, region):
     assert ssd.normalize_language(f"{code}_{region}") == expected
 
 
-def layouts():
+def chapter_track():
+    """An MP4 or MOV chapter track as probe_streams() describes one: a
+    data stream tagged "text" or "tx3g", with whatever name and language
+    the tool that wrote it gave it, and any index."""
+    return st.builds(lambda tag, names, language: ssd.Stream(0, "data", "bin_data", language=language,
+                                                             names=names, tag=tag),
+                     tag=st.sampled_from(["text", "tx3g"]),
+                     names=st.sampled_from([(), ("Chapters",), ("SubtitleHandler",), ("Chapter",)]),
+                     language=st.sampled_from(["", "und", "eng", "jpn"]))
+
+
+def layouts(extra=()):
     """A whole file as probe_streams() describes it, with a stereo track
     that choose_target() could pick: (layout, the audio streams, the
-    target). The video comes first, as in every real file, then the rest
-    in any order."""
+    target). The video comes first, as in every real file, then the rest,
+    extra streams too, in any order."""
     def build(video, tracks, others, rnd):
-        rest = tracks + others
+        rest = tracks + others + list(extra)
         rnd.shuffle(rest)
         layout = numbered([video] + rest)
         audio = [s for s in layout if s.type == "audio"]
@@ -180,27 +191,30 @@ def layouts():
                      others=st.lists(other_stream(), max_size=4), rnd=st.randoms(use_true_random=False))
 
 
-def plans():
+@st.composite
+def plans(draw):
     """A Plan as _process_file() makes one, for a file of a random
     container, with the remux that should pass its checks: (plan, after,
     after's duration). For an AVI reorder (plan.reordered) the remux has
     the target first; otherwise it keeps the order, with the default flag
-    on the target alone."""
-    def build(layout_audio_target, suffix, duration, reordered):
-        layout, audio, target = layout_audio_target
-        reordered = reordered and suffix == ".avi"
-        plan = ssd.Plan(Path(f"v{suffix}"), audio, target.index, duration, layout=layout,
-                        reordered=reordered)
-        after = ssd._expected_order(plan) if reordered else layout
-        if not reordered:
-            after = [dataclasses.replace(s, default=s.index == target.index) if s.type == "audio" else s
-                     for s in after]
-        return plan, numbered(after), duration
+    on the target alone.
 
-    return st.builds(build, layout_audio_target=layouts(),
-                     suffix=st.sampled_from([".mkv", ".webm", ".mp4", ".mov", ".m4v", ".avi"]),
-                     duration=st.one_of(st.none(), st.floats(min_value=1.0, max_value=36000.0)),
-                     reordered=st.booleans())
+    An MP4, M4V or MOV file may have a chapter track anywhere after the
+    video. ffmpeg leaves the original's out and writes a new one, last,
+    with a name and language of its own, so the remux has that instead."""
+    suffix = draw(st.sampled_from([".mkv", ".webm", ".mp4", ".mov", ".m4v", ".avi"]))
+    has_chapters = suffix in ssd.MOV_FASTSTART_EXTS and draw(st.booleans())
+    layout, audio, target = draw(layouts([draw(chapter_track())] if has_chapters else []))
+    duration = draw(st.one_of(st.none(), st.floats(min_value=1.0, max_value=36000.0)))
+    reordered = suffix == ".avi" and draw(st.booleans())
+    plan = ssd.Plan(Path(f"v{suffix}"), audio, target.index, duration, layout=layout, reordered=reordered)
+    if reordered:
+        return plan, numbered(ssd._expected_order(plan)), duration
+    after = [dataclasses.replace(s, default=s.index == target.index) if s.type == "audio" else s
+             for s in layout if not ssd.is_chapter_track(s)]
+    if has_chapters:
+        after.append(draw(chapter_track()))
+    return plan, numbered(after), duration
 
 
 def verified(plan, after, duration):
@@ -228,18 +242,27 @@ def test_a_remux_that_lost_anything_is_rejected(case, data):
     a name gone, the default flag on another audio track or off the
     target, or the file much shorter. In an MKV, a lost flag is caught too;
     other containers can't hold those flags, so there it's a warning and
-    the remux still passes."""
+    the remux still passes.
+
+    A chapter track counts as lost if it's gone, copied twice (the bug
+    ffmpeg's own chapter track used to cause), or no longer a chapter
+    track; and a data stream that became one counts as a stream lost. Its
+    codec, name, language and flags are ffmpeg's to choose, since it
+    writes the track afresh, so changing those isn't a loss."""
     plan, after, duration = case
     i = data.draw(st.integers(0, len(after) - 1), label="stream")
     s = after[i]
-    changes = ["remove", "add", "type", "codec"]
+    chapters = ssd.is_chapter_track(s)
+    changes = ["remove", "add", "type"] + ([] if chapters else ["codec"])
+    if s.type == "data":
+        changes.append("tag")
     if s.type == "audio":
         changes.append("channels")
-    if ssd.normalize_language(s.language) not in ("", "und"):
+    if not chapters and ssd.normalize_language(s.language) not in ("", "und"):
         changes.append("language")
-    if s.names:
+    if not chapters and s.names:
         changes.append("name")
-    if s.flags:
+    if not chapters and s.flags:
         changes.append("flag")
     if duration is not None:
         changes.append("duration")
@@ -253,6 +276,8 @@ def test_a_remux_that_lost_anything_is_rejected(case, data):
         after = after + [dataclasses.replace(s, index=len(after))]
     elif change == "type":
         after[i] = dataclasses.replace(s, type="data" if s.type != "data" else "video")
+    elif change == "tag":
+        after[i] = dataclasses.replace(s, tag="tmcd" if chapters else "text")
     elif change == "codec":
         after[i] = dataclasses.replace(s, codec=s.codec + "2")
     elif change == "channels":
@@ -306,7 +331,27 @@ def test_a_remux_that_only_gained_something_passes_the_check(case, data):
     assert verified(plan, after, duration) == ssd.Verification()
 
 
-NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789 -_'.éß日本"
+@given(case=plans())
+def test_ffmpeg_leaves_out_exactly_the_chapter_tracks(case):
+    """ffmpeg's command copies every stream (-map 0) but the original's
+    chapter tracks, one -map -0:<index> each, since it writes its own; no
+    other stream is ever left out. (An AVI reorder maps streams one by one
+    instead, and AVI has no chapter track.)"""
+    plan, _, _ = case
+    assume(not plan.reordered)
+    logged = []
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ssd, "_announce", lambda intro, line=None: logged.append(line))
+        assert ssd.apply_remux(plan, ssd.Options(dry_run=True, no_progress=True))
+
+    args = shlex.split(logged[0].split("[dry-run] ", 1)[1])
+    maps = args[args.index("-i") + 2:args.index("-c")]
+    chapters = [s.index for s in plan.layout if ssd.is_chapter_track(s)]
+    assert maps == ["-map", "0"] + [arg for i in chapters for arg in ("-map", f"-0:{i}")]
+
+
+NAME_CHARS ="abcdefghijklmnopqrstuvwxyz0123456789 -_'.éß日本"
 """Characters file names are made of here: safe on every file system, in
 one case only (so two names can't collide on a case-insensitive one), and
 with spaces and apostrophes, which --input-file lines may quote."""

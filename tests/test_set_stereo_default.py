@@ -2474,6 +2474,76 @@ def test_stream_info_reads_an_attachments_mime_type():
     assert ssd._stream_info(raw).mimetype == "application/x-truetype-font"
 
 
+def chapter_track(index, name="SubtitleHandler"):
+    """An MP4 chapter track the way ffprobe's JSON reports it."""
+    return {"index": index, "codec_type": "data", "codec_name": "bin_data",
+            "codec_tag_string": "text", "disposition": {"default": 0},
+            "tags": {"language": "eng", "handler_name": name}}
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (chapter_track(4), True),
+    (dict(chapter_track(4), codec_tag_string="tx3g"), True),
+    ({"index": 4, "codec_type": "data", "codec_tag_string": "tmcd"}, False),
+    ({"index": 4, "codec_type": "data", "codec_name": "bin_data", "codec_tag_string": "gpmd"}, False),
+    ({"index": 3, "codec_type": "subtitle", "codec_name": "mov_text", "codec_tag_string": "text"},
+     False),
+], ids=["text chapter track", "tx3g chapter track", "timecode", "gopro metadata",
+        "quicktime subtitle"])
+def test_is_chapter_track(raw, expected):
+    assert ssd.is_chapter_track(ssd._stream_info(raw)) is expected
+
+
+MP4_LAYOUT = [stream(0, "video", 1, "h264"), chapter_track(1, name="Chapters"),
+              stream(2, "audio", 1, "aac", 6, "eng"), stream(3, "audio", 0, "aac", 2, "eng"),
+              stream(4, "subtitle", 0, "mov_text"), stream(5, "data", 0, "bin_data")]
+"""An MP4 as another tool might write it: its chapter track isn't last and
+has a name ffmpeg doesn't give the one it writes, and it has another data
+stream, which isn't a chapter track."""
+
+
+def mp4_plan(name="v.mp4"):
+    """The Plan for an MP4_LAYOUT file, making stream 3 default. Returns
+    (plan, its remux's path)."""
+    layout = [ssd._stream_info(s) for s in MP4_LAYOUT]
+    plan = ssd.Plan(Path(name), [s for s in layout if s.type == "audio"], 3, layout=layout)
+    return plan, str(plan.tmp_path)
+
+
+def test_ffmpeg_leaves_the_chapter_track_out(tmp_path, caplog):
+    """ffmpeg writes a new chapter track from the chapter list, so the
+    original's is left out. Every other stream is copied, data too."""
+    caplog.set_level("INFO")
+    plan, _ = mp4_plan(tmp_path / "v.mp4")
+
+    assert ssd.apply_remux(plan, file_args())
+
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    assert args[args.index("-i") + 2:args.index("-c")] == ["-map", "0", "-map", "-0:1"]
+
+
+NEW_CHAPTER_TRACK = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "aac", 6, "eng"),
+                     stream(2, "audio", 1, "aac", 2, "eng"), stream(3, "subtitle", 0, "mov_text"),
+                     stream(4, "data", 0, "bin_data")]
+"""How ffprobe reports MP4_LAYOUT's remux, before its chapter track."""
+
+
+@pytest.mark.parametrize("remuxed, problem", [
+    (NEW_CHAPTER_TRACK + [chapter_track(5)], None),
+    (NEW_CHAPTER_TRACK + [stream(5, "data", 0, "bin_data"), chapter_track(6)],
+     "stream count changed from 6 to 7"),
+    (NEW_CHAPTER_TRACK + [stream(5, "data", 0, "bin_data")],
+     "chapter track count changed from 1 to 0"),
+], ids=["new chapter track", "old one copied too", "chapter track lost"])
+def test_verify_remux_takes_a_new_chapter_track_in_place_of_the_old(fake_ffprobe, remuxed,
+                                                                    problem):
+    """ffmpeg writes the new chapter track after the other tracks, with a
+    name of its own. There must still be exactly one."""
+    plan, remux = mp4_plan()
+    fake_ffprobe[remux] = remuxed
+    assert ssd.verify_remux(plan).problem == problem
+
+
 def dry_run_flags(caplog):
     """The --default-track values from a logged mkvmerge dry-run command."""
     args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
