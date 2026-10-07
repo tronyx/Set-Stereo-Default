@@ -13,7 +13,8 @@ on:
 
 # Every job can only read the repository, except the four that need more:
 # coverage-badge (writes the badges branch), docker and publish (push the
-# image to the GitHub Container Registry), and rebuild-latest (starts a run).
+# image to the GitHub Container Registry; docker also uploads its scan to the
+# Security tab), and rebuild-latest (starts a run).
 #
 # Actions from anyone but GitHub are pinned to a commit, not a tag, since a
 # tag can be moved to other code: docker and publish hand them the Docker Hub
@@ -358,8 +359,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+      security-events: write
     env:
       IMAGE: set-stereo-default:ci
+      # Pinned by digest, like actionlint; Dependabot can't update it.
+      TRIVY: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
       SSD_FUZZ_SEED: ${{ github.run_id }}-docker-${{ matrix.arch }}
       PUBLISH: >-
         ${{ github.repository == 'tronyx/Set-Stereo-Default'
@@ -488,6 +492,31 @@ jobs:
           ! compgen -G "stop/*.tmp_remux*" || { echo "::error::Temp file left behind"; exit 1; }
           after=$(docker run "${in_image[@]}" sha256sum "$IMAGE" "/videos/$original")
           test "$before" = "$after" || { echo "::error::$original changed"; exit 1; }
+      # Known vulnerabilities in the image's packages that have a fix: all of
+      # them listed here and, except for pull requests, in the Security tab;
+      # a critical one fails the job, so the image isn't published. Scanned
+      # once, then converted, so the report and the check agree. A Trivy
+      # outage only skips the scan.
+      - name: Scan for vulnerabilities
+        id: trivy
+        continue-on-error: true
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP:/out" "$TRIVY" \
+            image --scanners vuln --ignore-unfixed --format json --output /out/trivy.json "$IMAGE"
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --format table /out/trivy.json
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --format sarif --output /out/trivy.sarif /out/trivy.json
+      - name: Upload the scan to the Security tab
+        if: github.event_name != 'pull_request' && steps.trivy.outcome == 'success'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ runner.temp }}/trivy.sarif
+          category: trivy-${{ matrix.arch }}
+      # After the upload, so a finding that blocks publishing is in the Security tab too.
+      - name: Fail on fixable critical vulnerabilities
+        if: steps.trivy.outcome == 'success'
+        run: |
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY" convert --quiet --format table \
+            --severity CRITICAL --exit-code 1 /out/trivy.json
       # Only reached if every step above passed, so only tested images get one.
       - name: Save the pushed digest for the publish job
         if: env.PUBLISH == 'true'

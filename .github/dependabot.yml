@@ -3,8 +3,8 @@ updates:
   # The actions in .github/workflows, so CI doesn't break when GitHub retires
   # an old major version. Third-party actions are pinned to a commit with the
   # version in a comment (see tests.yml); Dependabot moves both to each new
-  # release. It can't update the docker:// actionlint image, so that one is
-  # updated by hand.
+  # release. It can't update the docker:// actionlint image or the Trivy image
+  # the docker job runs, so those two are updated by hand.
   - package-ecosystem: github-actions
     directory: /
     target-branch: develop
