@@ -281,7 +281,8 @@ START=1000
 END=2000
 title=Ending
 """
-"""Chapters and a file title in ffmpeg's metadata format, for make_rich_video()."""
+"""Chapters and a file title in ffmpeg's metadata format, for make_rich_video(),
+the chapter-track test and the random layouts (which take only the chapters)."""
 
 
 def make_rich_video(folder, ext, font_type="application/x-truetype-font"):
@@ -498,16 +499,40 @@ COMMENTARY_NAME = re.compile(r"commentary|audio[ -]?description|descriptive|desc
                              re.IGNORECASE)
 """The names the README says mark a commentary or audio-description track."""
 
+RANDOM_EXTS = [".mkv", ".mp4", ".m4v", ".mov"]
+"""The containers random layouts are made in: one remuxed with mkvmerge,
+and the three remuxed with ffmpeg, which each store chapters and flags
+in their own way."""
+
+MOV_EXTS = {".mp4", ".m4v", ".mov"}
+"""The containers that keep chapters in a chapter track and need mov_text
+subtitles."""
+
+RANDOM_SECONDS = 2
+"""How long a random layout's file is: long enough for CHAPTERS, whose last
+chapter ends at 2 seconds. In an MP4 with B-frames and only AAC audio, a
+copied chapter track only came through as an extra stream once its
+chapters reached that far, so shorter files would never show it."""
+
+RANDOM_CODECS = [["aac"], ["ac3"], ["aac", "ac3"]]
+"""The audio codecs a random layout's tracks are drawn from, chosen per
+file: all AAC (as in most web releases), all AC3, or a mix."""
+
 
 def make_random_video(folder, ext, rng):
     """Write folder/random<ext> with a layout drawn from rng: one to four
     audio tracks, each with random channels (mono, stereo or 5.1), codec,
     language, name and flags; up to two subtitles; in MKV, sometimes a font
-    attachment; and the streams in random order after the video. Returns
+    attachment; and the streams in random order after the video. Some files
+    get chapters (in MP4, M4V and MOV, a chapter track, which ffmpeg writes
+    afresh on every remux), and some get B-frames, which with only AAC
+    audio is what made a copied chapter track come through as an extra
+    stream (see RANDOM_SECONDS and RANDOM_CODECS). Returns
     (path, a description of the layout for a failure message). What the
     file actually holds is read back with ffprobe afterwards, since MP4
     can't store some of it and ffmpeg versions differ."""
-    audio = [{"channels": rng.choice([1, 2, 2, 6]), "codec": rng.choice(["ac3", "aac"]),
+    codecs = rng.choice(RANDOM_CODECS)
+    audio = [{"channels": rng.choice([1, 2, 2, 6]), "codec": rng.choice(codecs),
               "language": rng.choice(RANDOM_LANGUAGES), "title": rng.choice(RANDOM_NAMES),
               "flags": [name for name, chance in (("default", 0.4), ("comment", 0.15),
                                                   ("visual_impaired", 0.1))
@@ -518,22 +543,29 @@ def make_random_video(folder, ext, rng):
     order = [("audio", i) for i in range(len(audio))] + [("subtitle", i) for i in range(len(subtitles))]
     rng.shuffle(order)
     attach = ext == ".mkv" and rng.random() < 0.3
+    chapters = rng.random() < 0.4
+    bframes = rng.random() < 0.5
 
     srt = folder / "subs.srt"
     srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
-    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1"]
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+           f"testsrc=size=64x48:rate=5:duration={RANDOM_SECONDS}"]
     for a in audio:
-        cmd += ["-f", "lavfi", "-t", "1", "-i",
+        cmd += ["-f", "lavfi", "-t", str(RANDOM_SECONDS), "-i",
                 f"anullsrc=channel_layout={LAYOUTS[a['channels']]}:sample_rate=48000"]
     cmd += ["-i", str(srt)] * len(subtitles)
+    if chapters:
+        chapter_list = folder / "chapters.txt"
+        chapter_list.write_text(CHAPTERS, encoding="utf-8")
+        cmd += ["-i", str(chapter_list), "-map_chapters", str(1 + len(audio) + len(subtitles))]
     if attach:
         font = folder / "font.ttf"
         font.write_bytes(b"\x00\x01\x00\x00" + bytes(64))
         cmd += ["-attach", str(font), "-metadata:s:t", "mimetype=font/ttf",
                 "-metadata:s:t", "filename=font.ttf"]
     cmd += ["-map", "0:v"]
-    settings = ["-c:v", "mpeg4", "-c:s", "mov_text" if ext == ".mp4" else "srt",
-                "-disposition:v:0", "default"]
+    settings = ["-c:v", "mpeg4", *(["-bf", "2"] if bframes else []),
+                "-c:s", "mov_text" if ext in MOV_EXTS else "srt", "-disposition:v:0", "default"]
     out = {"audio": 0, "subtitle": 0}
     for kind, i in order:
         n = out[kind]
@@ -552,13 +584,15 @@ def make_random_video(folder, ext, rng):
             cmd += ["-map", f"{1 + len(audio) + i}:s"]
             settings += [f"-disposition:s:{n}", s["flags"],
                          f"-metadata:s:s:{n}", f"language={s['language']}"]
-    if ext == ".mp4":
+    if ext in MOV_EXTS:
         settings += ["-movflags", "+faststart"]
     path = folder / f"random{ext}"
     subprocess.run(cmd + settings + [str(path)], check=True, capture_output=True, text=True)
     layout = ", ".join(f"{kind}#{i}" + (f" {audio[i]}" if kind == "audio" else f" {subtitles[i]}")
                        for kind, i in order)
-    return path, f"{ext}{' +font' if attach else ''}: video, {layout}"
+    extras = "".join(mark for mark, on in ((" +font", attach), (" +chapters", chapters),
+                                           (" +bframes", bframes)) if on)
+    return path, f"{ext}{extras}: video, {layout}"
 
 
 def expected_outcome(path):
@@ -606,7 +640,7 @@ def test_a_random_layout_is_fixed_or_left_alone(tmp_path, case):
     with SSD_FUZZ_SEED set to the seed in its ID."""
     need("ffmpeg", "ffprobe", "mkvmerge")
     rng = random.Random(f"{FUZZ_SEED}-{case}")
-    ext = rng.choice([".mkv", ".mp4"])
+    ext = rng.choice(RANDOM_EXTS)
     video, layout = make_random_video(tmp_path, ext, rng)
     expected, position = expected_outcome(video)
     before, before_digest = contents(video), digest(video)

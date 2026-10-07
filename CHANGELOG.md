@@ -10,6 +10,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - MP4, M4V and MOV files with chapters often couldn't be fixed. ffmpeg writes a new chapter track from the file's chapters on every remux, and the script copied the original's too. In an MP4 whose video has B-frames and whose audio is AAC, as most web releases' do, the copy came through as an extra data stream, so the remux was rejected with `post-remux check failed (stream count changed from 5 to 6)`; in any M4V or MOV, ffmpeg refused it (`ffmpeg remux failed: ... Tag text incompatible with output codec id`). The original's chapter track is now left out, and the post-remux check takes the new one in its place, as long as there's still exactly one. The files were left untouched before, so nothing was lost; run the script again to fix them. A new real-file test remuxes each of the three with chapters, B-frames and AAC.
 
+### Project
+
+- The random tests now cover chapters too. The property tests give MP4, M4V and MOV files a chapter track anywhere after the video, check that a remux with ffmpeg's new one in its place passes and that one gone, copied twice or changed into another stream is rejected, and check that ffmpeg's command leaves out exactly the chapter tracks. The random real-file layouts are now made in M4V and MOV as well as MKV and MP4, are 2 seconds long, and sometimes have chapters, B-frames, or only AAC audio; run against the script from before the fix, they find both ways it failed.
+
 ## 2026-10-06 · [#13](https://github.com/tronyx/Set-Stereo-Default/pull/13)
 
 ### Fixed
