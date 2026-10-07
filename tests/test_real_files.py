@@ -446,11 +446,13 @@ def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
 def test_a_chapter_track_comes_through_once(tmp_path, ext):
     """MP4 and MOV files keep their chapters in a text track, which ffprobe
     lists as a data stream, and ffmpeg writes a new one from the chapter
-    list on every remux. With B-frames in the video and AAC audio, as most
-    web releases have, the original's track used to come through as well,
-    as an extra data stream, so the remux was rejected with "stream count
-    changed from 4 to 5" and the file couldn't be fixed. The chapters
-    must come through, in one chapter track."""
+    list on every remux. The original's used to be copied as well. In an
+    MP4 with B-frames in the video and AAC audio, as most web releases
+    have, it came through as an extra data stream, so the remux was
+    rejected with "stream count changed" (from 4 to 5 for this file); in
+    an M4V or MOV, ffmpeg refused the remux with "Tag text incompatible
+    with output codec". Either way the file couldn't be fixed. The
+    chapters must come through, in one chapter track."""
     need("ffmpeg", "ffprobe")
     chapters = tmp_path / "chapters.txt"
     chapters.write_text(CHAPTERS, encoding="utf-8")
