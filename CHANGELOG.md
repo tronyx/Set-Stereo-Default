@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-07 · [#15](https://github.com/tronyx/Set-Stereo-Default/pull/15)
+
 ### Fixed
 
 - The Docker image only got Alpine's security fixes for the packages it adds (ffmpeg, MKVToolNix, Python), not for the ones the `alpine` base image itself comes with, such as zlib, musl and OpenSSL: those waited for Alpine to publish a new base image, however often the image was rebuilt. Each build now upgrades them too. Trivy's first scan found one such fix waiting, in zlib.
