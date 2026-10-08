@@ -1303,7 +1303,7 @@ class Progress:
     on_progress: Callable[[int], None] | None = None
 
 
-def check_and_swap_in(plan: Plan, opts: Options) -> bool:
+def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = None) -> bool:
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged). The check's warnings (see verify_remux()) are only
@@ -1312,6 +1312,13 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
     _damage_problem()) is logged in its own plain words, since it's the
     one problem a user can fix, and listed again at the end of the run (see
     report_damaged_files()); any other is logged as a failed check.
+
+    tool_warnings is the line about the remux tool's warnings (see
+    _remux_and_swap()), logged once the check has run, before its result.
+    Not for a damaged original, though: the tool's warnings then only say,
+    in byte positions, what the plain message already says (mkvmerge's run
+    of "Still resyncing at position ..." while it looks for readable data
+    past the damage).
 
     It's also not swapped in if the original changed since it was probed,
     which swap_in() checks before the backup and again just before the swap
@@ -1342,6 +1349,8 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
                 _damaged_files.append(str(path))
             tmp_path.unlink(missing_ok=True)
             return False
+        if tool_warnings:
+            log.warning(tool_warnings)
         if checked.problem:
             log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
                       f"keeping original untouched")
@@ -1454,10 +1463,11 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
 
     plan.intro is logged with the dry-run command, or just before the remux
     starts (see _announce()). warnings_exit is an exit code that means the
-    tool finished but printed warnings (mkvmerge's 1): the warnings are
-    logged and the file is still checked and used. A killed process can
-    also exit with that code (mkvmerge on Windows), so it only counts as
-    finished if no stop was requested.
+    tool finished but printed warnings (mkvmerge's 1): the file is still
+    checked and used, and the warnings are handed to check_and_swap_in(),
+    which logs them once the check has run, unless it found the original
+    damaged. A killed process can also exit with that code (mkvmerge on
+    Windows), so it only counts as finished if no stop was requested.
 
     Whatever already has the temp name is removed before the remux, so the
     tool writes a new file rather than through a symlink someone left there
@@ -1493,13 +1503,14 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         tmp_path.unlink(missing_ok=True)
         return False
 
+    tool_warnings = None
     if with_warnings:
         warnings = [_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
                     for line in output.splitlines() if "warning" in line.lower()]
-        log.warning(f"    {path.name}: {tool} finished with warnings: "
-                    + ("; ".join(warnings) or output.strip() or "(no details given)"))
+        tool_warnings = (f"    {path.name}: {tool} finished with warnings: "
+                         + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
-    return check_and_swap_in(plan, opts)
+    return check_and_swap_in(plan, opts, tool_warnings)
 
 
 def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:

@@ -1274,7 +1274,10 @@ def test_an_mkv_whose_end_is_zeros_is_an_error_and_left_alone(tmp_path):
     Only MKV: an MP4 lists every sample in an index at its front, so
     ffmpeg copies the zeroed samples as they are, and the remux is as long
     as the original and no more broken than it. Nothing is lost, and the
-    script can't tell."""
+    script can't tell.
+
+    mkvmerge's own warnings about it (where it tried to resync) are left
+    out: they say only what the plain message already says."""
     need("ffmpeg", "ffprobe", "mkvmerge")
     video = make_video(tmp_path / "video.mkv", [Track(6, default=True), Track(2)], seconds=20)
     data = video.read_bytes()
@@ -1286,6 +1289,7 @@ def test_an_mkv_whose_end_is_zeros_is_an_error_and_left_alone(tmp_path):
     assert code == 1, output
     assert summary(output)["error"] == 1, output
     assert "video could be read, so the file seems to be damaged or an incomplete download" in output, output
+    assert "finished with warnings" not in output and "Matroska file structure" not in output, output
     assert digest(video) == before
     assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
 

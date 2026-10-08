@@ -2235,6 +2235,39 @@ def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypat
         "    v.mkv: mkvmerge finished with warnings: odd timestamps; gap in track 1"
 
 
+@pytest.mark.parametrize("verdict, shown", [
+    (ssd.Verification(), True),
+    (ssd.Verification("stream count changed from 4 to 3"), True),
+    (ssd.Verification("only 9:41 of this 41:52 video could be read, so the file seems to be damaged",
+                      damaged=True), False),
+], ids=["remux used", "rejected", "original damaged"])
+def test_mkvmerge_warnings_are_logged_unless_the_original_is_damaged(tmp_path, monkeypatch, caplog,
+                                                                     verdict, shown):
+    """mkvmerge's warnings come once the check has run, before its result:
+    for a remux that's used, or rejected, where they may explain why. For a
+    damaged original they're left out, since all they say is where mkvmerge
+    looked for readable data past the damage, which the plain message
+    already covers."""
+    def fake_mkvmerge(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        return 1, ("#GUI#warning Error in the Matroska file structure at position 419932626.\n"
+                   "#GUI#warning Still resyncing at position 511838020.\n")
+    monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: verdict)
+    caplog.set_level("INFO")
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False))
+
+    messages = [r.getMessage() for r in caplog.records]
+    warned = [m for m in messages if "finished with warnings" in m]
+    assert bool(warned) is shown
+    assert ("Still resyncing" in caplog.text) is shown
+    if verdict.problem and shown:
+        assert messages.index(warned[0]) < next(i for i, m in enumerate(messages) if "check failed" in m)
+
+
 @pytest.mark.parametrize("apply, filename, tool", [
     (remux_with_mkvmerge, "v.mkv", "mkvmerge"),
     (remux_with_ffmpeg, "v.mp4", "ffmpeg"),
