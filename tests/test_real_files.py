@@ -1259,6 +1259,7 @@ def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
     assert summary(output)["error"] == 1, output
     assert re.search(r"video\.\w+: only 0:\d\d of this 0:20 video could be read, so the file seems to be "
                      r"damaged or an incomplete download\. It was left as it is; replace it", output), output
+    assert f"then run the script again:\n  {video}\n" in output, output
     assert digest(video) == before
     assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
 

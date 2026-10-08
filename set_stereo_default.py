@@ -369,17 +369,27 @@ by report_ownership_failures()."""
 _ownership_lock = threading.Lock()
 """Guards _ownership_failures, which several --jobs threads add to at once."""
 
+_damaged_files: list[str] = []
+"""Full paths of files left alone because they seem damaged (see
+_damage_problem()). Listed again at the end of the run by
+report_damaged_files()."""
+
+_damaged_lock = threading.Lock()
+"""Guards _damaged_files, which several --jobs threads add to at once."""
+
 
 def _reset_run_state() -> None:
     """Forget what an earlier run in this process left behind, so main() can
     run more than once, e.g. when called from other Python code: a stop
     request (which would cancel every file), files that couldn't keep their
-    owner (which would be reported again), the header printed last, and
-    whether this mkvmerge can keep legacy font types. No remux outlives its
-    run, so _active_procs is already empty."""
+    owner and damaged files (which would be reported again), the header
+    printed last, and whether this mkvmerge can keep legacy font types. No
+    remux outlives its run, so _active_procs is already empty."""
     _cancelled.clear()
     with _ownership_lock:
         _ownership_failures.clear()
+    with _damaged_lock:
+        _damaged_files.clear()
     _last_header[0] = None
     _file_context.header = None
     mkvmerge_can_keep_legacy_font_types.cache_clear()
@@ -1153,6 +1163,27 @@ def report_ownership_failures(folder: Path | str = ".") -> None:
                 f"{where}\n\n{owners} {advice}")
 
 
+def report_damaged_files() -> None:
+    """List every file left alone because it seems damaged (see
+    _damage_problem()), with its full path, just before the summary, and
+    what to do about them. Each was reported as it was found, but in a run
+    over a whole library that line has long scrolled away by the end, and
+    the summary only counts it as an Error. Sorted, so a show's episodes
+    are together, rather than in the order --jobs threads finished them."""
+    with _damaged_lock:
+        paths = sorted(_damaged_files)
+    if not paths:
+        return
+    if len(paths) == 1:
+        head = ("1 file seems to be damaged or an incomplete download, so it was left as it is. "
+                "Replace it (e.g. search for it again in Sonarr or Radarr), then run the script again:")
+    else:
+        head = (f"{len(paths)} files seem to be damaged or incomplete downloads, so they were left as they "
+                f"are. Replace them (e.g. search for them again in Sonarr or Radarr), then run the script "
+                f"again:")
+    log.warning("\n" + head + "".join(f"\n  {p}" for p in paths))
+
+
 class Superseded(Exception):
     """Raised by swap_in() when the original changed after it was probed: the
     remux was made from the old version, and swapping it in would undo
@@ -1279,7 +1310,8 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
     logged once the remux has replaced the original, so a rejected remux
     never warns about a file it didn't change. A damaged original (see
     _damage_problem()) is logged in its own plain words, since it's the
-    one problem a user can fix; any other is logged as a failed check.
+    one problem a user can fix, and listed again at the end of the run (see
+    report_damaged_files()); any other is logged as a failed check.
 
     It's also not swapped in if the original changed since it was probed,
     which swap_in() checks before the backup and again just before the swap
@@ -1306,6 +1338,8 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
         checked = verify_remux(plan)
         if checked.damaged:
             log.error(f"    {path.name}: {checked.problem}.")
+            with _damaged_lock:
+                _damaged_files.append(str(path))
             tmp_path.unlink(missing_ok=True)
             return False
         if checked.problem:
@@ -2201,7 +2235,10 @@ def main(argv: list[str] | None = None) -> int:
     file is done, a stop is ignored: only the summary is left. Files that
     couldn't be given their original owner are reported in one warning
     just before the summary (report_ownership_failures()), with the full
-    list saved next to --log-file, or in the current folder.
+    list saved next to --log-file, or in the current folder. Then files left
+    alone because they seem damaged are listed with their full paths
+    (report_damaged_files()), so they don't need finding in a long run's
+    output.
 
     The answer to the backup question goes into opts.existing_backups, in
     a copy of opts (Options is frozen), so the rest of the run reads it from
@@ -2293,11 +2330,13 @@ def _run(opts: Options) -> int:
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
+        report_damaged_files()
         finished = sum(stats[k] for k in ("changed", "unchanged", "skipped", "error"))
         print_summary(stats, opts, partial=True, cancelled=len(files) - finished)
         return 128 + signum
 
     report_ownership_failures(list_folder)
+    report_damaged_files()
     print_summary(stats, opts)
     return 1 if stats["error"] else 0
 

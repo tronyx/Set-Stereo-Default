@@ -1390,6 +1390,69 @@ def test_a_damaged_original_is_logged_in_plain_words(remux, caplog, monkeypatch)
     assert video.read_bytes() == b"original"
     assert not leftover_temp_files(video)
     assert not list(video.parent.glob("*.bak*"))
+    assert ssd._damaged_files == [str(video)]
+
+
+def test_a_remux_rejected_for_another_reason_isnt_listed_as_damaged(remux):
+    """Only a damaged original is something the user can replace; a remux
+    rejected for anything else isn't listed at the end."""
+    apply, _, set_outcome = remux
+    set_outcome("stream count changed from 4 to 3")
+
+    assert apply() is False
+
+    assert ssd._damaged_files == []
+
+
+@pytest.mark.parametrize("paths, expected", [
+    ([], None),
+    (["/tv/Show/S01E02.mkv"],
+     ("\n1 file seems to be damaged or an incomplete download, so it was left as it is. Replace it "
+      "(e.g. search for it again in Sonarr or Radarr), then run the script again:\n  /tv/Show/S01E02.mkv")),
+    (["/tv/Show/S01E02.mkv", "/tv/Another/S03E01.mp4", "/tv/Show/S01E01.mkv"],
+     ("\n3 files seem to be damaged or incomplete downloads, so they were left as they are. Replace them "
+      "(e.g. search for them again in Sonarr or Radarr), then run the script again:\n"
+      "  /tv/Another/S03E01.mp4\n  /tv/Show/S01E01.mkv\n  /tv/Show/S01E02.mkv")),
+], ids=["none", "one", "several, sorted"])
+def test_damaged_files_are_listed_with_what_to_do(caplog, paths, expected):
+    """One warning listing every damaged file's full path, sorted so a
+    show's episodes are together; nothing at all when there are none."""
+    ssd._damaged_files.extend(paths)
+
+    ssd.report_damaged_files()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == ([expected] if expected else [])
+
+
+@pytest.mark.parametrize("stopped", [False, True], ids=["finished", "stopped"])
+def test_damaged_files_are_listed_just_before_the_summary(tmp_path, monkeypatch, capsys, stopped):
+    """At the end of the run, where they're seen, after the per-file lines
+    have scrolled away; a stopped run lists the ones it found too. The
+    list is for this run only, so a second run starts it afresh."""
+    make_videos(tmp_path, 3)
+
+    def damaged_second_file(path, args, on_progress=None):
+        ssd.log.info(f"  {path.name}: done")
+        if path.name == "e01.mkv":
+            ssd._damaged_files.append(str(path))
+            return "error"
+        if stopped and path.name == "e02.mkv":
+            signal.raise_signal(signal.SIGINT)
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", damaged_second_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    assert ssd.main() == (130 if stopped else 1)
+
+    out = capsys.readouterr().out
+    listing = out.index("1 file seems to be damaged")
+    assert out.index("e02.mkv: done") < listing < out.index("----- Summary")
+    assert f"\n  {tmp_path / 'e01.mkv'}\n" in out
+    ssd._reset_run_state()
+    assert ssd._damaged_files == []
 
 
 def test_a_changed_file_is_probed_once_and_its_remux_once(tmp_path, monkeypatch):
