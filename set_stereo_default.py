@@ -89,6 +89,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import contextlib
+import copy
 import dataclasses
 import functools
 import importlib
@@ -295,8 +296,12 @@ _file_context = threading.local()
 """Per thread: the "[i/N] path" header of the file it's working on, or None
 outside file_context()."""
 
-_last_header = [None]
-"""The header of the file that printed the most recent line."""
+_last_header: dict[logging.Handler, str] = {}
+"""For each place lines go (the console, the log file), the header of the
+file whose line it showed most recently. Kept for each separately, since
+they don't show the same lines: with --log-file the console shows only
+warnings and errors, so a file's first line, often its decision, reaches
+the log file but not the console."""
 
 _print_lock = threading.Lock()
 """Makes choosing whether to repeat a header and printing the line one step,
@@ -314,23 +319,52 @@ class _FileHeaderFilter(logging.Filter):
     command, warnings or result), so other files' lines land in between.
     Lines still appear as they happen.
 
+    Each place lines go gets the header before the first of the file's
+    lines it shows, judged for itself (see _last_header). With --log-file
+    the console shows only warnings and errors, so a file's first line, its
+    decision, reaches the log file alone; the header with it mustn't count
+    for the console, or a warning about that file would reach it with no
+    header to say which file it is.
+
     The check and the printing must happen as one step, or two files
     printing at the same moment could still mix. The filter runs before
-    anything is printed, so it takes the lock, adds the header if needed,
-    hands the line to the handlers itself, and returns False so it isn't
-    printed twice. Lines logged outside file_context() pass straight
-    through."""
+    anything is printed, so it takes the lock, adds the header where
+    needed, hands the line to the handlers itself, and returns False so it
+    isn't printed twice. Lines logged outside file_context() pass straight
+    through, as do lines no handler would show, which logging then deals
+    with itself."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         header = getattr(_file_context, "header", None)
         if header is None:
             return True
+        handlers = _handlers_for(record)
+        if not handlers:
+            return True
         with _print_lock:
-            if _last_header[0] != header:
-                record.msg, record.args = f"\n{header}\n{record.getMessage()}", None
-                _last_header[0] = header
-            log.callHandlers(record)
+            for handler in handlers:
+                if _last_header.get(handler) == header:
+                    handler.handle(record)
+                    continue
+                shown = copy.copy(record)
+                shown.msg, shown.args = f"\n{header}\n{record.getMessage()}", None
+                handler.handle(shown)
+                _last_header[handler] = header
         return False
+
+
+def _handlers_for(record: logging.LogRecord) -> list[logging.Handler]:
+    """The handlers that will show record: log's own, then its parents', as
+    long as each passes lines on, leaving out those set to a higher level.
+    The same ones, in the same order, as logging.Logger.callHandlers()."""
+    found: list[logging.Handler] = []
+    logger: logging.Logger | None = log
+    while logger is not None:
+        found += [h for h in logger.handlers if record.levelno >= h.level]
+        if not logger.propagate:
+            break
+        logger = logger.parent
+    return found
 
 
 log.addFilter(_FileHeaderFilter())
@@ -382,7 +416,7 @@ def _reset_run_state() -> None:
     """Forget what an earlier run in this process left behind, so main() can
     run more than once, e.g. when called from other Python code: a stop
     request (which would cancel every file), files that couldn't keep their
-    owner and damaged files (which would be reported again), the header
+    owner and damaged files (which would be reported again), the headers
     printed last, and whether this mkvmerge can keep legacy font types. No
     remux outlives its run, so _active_procs is already empty."""
     _cancelled.clear()
@@ -390,7 +424,7 @@ def _reset_run_state() -> None:
         _ownership_failures.clear()
     with _damaged_lock:
         _damaged_files.clear()
-    _last_header[0] = None
+    _last_header.clear()
     _file_context.header = None
     mkvmerge_can_keep_legacy_font_types.cache_clear()
 

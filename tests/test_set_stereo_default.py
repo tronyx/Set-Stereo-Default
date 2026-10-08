@@ -3134,6 +3134,64 @@ def test_a_files_first_line_gets_its_header_and_the_rest_print_straight_away(cap
     assert len(caplog.records) == 2
 
 
+def test_each_place_lines_go_gets_the_header_before_the_first_line_it_shows():
+    """With --log-file, the console shows only warnings and errors, and the
+    log file everything. A file's first line, its decision, reaches only
+    the log file; its warning must still reach the console under the
+    file's header, and a later file's too, each once."""
+    console, logfile = io.StringIO(), io.StringIO()
+    shows_warnings, shows_all = logging.StreamHandler(console), logging.StreamHandler(logfile)
+    shows_warnings.setLevel(logging.WARNING)
+    ssd.log.setLevel(logging.INFO)
+    ssd.log.addHandler(shows_warnings)
+    ssd.log.addHandler(shows_all)
+    ssd.log.propagate = False
+
+    for header, name in (("[1/2] /tv/a.mkv", "a.mkv"), ("[2/2] /tv/b.mkv", "b.mkv")):
+        with ssd.file_context(header):
+            ssd.log.info(f"  {name}: setting stream#2 as default audio")
+            ssd.log.error(f"    {name}: only 9:41 of this 41:52 video could be read")
+            ssd.log.warning(f"    {name}: another warning")
+
+    assert console.getvalue() == (
+        "\n[1/2] /tv/a.mkv\n    a.mkv: only 9:41 of this 41:52 video could be read\n"
+        "    a.mkv: another warning\n"
+        "\n[2/2] /tv/b.mkv\n    b.mkv: only 9:41 of this 41:52 video could be read\n"
+        "    b.mkv: another warning\n")
+    assert logfile.getvalue() == (
+        "\n[1/2] /tv/a.mkv\n  a.mkv: setting stream#2 as default audio\n"
+        "    a.mkv: only 9:41 of this 41:52 video could be read\n    a.mkv: another warning\n"
+        "\n[2/2] /tv/b.mkv\n  b.mkv: setting stream#2 as default audio\n"
+        "    b.mkv: only 9:41 of this 41:52 video could be read\n    b.mkv: another warning\n")
+
+
+def test_a_run_with_a_log_file_shows_each_problems_file_on_the_console(tmp_path, monkeypatch, capsys):
+    """The whole run with --log-file: the console gets a file's header
+    before its error, though the line before that, its decision, only
+    went to the log file."""
+    make_videos(tmp_path, 2)
+
+    def decide_then_fail(path, args, on_progress=None):
+        ssd.log.info(f"  {path.name}: setting stream#2 as default audio")
+        if path.name == "e01.mkv":
+            ssd.log.error(f"    {path.name}: remux failed")
+            return "error"
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", decide_then_fail)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
+                                      "--log-file", str(tmp_path / "run.log")])
+
+    assert ssd.main() == 1
+
+    out = capsys.readouterr().out
+    assert f"\n[2/2] {tmp_path / 'e01.mkv'}\n    e01.mkv: remux failed\n" in out
+    assert "[1/2]" not in out and "setting stream" not in out
+    log_text = (tmp_path / "run.log").read_text(encoding="utf-8")
+    assert log_text.count(f"[2/2] {tmp_path / 'e01.mkv'}") == 1
+
+
 def test_lines_outside_a_file_pass_straight_through(caplog):
     caplog.set_level("INFO")
     ssd.log.info("Found 2 file(s).")
