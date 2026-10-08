@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-08 · [#18](https://github.com/tronyx/Set-Stereo-Default/pull/18)
+
 ### Changed
 
 - Every file that couldn't be fixed is now listed at the end of the run, just before the summary, not only damaged ones: a file another program had open, one that was changed during the run, and any other failure too, each with its full path. They're grouped by what to do about them, each group under a heading that says so (replace it, close the program that has it open, or run the script again), and anything without a fix of its own comes last, pointing back to the line about it. A stopped run lists the ones it found, but not the files the stop itself interrupted.
