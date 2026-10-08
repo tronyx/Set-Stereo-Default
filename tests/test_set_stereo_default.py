@@ -1339,15 +1339,120 @@ REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6
         "original duration unknown", "remux duration unknown"])
 def test_verify_remux_rejects_a_remux_much_shorter_than_the_original(fake_ffprobe, before, after,
                                                                      rejected):
+    """A much shorter remux means the original is damaged: a problem with
+    the original, not the remux, so it's marked as such."""
     fake_ffprobe[REMUX] = (REMUXED_LAYOUT, after)
 
-    problem = ssd.verify_remux(plan_to_check(before)).problem
+    checked = ssd.verify_remux(plan_to_check(before))
 
     if rejected:
-        assert problem == (f"duration dropped from {before:.1f}s to {after:.1f}s; "
-                           f"the original may be incomplete")
+        assert checked.damaged
+        assert checked.problem.startswith(f"only {ssd._clock(after)} of this {ssd._clock(before)} video "
+                                          f"could be read, so the file seems to be damaged")
     else:
-        assert problem is None
+        assert checked == ssd.Verification()
+
+
+def test_a_damaged_original_is_reported_before_anything_else_wrong(fake_ffprobe):
+    """A damaged original can make its remux wrong in other ways too, e.g.
+    with a stream whose data was all in the unreadable part missing.
+    Replacing the file is what fixes all of it, so that's what's said."""
+    fake_ffprobe[REMUX] = (REMUXED_LAYOUT[:-1], 600.0)
+
+    checked = ssd.verify_remux(plan_to_check(2400.0))
+
+    assert checked.damaged
+    assert checked.problem.startswith("only 10:00 of this 40:00 video could be read")
+
+
+@pytest.mark.parametrize("seconds, shown", [
+    (0.4, "0:00"), (24.9, "0:24"), (581.6, "9:41"), (2512.0, "41:52"), (3599.9, "59:59"),
+    (3600.0, "1:00:00"), (3725.5, "1:02:05"), (36000.0, "10:00:00"),
+], ids=["under a second", "seconds", "minutes", "the log's file", "just under an hour",
+        "an hour", "hours", "ten hours"])
+def test_clock_shows_a_time_as_a_player_does(seconds, shown):
+    assert ssd._clock(seconds) == shown
+
+
+def test_a_damaged_original_is_logged_in_plain_words(remux, caplog, monkeypatch):
+    """Not as a failed check: the line says what was found, what it means
+    and what to do, and the file and its temp file are dealt with as for
+    any rejected remux."""
+    apply, video, _ = remux
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification(
+        "only 9:41 of this 41:52 video could be read, so the file seems to be damaged", damaged=True))
+
+    assert apply() is False
+
+    assert f"{video.name}: only 9:41 of this 41:52 video could be read, so the file seems to be damaged." \
+        in caplog.text
+    assert "post-remux check failed" not in caplog.text
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert not list(video.parent.glob("*.bak*"))
+    assert ssd._damaged_files == [str(video)]
+
+
+def test_a_remux_rejected_for_another_reason_isnt_listed_as_damaged(remux):
+    """Only a damaged original is something the user can replace; a remux
+    rejected for anything else isn't listed at the end."""
+    apply, _, set_outcome = remux
+    set_outcome("stream count changed from 4 to 3")
+
+    assert apply() is False
+
+    assert ssd._damaged_files == []
+
+
+@pytest.mark.parametrize("paths, expected", [
+    ([], None),
+    (["/tv/Show/S01E02.mkv"],
+     ("\n1 file seems to be damaged or an incomplete download, so it was left as it is. Replace it "
+      "(e.g. search for it again in Sonarr or Radarr), then run the script again:\n  /tv/Show/S01E02.mkv")),
+    (["/tv/Show/S01E02.mkv", "/tv/Another/S03E01.mp4", "/tv/Show/S01E01.mkv"],
+     ("\n3 files seem to be damaged or incomplete downloads, so they were left as they are. Replace them "
+      "(e.g. search for them again in Sonarr or Radarr), then run the script again:\n"
+      "  /tv/Another/S03E01.mp4\n  /tv/Show/S01E01.mkv\n  /tv/Show/S01E02.mkv")),
+], ids=["none", "one", "several, sorted"])
+def test_damaged_files_are_listed_with_what_to_do(caplog, paths, expected):
+    """One warning listing every damaged file's full path, sorted so a
+    show's episodes are together; nothing at all when there are none."""
+    ssd._damaged_files.extend(paths)
+
+    ssd.report_damaged_files()
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == ([expected] if expected else [])
+
+
+@pytest.mark.parametrize("stopped", [False, True], ids=["finished", "stopped"])
+def test_damaged_files_are_listed_just_before_the_summary(tmp_path, monkeypatch, capsys, stopped):
+    """At the end of the run, where they're seen, after the per-file lines
+    have scrolled away; a stopped run lists the ones it found too. The
+    list is for this run only, so a second run starts it afresh."""
+    make_videos(tmp_path, 3)
+
+    def damaged_second_file(path, args, on_progress=None):
+        ssd.log.info(f"  {path.name}: done")
+        if path.name == "e01.mkv":
+            ssd._damaged_files.append(str(path))
+            return "error"
+        if stopped and path.name == "e02.mkv":
+            signal.raise_signal(signal.SIGINT)
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", damaged_second_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    assert ssd.main() == (130 if stopped else 1)
+
+    out = capsys.readouterr().out
+    listing = out.index("1 file seems to be damaged")
+    assert out.index("e02.mkv: done") < listing < out.index("----- Summary")
+    assert f"\n  {tmp_path / 'e01.mkv'}\n" in out
+    ssd._reset_run_state()
+    assert ssd._damaged_files == []
 
 
 def test_a_changed_file_is_probed_once_and_its_remux_once(tmp_path, monkeypatch):
@@ -2128,6 +2233,78 @@ def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypat
     assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is True
     assert caplog.records[-1].getMessage() == \
         "    v.mkv: mkvmerge finished with warnings: odd timestamps; gap in track 1"
+
+
+@pytest.mark.parametrize("lines, expected", [
+    ([], []),
+    (["odd timestamps", "gap in track 1"], ["odd timestamps", "gap in track 1"]),
+    (["Error in the Matroska file structure at position 419932626. Resyncing to the next level 1 element.",
+      "The last timestamp processed before the error was encountered was 00:09:39.809000000.",
+      *[f"Still resyncing at position {p}." for p in (511838020, 588777284, 668206916)],
+      "Resync failed: no valid Matroska level 1 element found."],
+     ["Error in the Matroska file structure at position 419932626. Resyncing to the next level 1 element.",
+      "The last timestamp processed before the error was encountered was 00:09:39.809000000.",
+      "Still resyncing at position 511838020 (and 2 more like it)",
+      "Resync failed: no valid Matroska level 1 element found."]),
+    (["gap in track 1", "gap in track 2", "odd timestamps", "gap in track 3"],
+     ["gap in track 1 (and 2 more like it)", "odd timestamps"]),
+    (["odd timestamps", "odd timestamps"], ["odd timestamps (and 1 more like it)"]),
+], ids=["none", "all different", "mkvmerge resyncing", "apart", "identical"])
+def test_repeated_warnings_are_shown_once_with_a_count(lines, expected):
+    """Lines that differ only in their numbers are one kind, shown once
+    where it first came, with how many more followed, even with other
+    lines in between; the rest come through as they are."""
+    assert ssd._collapse_repeats(lines) == expected
+
+
+def test_a_warning_that_repeats_comes_out_on_one_line(tmp_path, monkeypatch, caplog):
+    """A recovered glitch in an MKV can leave mkvmerge reporting the same
+    thing at a dozen byte positions. The remux is used, so the warnings
+    are shown, but each kind once."""
+    def fake_mkvmerge(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        return 1, "".join(f"#GUI#warning Still resyncing at position {p}.\n" for p in range(100, 1300, 100))
+    monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is True
+    assert caplog.records[-1].getMessage() == \
+        "    v.mkv: mkvmerge finished with warnings: Still resyncing at position 100 (and 11 more like it)"
+
+
+@pytest.mark.parametrize("verdict, shown", [
+    (ssd.Verification(), True),
+    (ssd.Verification("stream count changed from 4 to 3"), True),
+    (ssd.Verification("only 9:41 of this 41:52 video could be read, so the file seems to be damaged",
+                      damaged=True), False),
+], ids=["remux used", "rejected", "original damaged"])
+def test_mkvmerge_warnings_are_logged_unless_the_original_is_damaged(tmp_path, monkeypatch, caplog,
+                                                                     verdict, shown):
+    """mkvmerge's warnings come once the check has run, before its result:
+    for a remux that's used, or rejected, where they may explain why. For a
+    damaged original they're left out, since all they say is where mkvmerge
+    looked for readable data past the damage, which the plain message
+    already covers."""
+    def fake_mkvmerge(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        return 1, ("#GUI#warning Error in the Matroska file structure at position 419932626.\n"
+                   "#GUI#warning Still resyncing at position 511838020.\n")
+    monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: verdict)
+    caplog.set_level("INFO")
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False))
+
+    messages = [r.getMessage() for r in caplog.records]
+    warned = [m for m in messages if "finished with warnings" in m]
+    assert bool(warned) is shown
+    assert ("Still resyncing" in caplog.text) is shown
+    if verdict.problem and shown:
+        assert messages.index(warned[0]) < next(i for i, m in enumerate(messages) if "check failed" in m)
 
 
 @pytest.mark.parametrize("apply, filename, tool", [
@@ -2955,6 +3132,64 @@ def test_a_files_first_line_gets_its_header_and_the_rest_print_straight_away(cap
         ssd.log.info("    a command")
         assert caplog.records[-1].getMessage() == "    a command"
     assert len(caplog.records) == 2
+
+
+def test_each_place_lines_go_gets_the_header_before_the_first_line_it_shows():
+    """With --log-file, the console shows only warnings and errors, and the
+    log file everything. A file's first line, its decision, reaches only
+    the log file; its warning must still reach the console under the
+    file's header, and a later file's too, each once."""
+    console, logfile = io.StringIO(), io.StringIO()
+    shows_warnings, shows_all = logging.StreamHandler(console), logging.StreamHandler(logfile)
+    shows_warnings.setLevel(logging.WARNING)
+    ssd.log.setLevel(logging.INFO)
+    ssd.log.addHandler(shows_warnings)
+    ssd.log.addHandler(shows_all)
+    ssd.log.propagate = False
+
+    for header, name in (("[1/2] /tv/a.mkv", "a.mkv"), ("[2/2] /tv/b.mkv", "b.mkv")):
+        with ssd.file_context(header):
+            ssd.log.info(f"  {name}: setting stream#2 as default audio")
+            ssd.log.error(f"    {name}: only 9:41 of this 41:52 video could be read")
+            ssd.log.warning(f"    {name}: another warning")
+
+    assert console.getvalue() == (
+        "\n[1/2] /tv/a.mkv\n    a.mkv: only 9:41 of this 41:52 video could be read\n"
+        "    a.mkv: another warning\n"
+        "\n[2/2] /tv/b.mkv\n    b.mkv: only 9:41 of this 41:52 video could be read\n"
+        "    b.mkv: another warning\n")
+    assert logfile.getvalue() == (
+        "\n[1/2] /tv/a.mkv\n  a.mkv: setting stream#2 as default audio\n"
+        "    a.mkv: only 9:41 of this 41:52 video could be read\n    a.mkv: another warning\n"
+        "\n[2/2] /tv/b.mkv\n  b.mkv: setting stream#2 as default audio\n"
+        "    b.mkv: only 9:41 of this 41:52 video could be read\n    b.mkv: another warning\n")
+
+
+def test_a_run_with_a_log_file_shows_each_problems_file_on_the_console(tmp_path, monkeypatch, capsys):
+    """The whole run with --log-file: the console gets a file's header
+    before its error, though the line before that, its decision, only
+    went to the log file."""
+    make_videos(tmp_path, 2)
+
+    def decide_then_fail(path, args, on_progress=None):
+        ssd.log.info(f"  {path.name}: setting stream#2 as default audio")
+        if path.name == "e01.mkv":
+            ssd.log.error(f"    {path.name}: remux failed")
+            return "error"
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", decide_then_fail)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress",
+                                      "--log-file", str(tmp_path / "run.log")])
+
+    assert ssd.main() == 1
+
+    out = capsys.readouterr().out
+    assert f"\n[2/2] {tmp_path / 'e01.mkv'}\n    e01.mkv: remux failed\n" in out
+    assert "[1/2]" not in out and "setting stream" not in out
+    log_text = (tmp_path / "run.log").read_text(encoding="utf-8")
+    assert log_text.count(f"[2/2] {tmp_path / 'e01.mkv'}") == 1
 
 
 def test_lines_outside_a_file_pass_straight_through(caplog):

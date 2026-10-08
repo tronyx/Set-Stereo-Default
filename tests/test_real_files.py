@@ -1245,7 +1245,8 @@ def test_a_file_name_that_isnt_valid_utf8_is_fixed(tmp_path):
 def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
     """An incomplete download still claims its full length in its header,
     but a remux only contains what's really there, so it comes out much
-    shorter. The script must reject it rather than hide the problem."""
+    shorter. The script must reject it rather than hide the problem, and
+    say so in plain words."""
     need("ffmpeg", "ffprobe", *(["mkvmerge"] if ext == ".mkv" else []))
     full = make_video(tmp_path / f"full{ext}", [Track(6, default=True), Track(2)], seconds=20)
     video = tmp_path / f"video{ext}"
@@ -1256,7 +1257,39 @@ def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
 
     assert code == 1, output
     assert summary(output)["error"] == 1, output
-    assert "duration dropped from" in output, output
+    assert re.search(r"video\.\w+: only 0:\d\d of this 0:20 video could be read, so the file seems to be "
+                     r"damaged or an incomplete download\. It was left as it is; replace it", output), output
+    assert f"then run the script again:\n  {video}\n" in output, output
+    assert digest(video) == before
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+
+
+def test_an_mkv_whose_end_is_zeros_is_an_error_and_left_alone(tmp_path):
+    """A download client can make a file its full size up front and fill
+    it in as it downloads, so an incomplete download can be the right size
+    with zeros where its end should be. mkvmerge stops where the zeros
+    start, after trying to resync past them, and the script must report
+    the file as damaged just as for a truncated one.
+
+    Only MKV: an MP4 lists every sample in an index at its front, so
+    ffmpeg copies the zeroed samples as they are, and the remux is as long
+    as the original and no more broken than it. Nothing is lost, and the
+    script can't tell.
+
+    mkvmerge's own warnings about it (where it tried to resync) are left
+    out: they say only what the plain message already says."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    video = make_video(tmp_path / "video.mkv", [Track(6, default=True), Track(2)], seconds=20)
+    data = video.read_bytes()
+    video.write_bytes(data[:len(data) // 2] + bytes(len(data) - len(data) // 2))
+    before = digest(video)
+
+    code, output = run_script(video)
+
+    assert code == 1, output
+    assert summary(output)["error"] == 1, output
+    assert "video could be read, so the file seems to be damaged or an incomplete download" in output, output
+    assert "finished with warnings" not in output and "Matroska file structure" not in output, output
     assert digest(video) == before
     assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
 

@@ -8,6 +8,19 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 Nothing yet.
 
+## 2026-10-08 · [#17](https://github.com/tronyx/Set-Stereo-Default/pull/17)
+
+### Changed
+
+- A damaged file, usually an incomplete download, is now reported in plain words: `only 9:41 of this 41:52 video could be read, so the file seems to be damaged or an incomplete download. It was left as it is; replace it (e.g. search for it again in Sonarr or Radarr), then run the script again.` It used to read `post-remux check failed (duration dropped from 2512.0s to 581.6s; the original may be incomplete), keeping original untouched`, which didn't say what to do. This is checked before anything else about the remux, since a damaged file explains whatever else is wrong with it. The file is still left untouched and counted as an `Error`. A new real-file test covers an incomplete download that's the right size with zeros where its end should be, as some download clients leave it.
+- Damaged files are also listed at the end of the run, with their full paths, just before the summary, saying what to do about them. In a run over a whole library, the line about each one has long scrolled away by then, and the summary only counts them as errors. The list is sorted, so a show's episodes are together, and a stopped run lists the ones it found too.
+- mkvmerge's warnings are no longer shown for a damaged file. For an MKV like the one above, they were a line of byte positions (`Error in the Matroska file structure at position …`, then `Still resyncing at position …` again and again) saying in mkvmerge's terms what the plain message now says. For any other file they're still shown, now once the file has been checked rather than before: just before the reason a file was left alone, where they may help explain it.
+- mkvmerge's warnings show each kind once, with a count, instead of one line per byte position: `Still resyncing at position 511838020 (and 14 more like it)`. Warnings that differ only in their numbers count as one kind, and the others come through as they are. A short glitch mkvmerge recovers from in the middle of an MKV, which leaves the file fixable, could otherwise fill the warning with a dozen such lines.
+
+### Fixed
+
+- With `--log-file`, warnings and errors about a file reached the console without the `[i/N] path` line that says which file they're about, so they named the file but not its folder, and with `--jobs` there was no telling which file a line belonged to. That line is printed above a file's first line in the log file, usually its decision, which the console doesn't show with `--log-file`, and wasn't printed again for the console. The console and the log file now each get it above the first of a file's lines they show.
+
 ## 2026-10-07 · [#16](https://github.com/tronyx/Set-Stereo-Default/pull/16)
 
 ### Project

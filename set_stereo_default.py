@@ -89,6 +89,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import contextlib
+import copy
 import dataclasses
 import functools
 import importlib
@@ -295,8 +296,12 @@ _file_context = threading.local()
 """Per thread: the "[i/N] path" header of the file it's working on, or None
 outside file_context()."""
 
-_last_header = [None]
-"""The header of the file that printed the most recent line."""
+_last_header: dict[logging.Handler, str] = {}
+"""For each place lines go (the console, the log file), the header of the
+file whose line it showed most recently. Kept for each separately, since
+they don't show the same lines: with --log-file the console shows only
+warnings and errors, so a file's first line, often its decision, reaches
+the log file but not the console."""
 
 _print_lock = threading.Lock()
 """Makes choosing whether to repeat a header and printing the line one step,
@@ -314,23 +319,52 @@ class _FileHeaderFilter(logging.Filter):
     command, warnings or result), so other files' lines land in between.
     Lines still appear as they happen.
 
+    Each place lines go gets the header before the first of the file's
+    lines it shows, judged for itself (see _last_header). With --log-file
+    the console shows only warnings and errors, so a file's first line, its
+    decision, reaches the log file alone; the header with it mustn't count
+    for the console, or a warning about that file would reach it with no
+    header to say which file it is.
+
     The check and the printing must happen as one step, or two files
     printing at the same moment could still mix. The filter runs before
-    anything is printed, so it takes the lock, adds the header if needed,
-    hands the line to the handlers itself, and returns False so it isn't
-    printed twice. Lines logged outside file_context() pass straight
-    through."""
+    anything is printed, so it takes the lock, adds the header where
+    needed, hands the line to the handlers itself, and returns False so it
+    isn't printed twice. Lines logged outside file_context() pass straight
+    through, as do lines no handler would show, which logging then deals
+    with itself."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         header = getattr(_file_context, "header", None)
         if header is None:
             return True
+        handlers = _handlers_for(record)
+        if not handlers:
+            return True
         with _print_lock:
-            if _last_header[0] != header:
-                record.msg, record.args = f"\n{header}\n{record.getMessage()}", None
-                _last_header[0] = header
-            log.callHandlers(record)
+            for handler in handlers:
+                if _last_header.get(handler) == header:
+                    handler.handle(record)
+                    continue
+                shown = copy.copy(record)
+                shown.msg, shown.args = f"\n{header}\n{record.getMessage()}", None
+                handler.handle(shown)
+                _last_header[handler] = header
         return False
+
+
+def _handlers_for(record: logging.LogRecord) -> list[logging.Handler]:
+    """The handlers that will show record: log's own, then its parents', as
+    long as each passes lines on, leaving out those set to a higher level.
+    The same ones, in the same order, as logging.Logger.callHandlers()."""
+    found: list[logging.Handler] = []
+    logger: logging.Logger | None = log
+    while logger is not None:
+        found += [h for h in logger.handlers if record.levelno >= h.level]
+        if not logger.propagate:
+            break
+        logger = logger.parent
+    return found
 
 
 log.addFilter(_FileHeaderFilter())
@@ -369,18 +403,28 @@ by report_ownership_failures()."""
 _ownership_lock = threading.Lock()
 """Guards _ownership_failures, which several --jobs threads add to at once."""
 
+_damaged_files: list[str] = []
+"""Full paths of files left alone because they seem damaged (see
+_damage_problem()). Listed again at the end of the run by
+report_damaged_files()."""
+
+_damaged_lock = threading.Lock()
+"""Guards _damaged_files, which several --jobs threads add to at once."""
+
 
 def _reset_run_state() -> None:
     """Forget what an earlier run in this process left behind, so main() can
     run more than once, e.g. when called from other Python code: a stop
     request (which would cancel every file), files that couldn't keep their
-    owner (which would be reported again), the header printed last, and
-    whether this mkvmerge can keep legacy font types. No remux outlives its
-    run, so _active_procs is already empty."""
+    owner and damaged files (which would be reported again), the headers
+    printed last, and whether this mkvmerge can keep legacy font types. No
+    remux outlives its run, so _active_procs is already empty."""
     _cancelled.clear()
     with _ownership_lock:
         _ownership_failures.clear()
-    _last_header[0] = None
+    with _damaged_lock:
+        _damaged_files.clear()
+    _last_header.clear()
     _file_context.header = None
     mkvmerge_can_keep_legacy_font_types.cache_clear()
 
@@ -783,30 +827,49 @@ def _stream_loss(was: Stream, now: Stream) -> str | None:
     return None
 
 
-def _content_problem(plan: Plan, after: list[Stream], after_duration: float | None) -> str | None:
-    """Whether the remux (after, after_duration) lost anything outright: it
-    must have as many streams, chapter tracks (see is_chapter_track()) and
-    audio tracks as the original, and mustn't be shorter by more than
-    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds). A much
-    shorter result means the original contains less than its header
-    claims, e.g. an incomplete download, so it's left alone for a person to
-    look at. A longer one is fine: the original's header just understated
-    it. The duration check is skipped if either duration is unknown."""
-    before, before_duration = plan.layout, plan.duration
+def _content_problem(plan: Plan, after: list[Stream]) -> str | None:
+    """Whether the remux (after) lost any stream outright: it must have as
+    many streams, chapter tracks (see is_chapter_track()) and audio tracks
+    as the original."""
+    before = plan.layout
     if len(after) != len(before):
         return f"stream count changed from {len(before)} to {len(after)}"
     had, has = (sum(1 for s in streams if is_chapter_track(s)) for streams in (before, after))
     if has != had:
         return f"chapter track count changed from {had} to {has}"
-    if before_duration and after_duration is not None:
-        allowed = max(before_duration * MAX_DURATION_LOSS, MIN_DURATION_LOSS)
-        if after_duration < before_duration - allowed:
-            return (f"duration dropped from {before_duration:.1f}s to {after_duration:.1f}s; "
-                    f"the original may be incomplete")
     audio = [s for s in after if s.type == "audio"]
     if len(audio) != len(plan.streams):
         return f"expected {len(plan.streams)} audio tracks, found {len(audio)}"
     return None
+
+
+def _clock(seconds: float) -> str:
+    """seconds the way a player shows a time: "9:41", or "1:02:05" from an
+    hour on. Partial seconds are dropped, so a time is never overstated."""
+    whole = int(seconds)
+    hours, minutes, secs = whole // 3600, whole // 60 % 60, whole % 60
+    return f"{hours}:{minutes:02}:{secs:02}" if hours else f"{minutes}:{secs:02}"
+
+
+def _damage_problem(plan: Plan, after_duration: float | None) -> str | None:
+    """Whether the remux came out shorter than the original by more than
+    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds), as a
+    message for the person who has to deal with it, or None. The tools copy
+    all they can read, so a much shorter remux means the original holds
+    less than its header claims: it's damaged, or an incomplete download
+    (whose missing parts a download client may have left as zeros). That's
+    a problem with the original, not the remux, and only replacing the file
+    fixes it, so the message says so in plain words. A longer remux is
+    fine: the original's header just understated it. The check is skipped
+    if either duration is unknown."""
+    before = plan.duration
+    if not before or after_duration is None:
+        return None
+    if after_duration >= before - max(before * MAX_DURATION_LOSS, MIN_DURATION_LOSS):
+        return None
+    return (f"only {_clock(after_duration)} of this {_clock(before)} video could be read, so the file seems "
+            f"to be damaged or an incomplete download. It was left as it is; replace it (e.g. search for "
+            f"it again in Sonarr or Radarr), then run the script again")
 
 
 def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
@@ -889,9 +952,12 @@ class Verification:
     """verify_remux()'s result: problem, why the remux must be rejected (None
     if it passed), and notes, warnings to log if the remux is then used (a
     flag ffmpeg can't write; see _streams_problem()). A rejected remux
-    never carries notes, since they'd describe a change that isn't made."""
+    never carries notes, since they'd describe a change that isn't made.
+    damaged marks a problem with the original rather than the remux (see
+    _damage_problem()), whose message is complete as it is."""
     problem: str | None = None
     notes: tuple[str, ...] = ()
+    damaged: bool = False
 
 
 def verify_remux(plan: Plan) -> Verification:
@@ -906,8 +972,11 @@ def verify_remux(plan: Plan) -> Verification:
 
     The checks run in this order, each only once the ones before it have
     passed, and the first problem found is the one reported:
-    - nothing lost outright: streams, chapter tracks, audio tracks,
-      duration (_content_problem());
+    - the remux isn't much shorter than the original, which would mean the
+      original is damaged (_damage_problem()); first, since if it is, that
+      explains anything else that's wrong, and only replacing it helps;
+    - nothing lost outright: streams, chapter tracks, audio tracks
+      (_content_problem());
     - after an AVI reorder (plan.reordered), the target is the first audio
       track (_first_audio_problem());
     - every stream but a chapter track came through as it was, in the
@@ -917,9 +986,12 @@ def verify_remux(plan: Plan) -> Verification:
     after, after_duration = probe_streams(plan.tmp_path, report=False)
     if after is None:
         return Verification("ffprobe couldn't read the file")
+    damage = _damage_problem(plan, after_duration)
+    if damage:
+        return Verification(damage, damaged=True)
     audio = [s for s in after if s.type == "audio"]
     notes: tuple[str, ...] = ()
-    problem = _content_problem(plan, after, after_duration)
+    problem = _content_problem(plan, after)
     if problem is None and plan.reordered:
         problem = _first_audio_problem(plan, audio)
     if problem is None:
@@ -1125,6 +1197,27 @@ def report_ownership_failures(folder: Path | str = ".") -> None:
                 f"{where}\n\n{owners} {advice}")
 
 
+def report_damaged_files() -> None:
+    """List every file left alone because it seems damaged (see
+    _damage_problem()), with its full path, just before the summary, and
+    what to do about them. Each was reported as it was found, but in a run
+    over a whole library that line has long scrolled away by the end, and
+    the summary only counts it as an Error. Sorted, so a show's episodes
+    are together, rather than in the order --jobs threads finished them."""
+    with _damaged_lock:
+        paths = sorted(_damaged_files)
+    if not paths:
+        return
+    if len(paths) == 1:
+        head = ("1 file seems to be damaged or an incomplete download, so it was left as it is. "
+                "Replace it (e.g. search for it again in Sonarr or Radarr), then run the script again:")
+    else:
+        head = (f"{len(paths)} files seem to be damaged or incomplete downloads, so they were left as they "
+                f"are. Replace them (e.g. search for them again in Sonarr or Radarr), then run the script "
+                f"again:")
+    log.warning("\n" + head + "".join(f"\n  {p}" for p in paths))
+
+
 class Superseded(Exception):
     """Raised by swap_in() when the original changed after it was probed: the
     remux was made from the old version, and swapping it in would undo
@@ -1244,12 +1337,22 @@ class Progress:
     on_progress: Callable[[int], None] | None = None
 
 
-def check_and_swap_in(plan: Plan, opts: Options) -> bool:
+def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = None) -> bool:
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged). The check's warnings (see verify_remux()) are only
     logged once the remux has replaced the original, so a rejected remux
-    never warns about a file it didn't change.
+    never warns about a file it didn't change. A damaged original (see
+    _damage_problem()) is logged in its own plain words, since it's the
+    one problem a user can fix, and listed again at the end of the run (see
+    report_damaged_files()); any other is logged as a failed check.
+
+    tool_warnings is the line about the remux tool's warnings (see
+    _remux_and_swap()), logged once the check has run, before its result.
+    Not for a damaged original, though: the tool's warnings then only say,
+    in byte positions, what the plain message already says (mkvmerge's run
+    of "Still resyncing at position ..." while it looks for readable data
+    past the damage).
 
     It's also not swapped in if the original changed since it was probed,
     which swap_in() checks before the backup and again just before the swap
@@ -1274,6 +1377,14 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
             tmp_path.unlink(missing_ok=True)
             return False
         checked = verify_remux(plan)
+        if checked.damaged:
+            log.error(f"    {path.name}: {checked.problem}.")
+            with _damaged_lock:
+                _damaged_files.append(str(path))
+            tmp_path.unlink(missing_ok=True)
+            return False
+        if tool_warnings:
+            log.warning(tool_warnings)
         if checked.problem:
             log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
                       f"keeping original untouched")
@@ -1343,6 +1454,21 @@ _MKVMERGE_PCT_RE = re.compile(r"#GUI#progress\s+(\d+)%")
 _MKVMERGE_WARNING_PREFIX_RE = re.compile(r"^(?:#GUI#warning\s*)?(?:warning:\s*)?", re.IGNORECASE)
 """The "#GUI#warning" and "Warning:" prefixes on mkvmerge's warnings."""
 
+
+def _collapse_repeats(lines: list[str]) -> list[str]:
+    """lines with each kind of line once, where it first came, and how many
+    more of that kind followed: "Still resyncing at position 511838020 (and
+    14 more like it)". Lines are the same kind if they differ only in their
+    numbers, as mkvmerge's do when it reports the same thing at one byte
+    position after another. Lines that don't repeat come through as they
+    are."""
+    kinds: dict[str, list[str]] = {}
+    for line in lines:
+        kinds.setdefault(re.sub(r"\d+", "#", line), []).append(line)
+    return [same[0] if len(same) == 1 else f"{same[0].rstrip('.')} (and {len(same) - 1} more like it)"
+            for same in kinds.values()]
+
+
 _FFMPEG_PROGRESS_RE = re.compile(r"[a-z0-9_]+=")
 """ffmpeg -progress output: a block of key=value lines per update."""
 
@@ -1386,10 +1512,12 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
 
     plan.intro is logged with the dry-run command, or just before the remux
     starts (see _announce()). warnings_exit is an exit code that means the
-    tool finished but printed warnings (mkvmerge's 1): the warnings are
-    logged and the file is still checked and used. A killed process can
-    also exit with that code (mkvmerge on Windows), so it only counts as
-    finished if no stop was requested.
+    tool finished but printed warnings (mkvmerge's 1): the file is still
+    checked and used, and the warnings, each kind once (see
+    _collapse_repeats()), are handed to check_and_swap_in(),
+    which logs them once the check has run, unless it found the original
+    damaged. A killed process can also exit with that code (mkvmerge on
+    Windows), so it only counts as finished if no stop was requested.
 
     Whatever already has the temp name is removed before the remux, so the
     tool writes a new file rather than through a symlink someone left there
@@ -1425,13 +1553,14 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         tmp_path.unlink(missing_ok=True)
         return False
 
+    tool_warnings = None
     if with_warnings:
-        warnings = [_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
-                    for line in output.splitlines() if "warning" in line.lower()]
-        log.warning(f"    {path.name}: {tool} finished with warnings: "
-                    + ("; ".join(warnings) or output.strip() or "(no details given)"))
+        warnings = _collapse_repeats([_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
+                                      for line in output.splitlines() if "warning" in line.lower()])
+        tool_warnings = (f"    {path.name}: {tool} finished with warnings: "
+                         + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
-    return check_and_swap_in(plan, opts)
+    return check_and_swap_in(plan, opts, tool_warnings)
 
 
 def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
@@ -2167,7 +2296,10 @@ def main(argv: list[str] | None = None) -> int:
     file is done, a stop is ignored: only the summary is left. Files that
     couldn't be given their original owner are reported in one warning
     just before the summary (report_ownership_failures()), with the full
-    list saved next to --log-file, or in the current folder.
+    list saved next to --log-file, or in the current folder. Then files left
+    alone because they seem damaged are listed with their full paths
+    (report_damaged_files()), so they don't need finding in a long run's
+    output.
 
     The answer to the backup question goes into opts.existing_backups, in
     a copy of opts (Options is frozen), so the rest of the run reads it from
@@ -2259,11 +2391,13 @@ def _run(opts: Options) -> int:
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
+        report_damaged_files()
         finished = sum(stats[k] for k in ("changed", "unchanged", "skipped", "error"))
         print_summary(stats, opts, partial=True, cancelled=len(files) - finished)
         return 128 + signum
 
     report_ownership_failures(list_folder)
+    report_damaged_files()
     print_summary(stats, opts)
     return 1 if stats["error"] else 0
 
