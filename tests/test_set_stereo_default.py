@@ -1390,43 +1390,71 @@ def test_a_damaged_original_is_logged_in_plain_words(remux, caplog, monkeypatch)
     assert video.read_bytes() == b"original"
     assert not leftover_temp_files(video)
     assert not list(video.parent.glob("*.bak*"))
-    assert ssd._damaged_files == [str(video)]
+    assert ssd._failed_files == {str(video): "damaged"}
 
 
 def test_a_remux_rejected_for_another_reason_isnt_listed_as_damaged(remux):
     """Only a damaged original is something the user can replace; a remux
-    rejected for anything else isn't listed at the end."""
+    rejected for anything else is left for process_file() to record."""
     apply, _, set_outcome = remux
     set_outcome("stream count changed from 4 to 3")
 
     assert apply() is False
 
-    assert ssd._damaged_files == []
+    assert ssd._failed_files == {}
 
 
-@pytest.mark.parametrize("paths, expected", [
-    ([], None),
-    (["/tv/Show/S01E02.mkv"],
-     ("\n1 file seems to be damaged or an incomplete download, so it was left as it is. Replace it "
-      "(e.g. search for it again in Sonarr or Radarr), then run the script again:\n  /tv/Show/S01E02.mkv")),
-    (["/tv/Show/S01E02.mkv", "/tv/Another/S03E01.mp4", "/tv/Show/S01E01.mkv"],
-     ("\n3 files seem to be damaged or incomplete downloads, so they were left as they are. Replace them "
-      "(e.g. search for them again in Sonarr or Radarr), then run the script again:\n"
-      "  /tv/Another/S03E01.mp4\n  /tv/Show/S01E01.mkv\n  /tv/Show/S01E02.mkv")),
-], ids=["none", "one", "several, sorted"])
-def test_damaged_files_are_listed_with_what_to_do(caplog, paths, expected):
-    """One warning listing every damaged file's full path, sorted so a
-    show's episodes are together; nothing at all when there are none."""
-    ssd._damaged_files.extend(paths)
+@pytest.mark.parametrize("failed, expected", [
+    ({}, None),
+    ({"/tv/Show/S01E02.mkv": "damaged"},
+     "\n1 file couldn't be fixed:\n\n  " + ssd.FAILURE_GROUPS["damaged"] + "\n    /tv/Show/S01E02.mkv"),
+    ({"/tv/Show/S01E02.mkv": "damaged", "/tv/Movie.mp4": "other", "/tv/Show/S01E01.mkv": "damaged",
+      "/tv/Another/S03E01.mp4": "in use", "/tv/Show/S02E01.mkv": "changed"},
+     "\n5 files couldn't be fixed:\n\n  " + ssd.FAILURE_GROUPS["damaged"]
+     + "\n    /tv/Show/S01E01.mkv\n    /tv/Show/S01E02.mkv\n\n  " + ssd.FAILURE_GROUPS["in use"]
+     + "\n    /tv/Another/S03E01.mp4\n\n  " + ssd.FAILURE_GROUPS["changed"]
+     + "\n    /tv/Show/S02E01.mkv\n\n  " + ssd.FAILURE_GROUPS["other"] + "\n    /tv/Movie.mp4"),
+], ids=["none", "one", "every kind, grouped and sorted"])
+def test_failed_files_are_listed_by_what_to_do(caplog, failed, expected):
+    """One warning listing every file that couldn't be fixed, under a heading
+    for each kind saying what to do, in FAILURE_GROUPS' order, each group's
+    paths sorted so a show's episodes are together; nothing at all when
+    every file was fine."""
+    ssd._failed_files.update(failed)
 
-    ssd.report_damaged_files()
+    ssd.report_failed_files()
 
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert warnings == ([expected] if expected else [])
 
 
+def test_every_failed_file_is_recorded_once_with_its_most_specific_reason(tmp_path, monkeypatch):
+    """process_file() records any error as "other", but never over a reason
+    recorded where the error was found, and never for a file a stop
+    cancelled, which has nothing to put right."""
+    outcomes = {"damaged.mkv": "error", "failed.mkv": "error", "fixed.mkv": "changed",
+                "skipped.mkv": "skipped", "stopped.mkv": "error"}
+
+    def fake(path, opts, on_progress=None):
+        if path.name == "damaged.mkv":
+            ssd._note_failure(path, "damaged")
+        if path.name == "broken.mkv":
+            raise RuntimeError("something nobody expected")
+        return outcomes[path.name]
+    monkeypatch.setattr(ssd, "_process_file", fake)
+
+    for name in ["damaged.mkv", "failed.mkv", "fixed.mkv", "skipped.mkv", "broken.mkv"]:
+        ssd.process_file(tmp_path / name, file_args())
+    ssd._cancelled.set()
+    assert ssd.process_file(tmp_path / "stopped.mkv", file_args()) == "error"
+
+    assert ssd._failed_files == {str(tmp_path / "damaged.mkv"): "damaged",
+                                 str(tmp_path / "failed.mkv"): "other",
+                                 str(tmp_path / "broken.mkv"): "other"}
+
+
 @pytest.mark.parametrize("stopped", [False, True], ids=["finished", "stopped"])
-def test_damaged_files_are_listed_just_before_the_summary(tmp_path, monkeypatch, capsys, stopped):
+def test_failed_files_are_listed_just_before_the_summary(tmp_path, monkeypatch, capsys, stopped):
     """At the end of the run, where they're seen, after the per-file lines
     have scrolled away; a stopped run lists the ones it found too. The
     list is for this run only, so a second run starts it afresh."""
@@ -1435,7 +1463,7 @@ def test_damaged_files_are_listed_just_before_the_summary(tmp_path, monkeypatch,
     def damaged_second_file(path, args, on_progress=None):
         ssd.log.info(f"  {path.name}: done")
         if path.name == "e01.mkv":
-            ssd._damaged_files.append(str(path))
+            ssd._note_failure(path, "damaged")
             return "error"
         if stopped and path.name == "e02.mkv":
             signal.raise_signal(signal.SIGINT)
@@ -1448,11 +1476,11 @@ def test_damaged_files_are_listed_just_before_the_summary(tmp_path, monkeypatch,
     assert ssd.main() == (130 if stopped else 1)
 
     out = capsys.readouterr().out
-    listing = out.index("1 file seems to be damaged")
+    listing = out.index("1 file couldn't be fixed")
     assert out.index("e02.mkv: done") < listing < out.index("----- Summary")
-    assert f"\n  {tmp_path / 'e01.mkv'}\n" in out
+    assert f"\n    {tmp_path / 'e01.mkv'}\n" in out
     ssd._reset_run_state()
-    assert ssd._damaged_files == []
+    assert ssd._failed_files == {}
 
 
 def test_a_changed_file_is_probed_once_and_its_remux_once(tmp_path, monkeypatch):
@@ -1979,6 +2007,7 @@ def test_a_file_changed_during_its_remux_is_left_as_it_is_now(tmp_path, monkeypa
         return
     assert result is False
     assert f"{filename}: changed by another program during the remux" in caplog.text
+    assert ssd._failed_files == {str(video): "changed"}
     assert not video.with_name(video.name + ".bak").exists()
     if meanwhile == "removed":
         assert not video.exists()
@@ -2176,6 +2205,7 @@ def test_a_file_that_cant_be_replaced_is_reported_and_left_alone(remux, monkeypa
     assert ("couldn't swap the new file in (Access is denied), so it's left as it was"
             " -- is it read-only, or open in another program?") in caplog.text
     assert "unexpected error" not in caplog.text
+    assert ssd._failed_files == {str(video): "in use"}
 
 
 def test_interrupted_remux_keeps_the_original(remux):
