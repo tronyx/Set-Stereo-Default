@@ -355,7 +355,7 @@ If the check fails, the original is kept and the file is counted as an `Error`. 
 The new file also isn't used if the original changed while it was being made, for example because Sonarr or Radarr imported an upgrade over it. Swapping it in would undo that change, so the file is left as it is now and counted as an `Error`; the next run fixes the new version.
 
 > [!NOTE]
-> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. The tools copy everything they can read, so that means the original is damaged, usually an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
+> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. The tools copy everything they can read, so that almost always means the original is damaged, usually an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
 
 | Format | How it's changed |
 | --- | --- |
@@ -450,11 +450,11 @@ If you're running this from cron or another script, the exit code tells you whet
 
 ## 🩺 Troubleshooting
 
-Every skipped or failed file gets a line saying why. Here's what the common ones mean.
+Every skipped or failed file gets a line saying why. Here's what the common ones mean. Every file that couldn't be fixed is also listed again at the end of the run, just before the summary, with its full path, grouped by what to do about it: damaged files, files another program has open, files another program changed during the run, and everything else. So none gets lost in a long run's output.
 
 **`SKIP (...)` on a file you expected to change.** Usually the stereo track is in a different language from the current default, or several stereo tracks qualify. Both are settled with `--prefer-lang`. See [Picking the track](#-picking-the-track).
 
-**`only 9:41 of this 41:52 video could be read, so the file seems to be damaged or an incomplete download`.** The file stops being readable partway through, so it can't be fixed, and it was left as it is. It's usually an incomplete download: some download clients make a file its full size before downloading it, so one that never finished can be the right size with nothing after a point. It will stop playing at the same spot in any player. Replace it (in Sonarr or Radarr, search for it again), then run the script again. Every such file is listed again with its full path at the end of the run, just before the summary, so none gets lost in a long run's output. See [Changing the file](#-changing-the-file).
+**`only 9:41 of this 41:52 video could be read, so the file seems to be damaged or an incomplete download`.** The file stops being readable partway through, so it can't be fixed, and it was left as it is. It's usually an incomplete download: some download clients make a file its full size before downloading it, so one that never finished can be the right size with nothing after a point. Such a file stops playing at the same spot in any player. Replace it (in Sonarr or Radarr, search for it again), then run the script again. Rarely, the file plays to the end anyway: then nothing is missing, and its header just claims it's longer than it is, which some tools write by mistake. Remuxing it once yourself (e.g. `mkvmerge -o fixed.mkv original.mkv` for an MKV) gives it a correct header, and the script can then fix it. See [Changing the file](#-changing-the-file).
 
 **`post-remux check failed (stream#N lost its ... flag; ...)`.** Your mkvmerge is too old to keep a track flag (commentary, hearing impaired, ...) that the file has, so the file is left untouched. Update MKVToolNix to 54 or newer and run the script again. A similar check rejects a remux that changed a track's codec or language or lost its name.
 
