@@ -1420,6 +1420,21 @@ _MKVMERGE_PCT_RE = re.compile(r"#GUI#progress\s+(\d+)%")
 _MKVMERGE_WARNING_PREFIX_RE = re.compile(r"^(?:#GUI#warning\s*)?(?:warning:\s*)?", re.IGNORECASE)
 """The "#GUI#warning" and "Warning:" prefixes on mkvmerge's warnings."""
 
+
+def _collapse_repeats(lines: list[str]) -> list[str]:
+    """lines with each kind of line once, where it first came, and how many
+    more of that kind followed: "Still resyncing at position 511838020 (and
+    14 more like it)". Lines are the same kind if they differ only in their
+    numbers, as mkvmerge's do when it reports the same thing at one byte
+    position after another. Lines that don't repeat come through as they
+    are."""
+    kinds: dict[str, list[str]] = {}
+    for line in lines:
+        kinds.setdefault(re.sub(r"\d+", "#", line), []).append(line)
+    return [same[0] if len(same) == 1 else f"{same[0].rstrip('.')} (and {len(same) - 1} more like it)"
+            for same in kinds.values()]
+
+
 _FFMPEG_PROGRESS_RE = re.compile(r"[a-z0-9_]+=")
 """ffmpeg -progress output: a block of key=value lines per update."""
 
@@ -1464,7 +1479,8 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     plan.intro is logged with the dry-run command, or just before the remux
     starts (see _announce()). warnings_exit is an exit code that means the
     tool finished but printed warnings (mkvmerge's 1): the file is still
-    checked and used, and the warnings are handed to check_and_swap_in(),
+    checked and used, and the warnings, each kind once (see
+    _collapse_repeats()), are handed to check_and_swap_in(),
     which logs them once the check has run, unless it found the original
     damaged. A killed process can also exit with that code (mkvmerge on
     Windows), so it only counts as finished if no stop was requested.
@@ -1505,8 +1521,8 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
 
     tool_warnings = None
     if with_warnings:
-        warnings = [_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
-                    for line in output.splitlines() if "warning" in line.lower()]
+        warnings = _collapse_repeats([_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
+                                      for line in output.splitlines() if "warning" in line.lower()])
         tool_warnings = (f"    {path.name}: {tool} finished with warnings: "
                          + ("; ".join(warnings) or output.strip() or "(no details given)"))
 

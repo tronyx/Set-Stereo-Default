@@ -2235,6 +2235,45 @@ def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypat
         "    v.mkv: mkvmerge finished with warnings: odd timestamps; gap in track 1"
 
 
+@pytest.mark.parametrize("lines, expected", [
+    ([], []),
+    (["odd timestamps", "gap in track 1"], ["odd timestamps", "gap in track 1"]),
+    (["Error in the Matroska file structure at position 419932626. Resyncing to the next level 1 element.",
+      "The last timestamp processed before the error was encountered was 00:09:39.809000000.",
+      *[f"Still resyncing at position {p}." for p in (511838020, 588777284, 668206916)],
+      "Resync failed: no valid Matroska level 1 element found."],
+     ["Error in the Matroska file structure at position 419932626. Resyncing to the next level 1 element.",
+      "The last timestamp processed before the error was encountered was 00:09:39.809000000.",
+      "Still resyncing at position 511838020 (and 2 more like it)",
+      "Resync failed: no valid Matroska level 1 element found."]),
+    (["gap in track 1", "gap in track 2", "odd timestamps", "gap in track 3"],
+     ["gap in track 1 (and 2 more like it)", "odd timestamps"]),
+    (["odd timestamps", "odd timestamps"], ["odd timestamps (and 1 more like it)"]),
+], ids=["none", "all different", "mkvmerge resyncing", "apart", "identical"])
+def test_repeated_warnings_are_shown_once_with_a_count(lines, expected):
+    """Lines that differ only in their numbers are one kind, shown once
+    where it first came, with how many more followed, even with other
+    lines in between; the rest come through as they are."""
+    assert ssd._collapse_repeats(lines) == expected
+
+
+def test_a_warning_that_repeats_comes_out_on_one_line(tmp_path, monkeypatch, caplog):
+    """A recovered glitch in an MKV can leave mkvmerge reporting the same
+    thing at a dozen byte positions. The remux is used, so the warnings
+    are shown, but each kind once."""
+    def fake_mkvmerge(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        return 1, "".join(f"#GUI#warning Still resyncing at position {p}.\n" for p in range(100, 1300, 100))
+    monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is True
+    assert caplog.records[-1].getMessage() == \
+        "    v.mkv: mkvmerge finished with warnings: Still resyncing at position 100 (and 11 more like it)"
+
+
 @pytest.mark.parametrize("verdict, shown", [
     (ssd.Verification(), True),
     (ssd.Verification("stream count changed from 4 to 3"), True),
