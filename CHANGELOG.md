@@ -14,6 +14,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - mkvmerge's warnings about different tracks were shown as one, since warnings that differed only in their numbers counted as one kind: `gap in track 1 (and 2 more like it)` hid that tracks 2 and 3 had gaps too. A track number now counts, so each track's warning is shown; byte positions and other numbers still collapse as before. And mkvmerge's warnings are no longer lost when its output turns out not to be a regular file (something put a link at its temp name); they're shown just before that error, as they are before any other.
 
+### Project
+
+- The README's Troubleshooting entry for a damaged file covers the rare file that plays to the end anyway: its header just overstates its length, and remuxing it once yourself (e.g. with mkvmerge) gives it a correct one, so the script can then fix it.
+
 ## 2026-10-08 · [#17](https://github.com/tronyx/Set-Stereo-Default/pull/17)
 
 ### Changed
