@@ -1372,11 +1372,12 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = Non
     has open and one it changed meanwhile (see _note_failure()).
 
     tool_warnings is the line about the remux tool's warnings (see
-    _remux_and_swap()), logged once the check has run, before its result.
-    Not for a damaged original, though: the tool's warnings then only say,
-    in byte positions, what the plain message already says (mkvmerge's run
-    of "Still resyncing at position ..." while it looks for readable data
-    past the damage).
+    _remux_and_swap()), logged before the result: once the check has run,
+    or before saying the remux isn't a regular file, where they may help
+    explain it. Not for a damaged original, though: the tool's warnings
+    then only say, in byte positions, what the plain message already says
+    (mkvmerge's run of "Still resyncing at position ..." while it looks for
+    readable data past the damage).
 
     It's also not swapped in if the original changed since it was probed,
     which swap_in() checks before the backup and again just before the swap
@@ -1396,6 +1397,8 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = Non
     path, tmp_path = plan.path, plan.tmp_path
     try:
         if not stat.S_ISREG(os.lstat(tmp_path).st_mode):
+            if tool_warnings:
+                log.warning(tool_warnings)
             log.error(f"    {path.name}: {tmp_path.name} isn't a regular file, "
                       f"keeping original untouched")
             tmp_path.unlink(missing_ok=True)
@@ -1482,16 +1485,23 @@ _MKVMERGE_WARNING_PREFIX_RE = re.compile(r"^(?:#GUI#warning\s*)?(?:warning:\s*)?
 """The "#GUI#warning" and "Warning:" prefixes on mkvmerge's warnings."""
 
 
+_WARNING_NUMBER_RE = re.compile(r"(?<![Tt]rack )(?<!\d)\d+")
+"""The numbers _collapse_repeats() ignores when comparing two warnings: all
+but a track's ("track 2: ..."), so warnings about different tracks stay
+apart."""
+
+
 def _collapse_repeats(lines: list[str]) -> list[str]:
     """lines with each kind of line once, where it first came, and how many
     more of that kind followed: "Still resyncing at position 511838020 (and
     14 more like it)". Lines are the same kind if they differ only in their
     numbers, as mkvmerge's do when it reports the same thing at one byte
-    position after another. Lines that don't repeat come through as they
-    are."""
+    position after another, other than a track number, so a warning about
+    one track never hides another's. Lines that don't repeat come through
+    as they are."""
     kinds: dict[str, list[str]] = {}
     for line in lines:
-        kinds.setdefault(re.sub(r"\d+", "#", line), []).append(line)
+        kinds.setdefault(_WARNING_NUMBER_RE.sub("#", line), []).append(line)
     return [same[0] if len(same) == 1 else f"{same[0].rstrip('.')} (and {len(same) - 1} more like it)"
             for same in kinds.values()]
 

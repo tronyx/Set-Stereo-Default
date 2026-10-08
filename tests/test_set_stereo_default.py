@@ -2106,7 +2106,8 @@ def test_a_symlink_planted_at_the_temp_name_is_removed_before_the_remux(tmp_path
 def test_a_remux_that_isnt_a_regular_file_is_never_swapped_in(tmp_path, monkeypatch, caplog):
     """If a symlink lands at the temp name after it was cleared, the tool
     writes through it. Renaming that over the original would turn the video
-    into a link, so the swap must be refused and the link removed."""
+    into a link, so the swap must be refused and the link removed. mkvmerge's
+    warnings still come first, as they may explain what went wrong."""
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")
     elsewhere = tmp_path / "elsewhere.txt"
@@ -2119,13 +2120,15 @@ def test_a_remux_that_isnt_a_regular_file_is_never_swapped_in(tmp_path, monkeypa
         except OSError as exc:
             pytest.skip(f"can't create symlinks here: {exc}")
         tmp.write_bytes(b"remuxed")
-        return 0, ""
+        return 1, "#GUI#warning odd timestamps\n"
     monkeypatch.setattr(ssd, "run_with_progress", remux_through_a_planted_symlink)
     monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
 
     assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is False
 
-    assert "v.mkv.tmp_remux.mkv isn't a regular file, keeping original untouched" in caplog.text
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages[-2:] == ["    v.mkv: mkvmerge finished with warnings: odd timestamps",
+                             "    v.mkv: v.mkv.tmp_remux.mkv isn't a regular file, keeping original untouched"]
     assert not video.is_symlink() and video.read_bytes() == b"original"
     assert not leftover_temp_files(video)
 
@@ -2276,14 +2279,19 @@ def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypat
       "The last timestamp processed before the error was encountered was 00:09:39.809000000.",
       "Still resyncing at position 511838020 (and 2 more like it)",
       "Resync failed: no valid Matroska level 1 element found."]),
-    (["gap in track 1", "gap in track 2", "odd timestamps", "gap in track 3"],
-     ["gap in track 1 (and 2 more like it)", "odd timestamps"]),
+    (["Still resyncing at position 100.", "odd timestamps", "Still resyncing at position 200."],
+     ["Still resyncing at position 100 (and 1 more like it)", "odd timestamps"]),
+    (["gap in track 1", "gap in track 2", "Track 2: gap at 1000", "Track 2: gap at 2000",
+      "Track 12: gap at 3000"],
+     ["gap in track 1", "gap in track 2", "Track 2: gap at 1000 (and 1 more like it)",
+      "Track 12: gap at 3000"]),
     (["odd timestamps", "odd timestamps"], ["odd timestamps (and 1 more like it)"]),
-], ids=["none", "all different", "mkvmerge resyncing", "apart", "identical"])
+], ids=["none", "all different", "mkvmerge resyncing", "apart", "tracks kept apart", "identical"])
 def test_repeated_warnings_are_shown_once_with_a_count(lines, expected):
     """Lines that differ only in their numbers are one kind, shown once
     where it first came, with how many more followed, even with other
-    lines in between; the rest come through as they are."""
+    lines in between; the rest come through as they are. A track number
+    counts, though, so a warning about one track never hides another's."""
     assert ssd._collapse_repeats(lines) == expected
 
 

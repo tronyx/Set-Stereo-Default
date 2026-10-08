@@ -10,6 +10,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - Every file that couldn't be fixed is now listed at the end of the run, just before the summary, not only damaged ones: a file another program had open, one that was changed during the run, and any other failure too, each with its full path. They're grouped by what to do about them, each group under a heading that says so (replace it, close the program that has it open, or run the script again), and anything without a fix of its own comes last, pointing back to the line about it. A stopped run lists the ones it found, but not the files the stop itself interrupted.
 
+### Fixed
+
+- mkvmerge's warnings about different tracks were shown as one, since warnings that differed only in their numbers counted as one kind: `gap in track 1 (and 2 more like it)` hid that tracks 2 and 3 had gaps too. A track number now counts, so each track's warning is shown; byte positions and other numbers still collapse as before. And mkvmerge's warnings are no longer lost when its output turns out not to be a regular file (something put a link at its temp name); they're shown just before that error, as they are before any other.
+
 ## 2026-10-08 · [#17](https://github.com/tronyx/Set-Stereo-Default/pull/17)
 
 ### Changed
