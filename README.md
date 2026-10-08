@@ -355,7 +355,7 @@ If the check fails, the original is kept and the file is counted as an `Error`. 
 The new file also isn't used if the original changed while it was being made, for example because Sonarr or Radarr imported an upgrade over it. Swapping it in would undo that change, so the file is left as it is now and counted as an `Error`; the next run fixes the new version.
 
 > [!NOTE]
-> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. That usually means the original contains less than its header claims, such as an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
+> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. The tools copy everything they can read, so that means the original is damaged, usually an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
 
 | Format | How it's changed |
 | --- | --- |
@@ -454,7 +454,7 @@ Every skipped or failed file gets a line saying why. Here's what the common ones
 
 **`SKIP (...)` on a file you expected to change.** Usually the stereo track is in a different language from the current default, or several stereo tracks qualify. Both are settled with `--prefer-lang`. See [Picking the track](#-picking-the-track).
 
-**`post-remux check failed (duration dropped from ...)`.** The original contains less than its header claims, usually because it's an incomplete download. It's left untouched; re-download it or check it in a player. See [Changing the file](#-changing-the-file).
+**`only 9:41 of this 41:52 video could be read, so the file seems to be damaged or an incomplete download`.** The file stops being readable partway through, so it can't be fixed, and it was left as it is. It's usually an incomplete download: some download clients make a file its full size before downloading it, so one that never finished can be the right size with nothing after a point. It will stop playing at the same spot in any player. Replace it (in Sonarr or Radarr, search for it again), then run the script again. For an MKV, the line before it is usually mkvmerge's own warning, `Error in the Matroska file structure at position …`, often with a long run of `Still resyncing at position …`: that's mkvmerge looking for readable data past the damage and not finding any. See [Changing the file](#-changing-the-file).
 
 **`post-remux check failed (stream#N lost its ... flag; ...)`.** Your mkvmerge is too old to keep a track flag (commentary, hearing impaired, ...) that the file has, so the file is left untouched. Update MKVToolNix to 54 or newer and run the script again. A similar check rejects a remux that changed a track's codec or language or lost its name.
 

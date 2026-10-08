@@ -783,30 +783,49 @@ def _stream_loss(was: Stream, now: Stream) -> str | None:
     return None
 
 
-def _content_problem(plan: Plan, after: list[Stream], after_duration: float | None) -> str | None:
-    """Whether the remux (after, after_duration) lost anything outright: it
-    must have as many streams, chapter tracks (see is_chapter_track()) and
-    audio tracks as the original, and mustn't be shorter by more than
-    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds). A much
-    shorter result means the original contains less than its header
-    claims, e.g. an incomplete download, so it's left alone for a person to
-    look at. A longer one is fine: the original's header just understated
-    it. The duration check is skipped if either duration is unknown."""
-    before, before_duration = plan.layout, plan.duration
+def _content_problem(plan: Plan, after: list[Stream]) -> str | None:
+    """Whether the remux (after) lost any stream outright: it must have as
+    many streams, chapter tracks (see is_chapter_track()) and audio tracks
+    as the original."""
+    before = plan.layout
     if len(after) != len(before):
         return f"stream count changed from {len(before)} to {len(after)}"
     had, has = (sum(1 for s in streams if is_chapter_track(s)) for streams in (before, after))
     if has != had:
         return f"chapter track count changed from {had} to {has}"
-    if before_duration and after_duration is not None:
-        allowed = max(before_duration * MAX_DURATION_LOSS, MIN_DURATION_LOSS)
-        if after_duration < before_duration - allowed:
-            return (f"duration dropped from {before_duration:.1f}s to {after_duration:.1f}s; "
-                    f"the original may be incomplete")
     audio = [s for s in after if s.type == "audio"]
     if len(audio) != len(plan.streams):
         return f"expected {len(plan.streams)} audio tracks, found {len(audio)}"
     return None
+
+
+def _clock(seconds: float) -> str:
+    """seconds the way a player shows a time: "9:41", or "1:02:05" from an
+    hour on. Partial seconds are dropped, so a time is never overstated."""
+    whole = int(seconds)
+    hours, minutes, secs = whole // 3600, whole // 60 % 60, whole % 60
+    return f"{hours}:{minutes:02}:{secs:02}" if hours else f"{minutes}:{secs:02}"
+
+
+def _damage_problem(plan: Plan, after_duration: float | None) -> str | None:
+    """Whether the remux came out shorter than the original by more than
+    MAX_DURATION_LOSS (and at least MIN_DURATION_LOSS seconds), as a
+    message for the person who has to deal with it, or None. The tools copy
+    all they can read, so a much shorter remux means the original holds
+    less than its header claims: it's damaged, or an incomplete download
+    (whose missing parts a download client may have left as zeros). That's
+    a problem with the original, not the remux, and only replacing the file
+    fixes it, so the message says so in plain words. A longer remux is
+    fine: the original's header just understated it. The check is skipped
+    if either duration is unknown."""
+    before = plan.duration
+    if not before or after_duration is None:
+        return None
+    if after_duration >= before - max(before * MAX_DURATION_LOSS, MIN_DURATION_LOSS):
+        return None
+    return (f"only {_clock(after_duration)} of this {_clock(before)} video could be read, so the file seems "
+            f"to be damaged or an incomplete download. It was left as it is; replace it (e.g. search for "
+            f"it again in Sonarr or Radarr), then run the script again")
 
 
 def _first_audio_problem(plan: Plan, audio: list[Stream]) -> str | None:
@@ -889,9 +908,12 @@ class Verification:
     """verify_remux()'s result: problem, why the remux must be rejected (None
     if it passed), and notes, warnings to log if the remux is then used (a
     flag ffmpeg can't write; see _streams_problem()). A rejected remux
-    never carries notes, since they'd describe a change that isn't made."""
+    never carries notes, since they'd describe a change that isn't made.
+    damaged marks a problem with the original rather than the remux (see
+    _damage_problem()), whose message is complete as it is."""
     problem: str | None = None
     notes: tuple[str, ...] = ()
+    damaged: bool = False
 
 
 def verify_remux(plan: Plan) -> Verification:
@@ -906,8 +928,11 @@ def verify_remux(plan: Plan) -> Verification:
 
     The checks run in this order, each only once the ones before it have
     passed, and the first problem found is the one reported:
-    - nothing lost outright: streams, chapter tracks, audio tracks,
-      duration (_content_problem());
+    - the remux isn't much shorter than the original, which would mean the
+      original is damaged (_damage_problem()); first, since if it is, that
+      explains anything else that's wrong, and only replacing it helps;
+    - nothing lost outright: streams, chapter tracks, audio tracks
+      (_content_problem());
     - after an AVI reorder (plan.reordered), the target is the first audio
       track (_first_audio_problem());
     - every stream but a chapter track came through as it was, in the
@@ -917,9 +942,12 @@ def verify_remux(plan: Plan) -> Verification:
     after, after_duration = probe_streams(plan.tmp_path, report=False)
     if after is None:
         return Verification("ffprobe couldn't read the file")
+    damage = _damage_problem(plan, after_duration)
+    if damage:
+        return Verification(damage, damaged=True)
     audio = [s for s in after if s.type == "audio"]
     notes: tuple[str, ...] = ()
-    problem = _content_problem(plan, after, after_duration)
+    problem = _content_problem(plan, after)
     if problem is None and plan.reordered:
         problem = _first_audio_problem(plan, audio)
     if problem is None:
@@ -1249,7 +1277,9 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
     Returns True if the original was replaced, False if the check failed
     (already logged). The check's warnings (see verify_remux()) are only
     logged once the remux has replaced the original, so a rejected remux
-    never warns about a file it didn't change.
+    never warns about a file it didn't change. A damaged original (see
+    _damage_problem()) is logged in its own plain words, since it's the
+    one problem a user can fix; any other is logged as a failed check.
 
     It's also not swapped in if the original changed since it was probed,
     which swap_in() checks before the backup and again just before the swap
@@ -1274,6 +1304,10 @@ def check_and_swap_in(plan: Plan, opts: Options) -> bool:
             tmp_path.unlink(missing_ok=True)
             return False
         checked = verify_remux(plan)
+        if checked.damaged:
+            log.error(f"    {path.name}: {checked.problem}.")
+            tmp_path.unlink(missing_ok=True)
+            return False
         if checked.problem:
             log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
                       f"keeping original untouched")

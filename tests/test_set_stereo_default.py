@@ -1339,15 +1339,57 @@ REMUXED_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 0, "eac3", 6
         "original duration unknown", "remux duration unknown"])
 def test_verify_remux_rejects_a_remux_much_shorter_than_the_original(fake_ffprobe, before, after,
                                                                      rejected):
+    """A much shorter remux means the original is damaged: a problem with
+    the original, not the remux, so it's marked as such."""
     fake_ffprobe[REMUX] = (REMUXED_LAYOUT, after)
 
-    problem = ssd.verify_remux(plan_to_check(before)).problem
+    checked = ssd.verify_remux(plan_to_check(before))
 
     if rejected:
-        assert problem == (f"duration dropped from {before:.1f}s to {after:.1f}s; "
-                           f"the original may be incomplete")
+        assert checked.damaged
+        assert checked.problem.startswith(f"only {ssd._clock(after)} of this {ssd._clock(before)} video "
+                                          f"could be read, so the file seems to be damaged")
     else:
-        assert problem is None
+        assert checked == ssd.Verification()
+
+
+def test_a_damaged_original_is_reported_before_anything_else_wrong(fake_ffprobe):
+    """A damaged original can make its remux wrong in other ways too, e.g.
+    with a stream whose data was all in the unreadable part missing.
+    Replacing the file is what fixes all of it, so that's what's said."""
+    fake_ffprobe[REMUX] = (REMUXED_LAYOUT[:-1], 600.0)
+
+    checked = ssd.verify_remux(plan_to_check(2400.0))
+
+    assert checked.damaged
+    assert checked.problem.startswith("only 10:00 of this 40:00 video could be read")
+
+
+@pytest.mark.parametrize("seconds, shown", [
+    (0.4, "0:00"), (24.9, "0:24"), (581.6, "9:41"), (2512.0, "41:52"), (3599.9, "59:59"),
+    (3600.0, "1:00:00"), (3725.5, "1:02:05"), (36000.0, "10:00:00"),
+], ids=["under a second", "seconds", "minutes", "the log's file", "just under an hour",
+        "an hour", "hours", "ten hours"])
+def test_clock_shows_a_time_as_a_player_does(seconds, shown):
+    assert ssd._clock(seconds) == shown
+
+
+def test_a_damaged_original_is_logged_in_plain_words(remux, caplog, monkeypatch):
+    """Not as a failed check: the line says what was found, what it means
+    and what to do, and the file and its temp file are dealt with as for
+    any rejected remux."""
+    apply, video, _ = remux
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification(
+        "only 9:41 of this 41:52 video could be read, so the file seems to be damaged", damaged=True))
+
+    assert apply() is False
+
+    assert f"{video.name}: only 9:41 of this 41:52 video could be read, so the file seems to be damaged." \
+        in caplog.text
+    assert "post-remux check failed" not in caplog.text
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert not list(video.parent.glob("*.bak*"))
 
 
 def test_a_changed_file_is_probed_once_and_its_remux_once(tmp_path, monkeypatch):
