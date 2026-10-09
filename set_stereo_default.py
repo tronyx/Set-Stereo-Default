@@ -1365,11 +1365,12 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = Non
     (already logged). The check's warnings (see verify_remux()) are only
     logged once the remux has replaced the original, so a rejected remux
     never warns about a file it didn't change. A damaged original (see
-    _damage_problem()) is logged in its own plain words, since it's the
-    one problem a user can fix, and listed again at the end of the run (see
-    report_failed_files()); any other is logged as a failed check. So are
-    the two other failures with a fix of their own, a file another program
-    has open and one it changed meanwhile (see _note_failure()).
+    _damage_problem()) is logged in its own plain words, and any other
+    rejected remux as a failed check. The failures with a fix of their own
+    (a damaged original, a file another program has open, and one it
+    changed meanwhile) are recorded with that reason (see _note_failure()),
+    to be listed under what to do about them at the end of the run (see
+    report_failed_files()).
 
     tool_warnings is the line about the remux tool's warnings (see
     _remux_and_swap()), logged before the result: once the check has run,
