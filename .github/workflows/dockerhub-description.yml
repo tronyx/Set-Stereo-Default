@@ -1,0 +1,42 @@
+name: Docker Hub description
+
+# Publishes the README as the image's description on Docker Hub whenever a
+# release changes it. Docker Hub shows one description for every tag, so it
+# follows master, which "latest" is built from. Its relative links (docs/...)
+# are made absolute, to master's files on GitHub, since they'd be broken on
+# Docker Hub otherwise.
+#
+# Needs a repository secret of its own, DOCKERHUB_DESCRIPTION_TOKEN: a Docker
+# Hub personal access token with Read, Write & Delete access, which updating a
+# description requires. It's kept apart from DOCKERHUB_TOKEN, which the image
+# jobs in tests.yml use with Read & Write only, so that wider access is only
+# ever handed to the one pinned action below.
+on:
+  push:
+    branches: [master]
+    paths:
+      - README.md
+      - .github/workflows/dockerhub-description.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  description:
+    name: Update the Docker Hub description
+    # A manual run starts on the default branch, develop, unless master is
+    # picked; develop's README and links mustn't end up on Docker Hub.
+    if: github.repository == 'tronyx/Set-Stereo-Default' && github.ref_name == 'master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN }}
+          repository: tronyx/set-stereo-default
+          short-description: Make the stereo track play by default across your video library, without re-encoding.
+          enable-url-completion: true
