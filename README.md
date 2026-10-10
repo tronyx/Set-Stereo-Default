@@ -132,7 +132,7 @@ Every change is tested on Linux, macOS and Windows, against ffmpeg versions from
 
 ## 🤝 Contributing
 
-Bug reports, ideas and pull requests are welcome; see the [contributing guide](.github/CONTRIBUTING.md). The [changelog](CHANGELOG.md) lists what's changed in each release.
+Bug reports, ideas and pull requests are welcome; see the [contributing guide](.github/CONTRIBUTING.md). To report a security vulnerability, please see the [security policy](.github/SECURITY.md) instead of opening an issue. The [changelog](CHANGELOG.md) lists what's changed in each release.
 
 ## 🤖 A note on how this was built
 

@@ -1563,7 +1563,10 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     the file's name is already near its length limit (255 characters on
     most), is reported, and the file left alone. The temp file is removed
     whatever stops the remux: a failure, a stop (Ctrl+C, SIGTERM) or an
-    unexpected error. Until check_and_swap_in() has checked it, the
+    unexpected error. One try covers everything from starting the remux to
+    swapping it in, check_and_swap_in() included, since a stop can land
+    between any two lines: also after the remux has finished, before the
+    check has started. Until check_and_swap_in() has checked it, the
     original isn't touched."""
     path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
     if opts.dry_run:
@@ -1579,26 +1582,26 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
 
     try:
         returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)
+        with_warnings = returncode == warnings_exit and not _cancelled.is_set()
+        if (returncode != 0 and not with_warnings) or not tmp_path.exists():
+            if _cancelled.is_set():
+                log.info(f"    {path.name}: cancelled")
+            else:
+                log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
+            tmp_path.unlink(missing_ok=True)
+            return False
+
+        tool_warnings = None
+        if with_warnings:
+            warnings = _collapse_repeats([_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
+                                          for line in output.splitlines() if "warning" in line.lower()])
+            tool_warnings = (f"    {path.name}: {tool} finished with warnings: "
+                             + ("; ".join(warnings) or output.strip() or "(no details given)"))
+
+        return check_and_swap_in(plan, opts, tool_warnings)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
-    with_warnings = returncode == warnings_exit and not _cancelled.is_set()
-    if (returncode != 0 and not with_warnings) or not tmp_path.exists():
-        if _cancelled.is_set():
-            log.info(f"    {path.name}: cancelled")
-        else:
-            log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
-        tmp_path.unlink(missing_ok=True)
-        return False
-
-    tool_warnings = None
-    if with_warnings:
-        warnings = _collapse_repeats([_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
-                                      for line in output.splitlines() if "warning" in line.lower()])
-        tool_warnings = (f"    {path.name}: {tool} finished with warnings: "
-                         + ("; ".join(warnings) or output.strip() or "(no details given)"))
-
-    return check_and_swap_in(plan, opts, tool_warnings)
 
 
 def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
