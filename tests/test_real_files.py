@@ -497,7 +497,7 @@ written two ways."""
 
 COMMENTARY_NAME = re.compile(r"commentary|audio[ -]?description|descriptive|described|\bdvs\b",
                              re.IGNORECASE)
-"""The names the README says mark a commentary or audio-description track."""
+"""The names docs/how-it-works.md says mark a commentary or audio-description track."""
 
 RANDOM_EXTS = [".mkv", ".mp4", ".m4v", ".mov"]
 """The containers random layouts are made in: one remuxed with mkvmerge,
@@ -596,12 +596,12 @@ def make_random_video(folder, ext, rng):
 
 
 def expected_outcome(path):
-    """What the README's "Picking the track" rules say should happen to the
-    file at path, worked out from what ffprobe reads back: ("changed",
-    position of the stereo track among the audio tracks), ("unchanged",
-    position) if it's already the only default, or ("skipped", None). A
-    restatement of the rules, independent of the script, so the two can
-    disagree."""
+    """What the "Picking the track" rules in docs/how-it-works.md say should
+    happen to the file at path, worked out from what ffprobe reads back:
+    ("changed", position of the stereo track among the audio tracks),
+    ("unchanged", position) if it's already the only default, or
+    ("skipped", None). A restatement of the rules, independent of the
+    script, so the two can disagree."""
     def language(tags):
         code = tags.get("language", "").lower().split("-")[0]
         return SAME_LANGUAGE.get(code, code)
@@ -632,7 +632,7 @@ def expected_outcome(path):
                          ids=[f"seed={FUZZ_SEED}-{i}" for i in range(FUZZ_CASES)])
 def test_a_random_layout_is_fixed_or_left_alone(tmp_path, case):
     """A file with a layout nobody wrote a test for. Whatever it holds, the
-    script must do what the README's rules say (see expected_outcome()):
+    script must do what the docs' rules say (see expected_outcome()):
     change exactly the right track's default flag and nothing else, or
     leave the file byte for byte as it was. With mkvmerge 52 or older,
     which drops the commentary and audio-description flags, an MKV that

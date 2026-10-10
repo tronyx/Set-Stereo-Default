@@ -81,7 +81,7 @@ preview every change:
 Exit codes: 0 all done, 1 a file had an error, no files matched or a tool is
 missing, 2 invalid options, 130 stopped by Ctrl+C, 143 stopped by SIGTERM.
 
-Full guide: https://github.com/tronyx/Set-Stereo-Default
+Full guide: https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/README.md
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report this! Many surprises, such as a file being skipped, are explained in the [Troubleshooting](https://github.com/tronyx/Set-Stereo-Default#-troubleshooting) section of the README, so please check there first.
+        Thanks for taking the time to report this! Many surprises, such as a file being skipped, are explained in the [Troubleshooting](https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/troubleshooting.md) guide, so please check there first.
 
   - type: checkboxes
     id: checks

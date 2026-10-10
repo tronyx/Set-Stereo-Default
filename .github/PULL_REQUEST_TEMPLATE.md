@@ -5,7 +5,7 @@
 
 - [ ] I've read the [contributing guide](https://github.com/tronyx/Set-Stereo-Default/blob/develop/.github/CONTRIBUTING.md) and this whole template.
 - [ ] This pull request makes one change.
-- [ ] I've documented my change in docstrings (no `#` comments), and updated the README if needed.
+- [ ] I've documented my change in docstrings (no `#` comments), and updated the README or `docs/` if needed.
 - [ ] I've added a line about my change under **Unreleased** in `CHANGELOG.md`.
 - [ ] I've tested my change and added or updated tests for it.
 - [ ] `python -m ruff check .` and `python -m mypy` pass.
@@ -25,7 +25,7 @@
 
 ## 📝 Documentation changes
 
-*List any changes needed in the README or elsewhere, or write "None".*
+*List any changes needed in the README, `docs/` or elsewhere, or write "None".*
 
 ---
 
