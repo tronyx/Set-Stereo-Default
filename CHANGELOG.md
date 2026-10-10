@@ -9,6 +9,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 ### Project
 
 - The README is down from about 6,500 words to 1,400: what the script does, a quick start with Docker and with Python, the six most common options, and what to know before a first run over a whole library (hard links and seeding break, and the disk space it needs). Everything else moved, as it was, to pages in [`docs/`](docs/README.md): installation, usage with every option, Docker, how the script works, troubleshooting, and how it's tested. The README links to each page. `--help`, the bug report form and the issue page's "Read the guide" link point to the docs too. The README's badges now show tests and coverage for `master` only.
+- A new test checks that every link in the README, the docs, the changelog and the files in `.github` leads somewhere: to a file that exists and, for a link to a heading, to a heading that's there, worked out the way GitHub makes a heading's anchor (checked against the anchors on this project's own page). Links to this repository's files on GitHub, as in the issue forms and `--help`, are checked against the files here too. So moving or renaming a page, or rewording a heading, can't quietly break the links to it. It runs with the logic tests, on every platform and in the Docker image, and needs nothing extra.
 
 ## 2026-10-08 · [#18](https://github.com/tronyx/Set-Stereo-Default/pull/18)
 
