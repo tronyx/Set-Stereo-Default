@@ -4,6 +4,8 @@ Thanks for wanting to help! Bug reports, ideas and pull requests are all welcome
 
 ## 🐛 Reporting a bug
 
+Found a security vulnerability? Please don't open an issue: see the [security policy](SECURITY.md).
+
 [Open a bug report](https://github.com/tronyx/Set-Stereo-Default/issues/new?template=bug_report.yml). The form asks for:
 
 - The command you ran and what it printed (`--dry-run` output is ideal).
