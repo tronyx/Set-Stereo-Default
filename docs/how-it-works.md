@@ -4,75 +4,75 @@
 
 ## 🎯 Picking the track
 
-The script looks for the audio track with exactly 2 channels and makes it the default, clearing the default flag from every other audio track. Two kinds of stereo track are passed over:
+The script looks for the audio track that has exactly 2 channels (a stereo track). It makes this track the default track, and it removes the default flag (a marker on a track) from all other audio tracks. The script does not pick two types of stereo track:
 
-- **Commentary and audio description.** These are often stereo but shouldn't play by default. A track counts as one if the file flags it that way, or if its name contains "commentary", "audio description", "descriptive", "described" or "DVS".
-- **Other languages.** The stereo track has to be in the same language as the track that plays by default now, so an English 5.1 film with a Spanish stereo dub keeps playing in English. Tracks with no language tag (or `und`) match any language, but a track tagged with the right language wins over them.
+- Commentary tracks and audio-description tracks (a voice that describes the picture). These tracks are often stereo, but they must not play by default. A track is of this type if it has the commentary flag or the audio-description flag. It is also of this type if its name contains "commentary", "audio description", "descriptive", "described", or "DVS".
+- Stereo tracks in other languages. The stereo track must be in the same language as the track that plays by default now. So an English 5.1 film with a Spanish stereo dub (a translated soundtrack) continues to play in English. A track without a language tag, or with the tag `und`, matches all languages. But a track with the correct language tag has priority over such a track.
 
-  `--prefer-lang` picks a language to use whenever a file has a stereo track in it. Files without one are handled as if you hadn't given it, so you can run it over a whole mixed library: with `--prefer-lang en`, an anime with an English stereo dub switches to English, while a French film with only a French stereo track still gets its French stereo track. The file's line says when that happened:
+  `--prefer-lang` sets a language to use when a file has a stereo track in that language. The script handles other files as if you did not give `--prefer-lang`. So you can use it on a library with many languages. For example, with `--prefer-lang en`, an anime with an English stereo dub changes to English. A French film with only a French stereo track still gets its French stereo track. When the script cannot use the `--prefer-lang` language, the line for the file says so:
 
   ```text
   Le Film (2024).mkv: setting stream#2 (fre, aac) as default audio (no 2-channel track in 'en', so picked as if --prefer-lang wasn't given)
   ```
 
-  Language tags are compared by meaning, not spelling. The same language can be tagged several ways (MKV files use `ger` for German, MP4 files often `deu`, and you might type `de`), so two- and three-letter codes are treated as equal, and region parts like the `-BR` in `pt-BR` are ignored.
+  The script compares language tags by their meaning, not by their spelling. A language can have different tags. For example, MKV files use `ger` for German, MP4 files often use `deu`, and you can type `de`. So the script treats the two-letter code and the three-letter codes of a language as equal. It also ignores region parts, such as the `-BR` in `pt-BR`.
 
-A file is **skipped** (and counted under `Skipped` in the summary) when:
+The script skips a file, and counts it under `Skipped` in the summary, in these cases:
 
-- It has no audio at all.
-- It has no stereo track, or only commentary/audio-description ones.
-- None of its stereo tracks is in the `--prefer-lang` language or the current one.
-- Several stereo tracks qualify and `--prefer-lang` doesn't settle it (several in the `--prefer-lang` language skip the file, rather than falling back to another language).
-- It's an `.avi` file and `--avi-reorder` wasn't given.
+- The file has no audio.
+- The file has no stereo track, or only commentary or audio-description stereo tracks.
+- No stereo track is in the `--prefer-lang` language or in the language of the current default track.
+- Several stereo tracks are possible, and `--prefer-lang` does not pick one of them. If several stereo tracks are in the `--prefer-lang` language, the script skips the file. It does not use another language instead.
+- The file is an `.avi` file, and you did not give `--avi-reorder`.
 
 ## 🧩 Changing the file
 
-Every change is a **remux**: the audio and video are copied as-is into a new file with the flags fixed. That new file is checked before it replaces the original:
+Each change is a remux. The script copies the audio and video without changes into a new file, with the correct flags. Before the new file replaces the original, the script tests it. The new file passes the tests only if:
 
-- every stream must still be there, with the same codec, language, name and flags (except an MP4 or MOV chapter track, which ffmpeg writes afresh: there must just still be one);
-- the right track must be the default;
-- it mustn't be noticeably shorter than the original.
+- All streams (the tracks in the file) are still there, with the same codec (data format), language, name, and flags. A chapter track in an MP4 or MOV file is an exception. Because ffmpeg writes a new chapter track, the file must only still have a chapter track.
+- The correct track is the default track.
+- The new file is not noticeably shorter than the original.
 
-If the check fails, the original is kept and the file is counted as an `Error`. The one exception is a flag such as "commentary" in an MP4, MOV or AVI file: ffmpeg can't write those flags to these formats at all, so losing one is a warning rather than an error (see [Troubleshooting](troubleshooting.md)).
+If a test fails, the script keeps the original and counts the file as an `Error`. There is one exception: a flag such as "commentary" in an MP4, MOV, or AVI file. ffmpeg cannot write these flags to these formats. So if the new file loses such a flag, the script shows a warning, not an error (see [Troubleshooting](troubleshooting.md)).
 
-The new file also isn't used if the original changed while it was being made, for example because Sonarr or Radarr imported an upgrade over it. Swapping it in would undo that change, so the file is left as it is now and counted as an `Error`; the next run fixes the new version.
+The script also does not use the new file if the original changed during the remux. For example, Sonarr or Radarr can import an upgrade (a better version of the video) over the original. The new file does not have this change. So the script leaves the file as it is and counts it as an `Error`. The next run fixes the new version.
 
 > [!NOTE]
-> A remux that comes out more than 1% shorter than the original (and at least 1 second shorter) is rejected. The tools copy everything they can read, so that almost always means the original is damaged, usually an incomplete download. The file is left alone so you can check it, and is reported as an `Error` on every run until it's replaced.
+> The script rejects a new file if it is more than 1% shorter than the original and at least 1 second shorter. The tools copy all the data that they can read. So a shorter file almost always means that the original is damaged, usually because the download is incomplete. The script does not change the file, so you can examine it. Each run reports the file as an `Error` until the file is replaced.
 
-| Format | How it's changed |
+| Format | How the script changes it |
 | --- | --- |
-| `.mkv` `.webm` | Remuxed with `mkvmerge`. The script doesn't edit the file in place, because in-place edits can move the track list to the end of the file, which breaks Windows Explorer thumbnails even though the video plays fine. |
-| `.mp4` `.m4v` `.mov` | Remuxed with `ffmpeg`, with the file's index kept at the front where thumbnailers expect it (`-movflags +faststart`). The chapter track is written afresh from the file's chapters rather than copied. |
-| `.avi` | AVI has no "default track" flag. With `--avi-reorder`, the stereo track is moved to the front instead, which most players treat the same way. Without it, AVI files are skipped. |
+| `.mkv` `.webm` | The script remuxes these files with `mkvmerge`. It does not edit the file in place (change the original file directly). An edit in place can move the track list to the end of the file. Then Windows Explorer cannot show a thumbnail, but the video still plays correctly. |
+| `.mp4` `.m4v` `.mov` | The script remuxes these files with `ffmpeg`. It keeps the index of the file at the start, where thumbnail programs look for it (`-movflags +faststart`). ffmpeg makes a new chapter track from the chapters of the file. It does not copy the old chapter track. |
+| `.avi` | AVI files have no "default track" flag. With `--avi-reorder`, the script moves the stereo track to the front instead. Most players use the first track in the same way as a default track. Without `--avi-reorder`, the script skips AVI files. |
 
 ## 🛟 Backups
 
-With `--backup`, each original is kept next to the new file as `<name>.bak`. If some files already have a `.bak` (from an earlier run, say), you're asked once, before any file is changed:
+With `--backup`, the script keeps each original file next to the new file, as `<name>.bak`. If some files already have a `.bak` file, for example from an earlier run, the script asks you once, before it changes any file:
 
 ```text
 3 file(s) already have a backup. If they're changed: [d]elete and replace the old backup, [n]umber the new one (.bak.1, .bak.2...), or [q]uit?
 ```
 
-The question comes before any file is checked, so the count can include files that turn out to be correct already. Those are left alone whatever you answer; it only matters for files that get changed.
+The script asks the question before it examines the files. So the count can include files that are already correct. The script does not change these files, whatever your answer is. The answer applies only to the files that the script changes.
 
-- **d** replaces each existing `<name>.bak` with the new backup.
-- **n** keeps every existing backup and saves the new one as the first free `<name>.bak.1`, `<name>.bak.2`, ...
-- **q** stops without changing anything.
+- `d` replaces each existing `<name>.bak` with the new backup.
+- `n` keeps all existing backups. It saves the new backup with the first free number: `<name>.bak.1`, `<name>.bak.2`, and so on.
+- `q` stops the script before it changes any file.
 
-To skip the question, pass `--existing-backups replace` or `--existing-backups number`. When there's no one to ask (cron, Docker without `-it`, Windows Task Scheduler, or input or output redirected), new backups are numbered, since that never deletes anything. The same happens if the question gets no answer at all (Ctrl+D).
+To prevent the question, give `--existing-backups replace` or `--existing-backups number`. If the script cannot ask you, it gives a number to each new backup, because numbered backups never delete anything. The script cannot ask you when it runs from cron, Windows Task Scheduler, or Docker without `-it`. It also cannot ask you when its input or output is redirected (connected to a file or a pipe). The script also uses numbers when the question gets no answer (Ctrl+D).
 
 ## 🪢 Symlinks
 
-A symlinked video is fixed through its link: the script changes the file the link points to, and the link keeps working. (Replacing the link itself would turn it into a separate copy and leave the real file unfixed.) A file reached through several links, or passed more than once, is only processed once. Use `--skip-symlinks` to leave linked files alone.
+If a video is a symlink (a link to another file), the script fixes the file that the link points to. The link continues to work. The script does not replace the link itself, because the link then becomes a separate copy and the real file stays incorrect. The script processes a file only once, also when several links point to it or when you give it more than once. To leave linked files unchanged, use `--skip-symlinks`.
 
-Symlinked subfolders aren't searched unless you add `--follow-symlinks`; each one that's skipped is logged. Folders you name on the command line are always searched, even if they're symlinks themselves. With `--follow-symlinks`, a link that loops back on itself is only searched once.
+The script does not search subfolders that are symlinks, unless you add `--follow-symlinks`. The script writes a log line for each subfolder that it skips. It always searches the folders that you name on the command line, also when they are symlinks. With `--follow-symlinks`, the script searches a link that makes a loop only one time.
 
 ## 🔐 Permissions and ownership
 
-A remux creates a brand-new file, so the script copies the original's permissions and owner onto it. That way tools that share your media through a group (Sonarr, Radarr, Plex, other containers) keep access to it. If the new file already has the right owner, it's left as it is.
+A remux makes a new file. So the script copies the permissions and the owner of the original to the new file. Then the tools that share your media through a group (Sonarr, Radarr, Plex, or other containers) keep access to it. If the new file already has the correct owner, the script does not change it.
 
-Changing a file's owner requires root. If the script can't do it, the permissions are still copied, and one warning at the end of the run, just before the summary, says how many files are affected, where the full list is, and which owner they should have:
+Only root can change the owner of a file. If the script cannot change the owner, it still copies the permissions. At the end of the run, before the summary, one warning tells you about these files. It gives the number of files, the location of the full list, and the correct owner:
 
 ```text
 Couldn't give 5 remuxed files their original owner (Operation not permitted). You can view the full list of files here: /home/tronyx/set_stereo_default-owners-20261002-153012-48213.log
@@ -80,41 +80,49 @@ Couldn't give 5 remuxed files their original owner (Operation not permitted). Yo
 These files should belong to tronyx:users (1000:100) but belong to nobody:nogroup (65534:65534). Permissions were still copied. ...
 ```
 
-The list has one full path per line, sorted. It's saved next to your `--log-file` if you use one, otherwise in the folder you ran the script from (or your system's temp folder if that one isn't writable). Its name has the date, time and the script's process ID, so each run gets its own list and an earlier one is never overwritten. If only one file is affected, the warning names it instead.
+The list has one full path on each line, in sorted order. If you use `--log-file`, the script saves the list next to the log. If not, it saves the list in the folder where you started the script. If the script cannot write to that folder, it uses the temporary folder of your system.
+
+The name of the list has the date, the time, and the process ID of the script. So each run makes a new list and never writes over an earlier list. If only one file has this problem, the warning gives its name instead of a list.
 
 > [!IMPORTANT]
-> **On an NFS share, run the script as the user that owns your media, not as root.** NFS servers usually turn root into `nobody` ("root squashing"), so files the script creates as root end up owned by `nobody`, and root can't change that from the client. The tools that manage your media may then be unable to rename or replace those files. Running as the media's owner avoids it, because NFS keeps that user's ID:
+> On an NFS share, run the script as the user that owns your media, not as root. NFS servers usually change root into the user `nobody` ("root squashing"). So the files that the script makes as root belong to `nobody`. Root cannot change this from the client (the computer that uses the share). Then the tools that manage your media can fail to rename or replace these files. If you run the script as the owner of the media, this problem does not occur, because NFS keeps the ID of that user:
 >
 > ```bash
 > sudo -u tronyx python3 set_stereo_default.py /mnt/media
 > ```
 >
-> The warning suggests the right `sudo -u` for your files. In the Docker image, it suggests the matching `docker run --user` instead (see [Docker](docker.md)). To fix files that already ended up owned by `nobody`, run `chown` on the NFS server itself, where root isn't squashed.
+> The warning shows the correct `sudo -u` for your files. In the Docker image, it shows the matching `docker run --user` instead (see [Docker](docker.md)). If some files already belong to `nobody`, run `chown` on the NFS server. On the server, root is not squashed.
 
 ## 📅 File dates
 
-By default, a changed file gets the time of the run as its modification date, like any newly written file. Some media servers and players sort "recently added" or "recently modified" by that date, so fixed files can jump to the top of those lists.
+By default, a changed file gets the time of the run as its modification date, as each new file does. Some media servers and players use this date to sort their "recently added" or "recently modified" lists. So the fixed files can move to the top of these lists.
 
-With `--keep-dates`, each changed file gets the original's modification and access dates instead. It's off by default for a reason: tools that decide whether a file changed by comparing its size and date (rsync's default, and some backup software) could skip a fixed file whose size happens to come out the same, leaving your backup copy with the old version. If you use one, keep the default or make it compare file contents (`rsync --checksum`).
+With `--keep-dates`, each changed file gets the modification date and the access date of the original instead. This option is off by default because some tools find changed files by their size and date. Examples are rsync with its default configuration, and some backup software. If a fixed file has the same size as before, these tools can skip it. Then your backup copy keeps the old version. If you use such a tool, keep the default, or set the tool to compare the contents of files (`rsync --checksum`).
 
 > [!NOTE]
-> Some dates can't be kept either way: the "changed" time (ctime) on Linux and macOS always updates, and on Windows a file's "Date created" becomes the time of the run.
+> The script cannot keep some dates, with or without `--keep-dates`. On Linux and macOS, the "changed" time (ctime) always updates. On Windows, the "Date created" of a file becomes the time of the run.
 
 ## 🧹 Leftover temp files
 
-Ctrl+C and SIGTERM (what `docker stop`, `kill` and systemd send) stop the script cleanly: running remuxes are killed, their temp files are removed, and finished files are untouched. The partial summary counts every file that didn't finish as `Cancelled`.
+Ctrl+C and SIGTERM (the signal that `docker stop`, `kill`, and systemd send) stop the script safely. The script stops the running remuxes and deletes their temporary files. It does not touch the files that are finished. The partial summary counts each file that did not finish as `Cancelled`.
 
-If the script is killed outright instead (`kill -9`, a power cut, a container that doesn't stop in time), a `<name>.tmp_remux.<ext>` file can be left next to the original, or a `<name>.bak.tmp_remux.<ext>` one if it was making a backup. The next run skips these with a warning. They're safe to delete, since the original is only ever replaced by a finished, checked file, and a backup only takes its real name once it's complete.
+Sometimes the script stops without time to clean up. Examples are `kill -9`, a power failure, or a container that does not stop in time. Then a `<name>.tmp_remux.<ext>` file can stay next to the original. If the script was making a backup, a `<name>.bak.tmp_remux.<ext>` file can stay instead. The next run skips these files and shows a warning.
+
+You can safely delete these files. Only a finished file that passed all the tests replaces the original. A backup gets its real name only when it is complete.
 
 ## ⚠️ Limitations
 
 > [!CAUTION]
-> Both of these come from the same thing: every change replaces the original with a new file.
+> Both limitations have the same cause: each change replaces the original with a new file.
 
 ### 🔗 Hard links will be broken
 
-If another path is hard-linked to the original (a common Sonarr/Radarr/qBittorrent setup, linking a download folder to a library folder), that path keeps pointing at the old, unfixed file, and the two no longer share disk space. If you rely on hard links, run this script *before* linking, or re-link the affected files afterwards. (Symlinks don't have this problem; see [Symlinks](#-symlinks).)
+A hard link is a second name for the same file. Sonarr, Radarr, and qBittorrent often use hard links to connect a download folder to a library folder. If another path is a hard link to the original, that path continues to point to the old, unfixed file. The two paths then do not share disk space any more.
+
+If you use hard links, run this script before you make the links. Or make the links again after the script runs. Symlinks do not have this problem (see [Symlinks](#-symlinks)).
 
 ### 🌱 Seeding and cross-seeding will break
 
-Even though nothing is re-encoded, the remuxed file's bytes are different, so it no longer matches the torrent's piece hashes. Any torrent seeding that file, including cross-seeds sharing it through a hard link, will fail its hash check. Don't run this on files you're seeding unless you're ready to re-download or re-check them, and check your private trackers' rules first, since a failed hash check can look like a hit-and-run.
+The script does not re-encode the file (convert the audio or video to a new format). But the bytes of the remuxed file are different. So the file does not match the piece hashes (checksums) of the torrent any more. Each torrent that seeds (shares) this file will fail its hash check. This includes cross-seeds that share the file through a hard link.
+
+Do not run this script on files that you seed, unless you are ready to download them again or re-check them. Before you do this, read the rules of your private trackers. A failed hash check can look like a hit-and-run (a download without the required seeding).

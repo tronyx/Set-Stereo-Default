@@ -15,13 +15,13 @@ python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
 python3 set_stereo_default.py "/path/to/videos"
 ```
 
-Folders are searched recursively. You can also pass individual files, or a mix of files and folders. They're processed in the order you give them, each folder's files in alphabetical order, so you can put the shows you care about most first. A path that doesn't exist, such as a mistyped one, is reported (`Skipping /path/to/vidoes: no such file or directory`) and the rest still run.
+The script searches each folder and its subfolders. You can also give it individual files, or files and folders together. The script processes the paths in the order that you give them, and the files of each folder in alphabetical order. So you can put the shows that are most important to you first. If a path does not exist, for example because of a typing error, the script reports it (`Skipping /path/to/vidoes: no such file or directory`). Then the script continues with the other paths.
 
 On Windows, type `py` instead of `python3`.
 
 ## 📃 A list of folders
 
-To work through many shows or movies, list their folders in a text file, one per line, and pass it with `--input-file`:
+To process many shows or movies, write their folders in a text file, one folder on each line. Then give the file to the script with `--input-file`:
 
 ```text
 # Shows to fix this week
@@ -34,40 +34,41 @@ TV Shows/Cartoons
 python3 set_stereo_default.py --input-file shows.txt --dry-run
 ```
 
-The folders are processed in the list's order, after any paths on the command line. Each line can be:
+The script processes the folders in the order of the list, after the paths on the command line. Each line can be one of these:
 
-- a plain path, spaces and all;
-- a path quoted the way a shell or `ls` shows it, in single or double quotes (with `'\''` for an apostrophe) or with backslash-escaped spaces, so you can paste a listing straight from your terminal;
-- relative to the list file's folder, like `TV Shows/Cartoons` above, or starting with `~` for your home folder.
+- A plain path, with its spaces.
+- A path in quotes, as a shell or `ls` shows it. It can have single or double quotes (with `'\''` for an apostrophe), or a backslash before each space. So you can paste a list from your terminal.
+- A path relative to the folder of the list file, like `TV Shows/Cartoons` in the example.
+- A path that starts with `~` for your home folder.
 
-Blank lines and lines starting with `#` are skipped. A path that doesn't exist is reported and skipped, and the rest still run.
+The script skips empty lines and lines that start with `#`. If a path does not exist, the script reports it, skips it, and continues with the other paths.
 
-To pipe a list in instead, use `--input-file -`, e.g. `ls -d "/mnt/data/media/Videos/TV Shows/B"* | python3 set_stereo_default.py --input-file - --dry-run`. The [backup question](how-it-works.md#-backups) can't be asked then, so new backups are numbered.
+To send the list through a pipe (the output of one command sent to another) instead, use `--input-file -`. For example: `ls -d "/mnt/data/media/Videos/TV Shows/B"* | python3 set_stereo_default.py --input-file - --dry-run`. The script then cannot ask the [backup question](how-it-works.md#-backups), so it gives a number to each new backup.
 
 ## ⚙️ All options
 
 | Option | What it does |
 | --- | --- |
-| `--dry-run` | Show what would change without touching any files |
-| `--backup` | Keep each original as `<name>.bak`. Each backup takes as much space as the original (see [Disk space](installation.md#-disk-space)) |
-| `--existing-backups MODE` | With `--backup`, what to do when `<name>.bak` already exists: `replace` it, or `number` the new one (`.bak.1`, `.bak.2`, ...). Without this you're asked once (see [Backups](how-it-works.md#-backups)) |
-| `--prefer-lang LANG` | Language to use whenever a file has a stereo track in it, as a 2- or 3-letter code (`en`, `eng`, `de`, `ger` and `deu` all work). Also picks between several stereo tracks. Files without one are handled as usual, in the language of the track that plays by default now |
-| `--input-file FILE` | Also process the paths listed in `FILE`, one per line, in order; `-` reads them from a pipe (see [A list of folders](#-a-list-of-folders)) |
-| `--jobs N` | Work on up to `N` files at once (default: `1`) |
-| `--log-file PATH` | Write the details to a file. Warnings, errors, the progress bar and the summary still show on the console |
-| `--ext EXT1,EXT2` | Extensions to process (default: `mkv,webm,mp4,m4v,mov,avi`). This replaces the default list, so list every extension you want |
-| `--no-recursive` | Don't look inside subfolders |
-| `--skip-symlinks` | Skip symlinked files. By default, the file a link points to is fixed and the link keeps working |
-| `--follow-symlinks` | Also look inside symlinked subfolders. By default they're skipped (folders you name on the command line are always searched) |
+| `--dry-run` | Show the changes, but do not make them |
+| `--backup` | Keep each original file as `<name>.bak`. Each backup uses as much disk space as its original file (see [Disk space](installation.md#-disk-space)) |
+| `--existing-backups MODE` | With `--backup`, what to do when `<name>.bak` already exists. `replace` replaces it. `number` gives the new backup a number (`.bak.1`, `.bak.2`, and so on). Without this option, the script asks you once (see [Backups](how-it-works.md#-backups)) |
+| `--prefer-lang LANG` | The language to use when a file has a stereo track in it. Give a code of 2 or 3 letters: `en`, `eng`, `de`, `ger`, and `deu` all work. It also picks one of several stereo tracks. The script handles files without such a track as usual, in the language of the track that plays by default now |
+| `--input-file FILE` | Also process the paths that `FILE` lists, one path on each line, in that order. `-` reads them from a pipe (see [A list of folders](#-a-list-of-folders)) |
+| `--jobs N` | Process up to `N` files at the same time (default: `1`) |
+| `--log-file PATH` | Write the details to a file. The console still shows warnings, errors, the progress bar, and the summary |
+| `--ext EXT1,EXT2` | The file extensions to process (default: `mkv,webm,mp4,m4v,mov,avi`). This list replaces the default list, so include each extension that you want |
+| `--no-recursive` | Do not search subfolders |
+| `--skip-symlinks` | Skip the files that are symlinks (links to another file). By default, the script fixes the file that the link points to, and the link continues to work |
+| `--follow-symlinks` | Also search the subfolders that are symlinks. By default, the script skips them. It always searches the folders that you name on the command line |
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](how-it-works.md#-changing-the-file)) |
-| `--force` | Remux even files that are already correct, e.g. to restore thumbnails (see [Troubleshooting](troubleshooting.md)) |
-| `--keep-dates` | Give each changed file the original's modification date, so it doesn't look newly changed (see [File dates](how-it-works.md#-file-dates)) |
-| `--no-progress` | Hide the progress bars. They're already hidden when the output isn't a terminal (cron, `docker run` without `-t`, a pipe) |
+| `--force` | Also remux (copy the tracks into a new file) the files that are already correct, for example to restore their thumbnails (see [Troubleshooting](troubleshooting.md)) |
+| `--keep-dates` | Give each changed file the modification date of the original, so that the file does not look newly changed (see [File dates](how-it-works.md#-file-dates)) |
+| `--no-progress` | Hide the progress bars. The script already hides them when the output is not a terminal (cron, `docker run` without `-t`, or a pipe) |
 
 > [!TIP]
-> **Choosing `--jobs`:** the work is limited by disk speed, not CPU, so pick a number your storage can keep up with rather than your core count. Above `1`, you'll see only the overall progress bar. Lines from different files print as they happen, so when a file's line follows another file's, its `[i/N]` header is printed again first to show which file it belongs to.
+> The speed of your disks limits the work, not the CPU. So choose a value for `--jobs` that your disks can support. Do not use the number of CPU cores. With a value above `1`, you see only the overall progress bar. The lines from different files appear as they happen. When a line of one file follows a line of another file, the script prints the `[i/N]` header of the file again. The header shows which file the line is for.
 
-Run `python3 set_stereo_default.py --help` for the full built-in help.
+For the full help, run `python3 set_stereo_default.py --help`.
 
 ## 👀 Sample output
 
@@ -106,12 +107,12 @@ Skipped: 1
 Error: 0
 ```
 
-The top bar follows the file being remuxed, and the bottom one follows the whole batch. The batch count moves during each file rather than jumping when it finishes, which is why it shows fractions like `11.45/32`.
+The top bar shows the progress of the file that the script remuxes now. The bottom bar shows the progress of the full batch. The count of the batch increases during each file, not only when the file is done. For this reason, it shows fractions such as `11.45/32`.
 
 </details>
 
 <details>
-<summary>Several files at once (--jobs 5)</summary>
+<summary>Several files at the same time (--jobs 5)</summary>
 
 ```text
 $ python3 set_stereo_default.py "/path/to/videos/TV Shows/Awesome Show (2026)/Season 06" --jobs 5
@@ -129,7 +130,7 @@ Found 5 file(s).
 Processing:  27%|██████████████▊                                        | 1.35/5 [00:04<00:12,  3.56s/file]
 ```
 
-Files finish in whatever order they're done, so the `[i/N]` numbers aren't in sequence.
+With several jobs, the files can finish in any order, so the `[i/N]` numbers are not in sequence.
 
 </details>
 
@@ -153,7 +154,7 @@ Skipped: 0
 Error: 0
 ```
 
-Each `[dry-run]` line is the exact command the script would run, quoted so you can paste it into a shell.
+Each `[dry-run]` line shows the exact command that the script runs without `--dry-run`. The command has quotes, so you can paste it into a shell.
 
 </details>
 
@@ -161,10 +162,10 @@ Each `[dry-run]` line is the exact command the script would run, quoted so you c
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Finished with no errors, or you chose **q** at the [backup question](how-it-works.md#-backups) |
-| `1` | No matching files found, a required tool is missing, or at least one file ended up as an `Error` |
-| `2` | Invalid command-line options |
-| `130` | Stopped with Ctrl+C |
-| `143` | Stopped with SIGTERM |
+| `0` | The script finished with no errors, or you chose `q` at the [backup question](how-it-works.md#-backups) |
+| `1` | The script found no matching files, a required tool is missing, or at least one file ended as an `Error` |
+| `2` | The command-line options are not valid |
+| `130` | Ctrl+C stopped the script |
+| `143` | SIGTERM stopped the script |
 
-If you're running this from cron or another script, the exit code tells you whether anything went wrong. The printed summary has the details.
+If you run the script from cron or from another script, the exit code tells you whether a problem occurred. The summary that the script prints gives the details.

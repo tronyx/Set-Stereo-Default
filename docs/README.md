@@ -1,14 +1,14 @@
 # 📖 Documentation
 
-The [README](../README.md) covers what the script does and how to get started. These pages have everything else.
+The [README](../README.md) tells you what the script does and how to start. These pages have all the other information.
 
-| Page | What's in it |
+| Page | Contents |
 | --- | --- |
-| [📦 Installation](installation.md) | Requirements and the versions tested, installing on Linux, macOS and Windows, and the disk space it needs |
-| [🚀 Usage](usage.md) | Which files are processed and in what order, lists of folders, every option, sample output and exit codes |
-| [🐳 Docker](docker.md) | Mounting your videos, several folders, running as the files' owner, keeping the log, running on a schedule, and how the image is kept up to date |
-| [🔍 How it works](how-it-works.md) | How the track is picked, how a file is changed and checked, backups, symlinks, ownership, file dates, leftover temp files, and the limitations |
-| [🩺 Troubleshooting](troubleshooting.md) | What each message means, and what to do about it |
-| [🧪 How it's tested](testing.md) | The tests, and what GitHub runs on every change |
+| [📦 Installation](installation.md) | Requirements, the tested versions, installation on Linux, macOS, and Windows, and the disk space that the script needs |
+| [🚀 Usage](usage.md) | The files that the script processes and their order, lists of folders, all the options, sample output, and exit codes |
+| [🐳 Docker](docker.md) | Your videos in the container, several folders, file owners, the log, schedules, and image updates |
+| [🔍 How it works](how-it-works.md) | How the script picks the track and changes a file, backups, symlinks, file owners, file dates, temporary files, and limitations |
+| [🩺 Troubleshooting](troubleshooting.md) | What each message means, and what to do |
+| [🧪 How it is tested](testing.md) | The tests, and the tests that GitHub runs on each change |
 
-Contributing? See the [contributing guide](../.github/CONTRIBUTING.md). The [changelog](../CHANGELOG.md) lists what's changed in each release.
+To contribute, read the [contributing guide](../.github/CONTRIBUTING.md). The [changelog](../CHANGELOG.md) lists the changes in each release.

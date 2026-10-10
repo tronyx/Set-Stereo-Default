@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Project
+
+- The README and the pages in [`docs/`](docs/README.md) are rewritten in plain English, in the style of ASD-STE100 Simplified Technical English. The sentences are short and active, with no contractions. Each special term, for example remux or hard link, has a short definition at its first use. The bold labels on the Docker, troubleshooting, and testing pages are now headings, so GitHub shows a table of contents for these pages. On the troubleshooting page, each heading is the exact message from the script. The facts, the commands, the quoted messages, and the links did not change, and each heading that a link points to kept its anchor.
 
 ## 2026-10-10 · [#22](https://github.com/tronyx/Set-Stereo-Default/pull/22)
 
