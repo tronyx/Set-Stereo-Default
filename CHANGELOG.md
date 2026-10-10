@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-10 · [#22](https://github.com/tronyx/Set-Stereo-Default/pull/22)
+
 ### Project
 
 - A [security policy](.github/SECURITY.md) says how to report a vulnerability: privately, through GitHub's "Report a vulnerability" form, not in a public issue. It covers which versions are supported (the latest release), what's in scope for a script that changes files across a media library and sometimes runs as root, and what to expect in reply. The issue page, the bug report form, the contributing guide and the README point to it.
