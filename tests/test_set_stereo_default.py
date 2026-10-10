@@ -2211,6 +2211,60 @@ def test_a_file_that_cant_be_replaced_is_reported_and_left_alone(remux, monkeypa
     assert ssd._failed_files == {str(video): "in use"}
 
 
+def stop_at(function, line):
+    """A trace function that raises Stopped(SIGINT) the first time line of
+    function is about to run, as a Ctrl+C landing there would: the stop
+    handler raises wherever the main thread happens to be."""
+    def tracer(frame, event, arg):
+        if frame.f_code is function.__code__:
+            if event == "line" and frame.f_lineno == line:
+                raise ssd.Stopped(signal.SIGINT)
+            return tracer
+        return None
+    return tracer
+
+
+@pytest.mark.parametrize("apply, filename, result", [
+    (remux_with_mkvmerge, "v.mkv", (1, "#GUI#warning Warning: odd timestamps\n")),
+    (remux_with_ffmpeg, "v.mp4", (0, "")),
+], ids=["mkvmerge, with warnings", "ffmpeg"])
+@pytest.mark.parametrize("function", ["_remux_and_swap", "check_and_swap_in", "swap_in", "make_backup"])
+def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_temp_file(tmp_path, monkeypatch, apply, filename,
+                                                                          result, function):
+    """Ctrl+C or SIGTERM can land between any two lines, once the remux has
+    written its temp file as much as while it's being written. Wherever it
+    lands, from writing the remux to swapping it in with a backup, the temp
+    file and the backup's staging file must be gone afterwards, and the
+    original either untouched or replaced by the checked remux. Each line
+    of each function involved is tried in turn."""
+    code = getattr(ssd, function).__code__
+    lines = sorted({line for _, _, line in code.co_lines() if line is not None and line > code.co_firstlineno})
+
+    def remux(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        return result
+
+    monkeypatch.setattr(ssd, "run_with_progress", remux)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
+    reached = []
+    for line in lines:
+        folder = tmp_path / f"line{line}"
+        folder.mkdir()
+        video = folder / filename
+        video.write_bytes(b"original")
+        previous = sys.gettrace()
+        sys.settrace(stop_at(getattr(ssd, function), line))
+        try:
+            apply(video)
+        except KeyboardInterrupt:
+            reached.append(line)
+        finally:
+            sys.settrace(previous)
+        assert not leftover_temp_files(video), f"{function} line {line}: {leftover_temp_files(video)}"
+        assert video.read_bytes() in (b"original", b"remuxed"), f"{function} line {line}"
+    assert reached, f"no line of {function} was reached"
+
+
 def test_interrupted_remux_keeps_the_original(remux):
     apply, video, set_outcome = remux
     set_outcome("interrupt")
