@@ -6,6 +6,7 @@ to this repository's own files on GitHub, as in the issue forms and the
 script's --help, must name a file that exists here too. Pure Python, so
 it runs wherever the logic tests do."""
 
+import importlib.util
 import re
 import unicodedata
 from pathlib import Path
@@ -15,6 +16,25 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 """The repository's root folder."""
+
+
+def load_docs_to_wiki():
+    """.github/scripts/docs_to_wiki.py, which copies docs/ into the wiki, as a
+    module: it's a script, not part of a package."""
+    spec = importlib.util.spec_from_file_location("docs_to_wiki", ROOT / ".github" / "scripts" / "docs_to_wiki.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+docs_to_wiki = load_docs_to_wiki()
+"""The wiki sync script, whose output is checked below like the docs."""
+
+REPO = "https://github.com/tronyx/Set-Stereo-Default"
+"""This repository on GitHub."""
+
+BLOB = f"{REPO}/blob/master/"
+"""Where the wiki's links out of docs/ point: files on master."""
 
 REPO_URL = re.compile(r"https://github\.com/tronyx/Set-Stereo-Default/(?:blob|tree)/[^/\s]+/([^\s)\"'#]+)(#[^\s)\"']+)?")
 """A link to one of this repository's files on GitHub, on any branch: the
@@ -121,6 +141,85 @@ def test_every_link_in_the_docs_leads_somewhere():
     """A page moved or renamed, or a heading reworded, breaks the links to
     it without a word, so every link is followed here instead."""
     assert broken_links(ROOT) == []
+
+
+@pytest.mark.parametrize("target, expected", [
+    ("usage.md#%EF%B8%8F-all-options", "usage#%EF%B8%8F-all-options"),
+    ("./docker.md", "docker"),
+    ("README.md", "Home"),
+    ("../README.md", f"{BLOB}README.md"),
+    ("../.github/CONTRIBUTING.md#%EF%B8%8F-making-a-change",
+     f"{BLOB}.github/CONTRIBUTING.md#%EF%B8%8F-making-a-change"),
+    ("../tests/test_docs.py", f"{BLOB}tests/test_docs.py"),
+    ("#-backups", "#-backups"),
+    ("https://example.com/notes.md", "https://example.com/notes.md"),
+    ("images/shot.png", "images/shot.png"),
+], ids=["page with anchor", "page in this folder", "the index", "out of docs", "out of docs with anchor",
+        "not a page", "same page", "elsewhere", "image next to the pages"])
+def test_wiki_links_lead_where_the_docs_links_do(target, expected):
+    """A page link loses its .md, since wiki pages have none; the index is
+    the wiki's Home; a link out of docs/ goes to the file on GitHub, since
+    the wiki has no copy; the rest stay as they are."""
+    assert docs_to_wiki.wiki_target(target, "docs", BLOB) == expected
+
+
+def test_only_the_link_targets_change_in_a_wiki_page():
+    """Alerts, tables, code and every other byte come through exactly;
+    links in code are left alone."""
+    page = (
+        "# Title\n\n"
+        "> [!NOTE]\n> See [usage](usage.md#x) and [the log](../CHANGELOG.md \"what's new\").\n\n"
+        "| Page | Link |\n| --- | --- |\n| Home | [index](README.md) |\n\n"
+        "```text\n[not a link](usage.md)\n```\n\n"
+        "Inline `[code](docker.md)` stays, [ref][1] too.\n\n"
+        "[1]: docker.md#-docker\n"
+    )
+
+    assert docs_to_wiki.wiki_page(page, "docs", BLOB) == (
+        "# Title\n\n"
+        f"> [!NOTE]\n> See [usage](usage#x) and [the log]({BLOB}CHANGELOG.md \"what's new\").\n\n"
+        "| Page | Link |\n| --- | --- |\n| Home | [index](Home) |\n\n"
+        "```text\n[not a link](usage.md)\n```\n\n"
+        "Inline `[code](docker.md)` stays, [ref][1] too.\n\n"
+        "[1]: docker#-docker\n"
+    )
+
+
+def test_the_wiki_copy_of_the_docs_has_no_broken_links(tmp_path):
+    """The real docs/, as the wiki gets it: the index becomes Home, a page
+    no longer in docs/ is removed from the wiki but its .git is kept, every
+    page has the same text but for its link targets, and every link leads
+    to a wiki page and heading that exist, or to a file that exists here."""
+    wiki = tmp_path / "wiki"
+    (wiki / ".git").mkdir(parents=True)
+    (wiki / ".git" / "HEAD").write_text("ref: refs/heads/master\n", encoding="utf-8")
+    (wiki / "Old-page.md").write_text("# Gone from docs/\n", encoding="utf-8")
+
+    docs_to_wiki.sync(ROOT / "docs", wiki, REPO, "master")
+
+    pages = {p.name for p in wiki.glob("*.md")}
+    docs = {"Home.md" if p.name == "README.md" else p.name for p in (ROOT / "docs").glob("*.md")}
+    assert pages == docs | {"_Footer.md"}
+    assert (wiki / ".git" / "HEAD").exists()
+    problems = []
+    for source in sorted((ROOT / "docs").glob("*.md")):
+        copy = wiki / ("Home.md" if source.name == "README.md" else source.name)
+        text, original = copy.read_text(encoding="utf-8"), source.read_text(encoding="utf-8")
+        targets = re.compile(r"\]\(<?[^)\s>]+")
+        assert targets.sub("](", text) == targets.sub("](", original), f"{copy.name} changed beyond its links"
+        for link in re.findall(r"\]\(<?([^)\s>]+)", without_code(text)):
+            if link.startswith(BLOB):
+                path, _, anchor = link[len(BLOB):].partition("#")
+                why = problem_with(source, ROOT, "/" + path, anchor)
+            elif re.match(r"^[a-z][a-z+.-]*:", link):
+                continue
+            else:
+                page, _, anchor = link.partition("#")
+                why = problem_with(copy, wiki, (page + ".md") if page else "", anchor)
+            if why:
+                problems.append(f"{copy.name}: {link}: {why}")
+    assert problems == []
+    assert f"{REPO}/tree/master/docs" in (wiki / "_Footer.md").read_text(encoding="utf-8")
 
 
 def test_a_broken_link_is_found(tmp_path):
