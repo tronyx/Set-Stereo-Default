@@ -56,7 +56,7 @@ The `-v` option makes your video folder available inside the container at `/vide
 
 ### 🐍 With Python
 
-You must have Python 3.10 or newer and ffmpeg 4.4 or newer. For `.mkv` and `.webm` files, you must also have MKVToolNix 45 or newer. MKVToolNix 54 or newer is recommended. The [tqdm](https://github.com/tqdm/tqdm) package is optional. It shows the progress bars.
+You must have Python 3.10 or newer and ffmpeg 4.4 or newer. For `.mkv` and `.webm` files, you must also have MKVToolNix 45 or newer. MKVToolNix 58 or newer is recommended. The [tqdm](https://github.com/tqdm/tqdm) package is optional. It shows the progress bars.
 
 1. Download the script, and install tqdm:
 

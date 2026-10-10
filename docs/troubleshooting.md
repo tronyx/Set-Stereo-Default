@@ -25,7 +25,7 @@ In rare cases, the file plays to the end. Then no data is missing. Instead, the 
 
 ## `post-remux check failed (stream#N lost its ... flag; ...)`
 
-Your mkvmerge is too old to keep a flag (a marker on a track) that the file has, such as commentary or hearing impaired. So the script does not change the file. Update MKVToolNix to version 54 or newer. Then run the script again.
+Your mkvmerge is too old to keep a flag (a marker on a track) that the file has. Examples are the commentary flag, the hearing-impaired flag, and the default flag on a second subtitle track. So the script does not change the file. Update MKVToolNix to version 58 or newer. Then run the script again.
 
 A similar test rejects a remux that changed the codec or the language of a track, or that lost the name of a track.
 

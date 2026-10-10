@@ -408,6 +408,52 @@ def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type
     assert contents(video) == before
 
 
+def test_two_default_subtitle_tracks_both_keep_the_flag(tmp_path):
+    """Two subtitle tracks, both flagged default. mkvmerge 57 and older keep
+    the flag on only one track of each type, even when told to set it on
+    both, so the second subtitle track came out without it, and the script
+    used that remux anyway: it compared every flag but the default one.
+    With such an mkvmerge, the remux must be rejected and the file left
+    alone. With 58 or newer, both subtitle tracks must keep the flag.
+
+    ffmpeg 4.4 also writes the flag on only the first track of each type
+    unless -default_mode passthrough tells it to write the flags as given.
+    The test file is checked first, so an ffmpeg that wrote only one flag
+    can't make the test pass by having nothing to lose."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    srt = tmp_path / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHola\n", encoding="utf-8")
+    video = tmp_path / "two subtitles.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1",
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-i", str(srt), "-i", str(srt),
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s", "-map", "4:s",
+                    "-c:v", "mpeg4", "-c:a", "ac3", "-c:s", "srt",
+                    "-disposition:v:0", "default", "-disposition:a:0", "default", "-disposition:a:1", "0",
+                    "-disposition:s:0", "default", "-disposition:s:1", "default",
+                    "-metadata:s:s", "language=spa", "-default_mode", "passthrough", str(video)],
+                   check=True, capture_output=True, text=True)
+    before = contents(video)
+    assert [s["disposition"]["default"] for s in before["streams"] if s["type"] == "subtitle"] == [1, 1], before
+    original = digest(video)
+
+    code, output = run_script(video)
+
+    if mkvmerge_version() < 58:
+        assert code == 1, output
+        assert summary(output)["error"] == 1, output
+        assert "stream#4 lost its default flag" in output, output
+        assert digest(video) == original
+        assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+        return
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert contents(video) == before
+
+
 @pytest.mark.parametrize("ext", [".mkv", ".mp4"])
 def test_a_subtitle_between_audio_tracks_stays_where_it_was(tmp_path, ext):
     """Laid out like a real release: video, stereo AAC, a subtitle, then
@@ -628,24 +674,37 @@ def expected_outcome(path):
     return ("unchanged" if already else "changed"), position
 
 
+def old_mkvmerge_loses_a_flag(before):
+    """Whether the mkvmerge on PATH loses a flag when it remuxes an MKV file
+    with contents() before, so the script must reject the remux: 52 and
+    older drop the commentary and audio-description flags, and 57 and older
+    keep the default flag on only one subtitle or video track of each
+    type."""
+    version = mkvmerge_version()
+    if version < 54 and any(s["disposition"].get(flag) for s in before["streams"]
+                            for flag in ("comment", "visual_impaired")):
+        return True
+    defaults = [s["type"] for s in before["streams"] if s["type"] != "audio" and s["disposition"].get("default")]
+    return version < 58 and len(defaults) > len(set(defaults))
+
+
 @pytest.mark.parametrize("case", range(FUZZ_CASES),
                          ids=[f"seed={FUZZ_SEED}-{i}" for i in range(FUZZ_CASES)])
 def test_a_random_layout_is_fixed_or_left_alone(tmp_path, case):
     """A file with a layout nobody wrote a test for. Whatever it holds, the
     script must do what the docs' rules say (see expected_outcome()):
     change exactly the right track's default flag and nothing else, or
-    leave the file byte for byte as it was. With mkvmerge 52 or older,
-    which drops the commentary and audio-description flags, an MKV that
-    has one must be rejected and left alone instead. Replay a failing case
-    with SSD_FUZZ_SEED set to the seed in its ID."""
+    leave the file byte for byte as it was. With an mkvmerge that loses a
+    flag the file has (see old_mkvmerge_loses_a_flag()), an MKV must be
+    rejected and left alone instead. Replay a failing case with
+    SSD_FUZZ_SEED set to the seed in its ID."""
     need("ffmpeg", "ffprobe", "mkvmerge")
     rng = random.Random(f"{FUZZ_SEED}-{case}")
     ext = rng.choice(RANDOM_EXTS)
     video, layout = make_random_video(tmp_path, ext, rng)
     expected, position = expected_outcome(video)
     before, before_digest = contents(video), digest(video)
-    if expected == "changed" and ext == ".mkv" and mkvmerge_version() < 54 and any(
-            s["disposition"].get(flag) for s in before["streams"] for flag in ("comment", "visual_impaired")):
+    if expected == "changed" and ext == ".mkv" and old_mkvmerge_loses_a_flag(before):
         expected = "error"
 
     code, output = run_script(video)

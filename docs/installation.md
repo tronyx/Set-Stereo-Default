@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | [Python](https://www.python.org) | 3.10 or newer | Everything |
 | [ffmpeg and ffprobe](https://ffmpeg.org) | 4.4 or newer | Everything |
-| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | 45 or newer (54 or newer is recommended) | `.mkv` and `.webm` files |
+| [mkvmerge](https://mkvtoolnix.download) (part of MKVToolNix) | 45 or newer (58 or newer is recommended) | `.mkv` and `.webm` files |
 | [tqdm](https://github.com/tqdm/tqdm) | 4.60 or newer | Progress bars (optional) |
 
 The tests use ffmpeg 4.4, 5.1, 6.1, 7.1, and the newest release. They also use mkvmerge 45, 65, 74, 82, 92, and the newest release.
@@ -18,7 +18,9 @@ If you use Docker, you need only Docker. The image contains all of these tools. 
 > [!NOTE]
 > ffmpeg versions older than 4.4 cannot read the commentary flag and the audio-description flag (markers on a track) in MKV files. With these versions, the script can make a commentary track the default.
 >
-> When mkvmerge 52 or older remuxes (copies the tracks into a new file) an MKV file, it removes four flags. These are the commentary, audio-description, hearing-impaired, and original-language flags. The script finds this problem and does not change files that have these flags. So with an older MKVToolNix, the script cannot fix these files until you update MKVToolNix. mkvmerge 54 and newer keep all the flags.
+> When mkvmerge 52 or older remuxes (copies the tracks into a new file) an MKV file, it removes four flags. These are the commentary, audio-description, hearing-impaired, and original-language flags. The script finds this problem and does not change files that have these flags. So with an older MKVToolNix, the script cannot fix these files until you update MKVToolNix. mkvmerge 54 and newer keep these flags.
+>
+> mkvmerge 57 and older keep the default flag on only one track of each type. For example, if two subtitle tracks have the default flag, the second track loses it. The script finds this problem too and does not change these files. mkvmerge 58 and newer keep all the flags.
 
 ## 🛠️ Installing it
 
