@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-10 · [#23](https://github.com/tronyx/Set-Stereo-Default/pull/23)
+
 ### Fixed
 
 - With mkvmerge 57 or older, the script changed more than the audio default flags in some MKV files. If two subtitle tracks had the default flag, mkvmerge removed it from the second track. The post-remux test compared all flags except the default flag, so it did not find this change. Now, in MKV and WebM files, the post-remux test also compares the default flag of each subtitle and video track. With mkvmerge 57 or older, the script rejects such a remux, does not change the file, and tells you to update MKVToolNix to 58 or newer. The docs now recommend MKVToolNix 58 or newer instead of 54. The random-layout tests found the problem with mkvmerge 45. A new test runs the script on a file with two default subtitle tracks.
