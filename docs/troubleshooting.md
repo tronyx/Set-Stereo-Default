@@ -11,6 +11,13 @@ At the end of the run, before the summary, the script shows a list of the files 
 - Files that another program changed during the run.
 - All other files.
 
+Before this list, the script shows a list of the files that got a warning. Each file has a short note about its warning. The script puts these files into groups by the type of warning:
+
+- Files in which ffmpeg gave the default flag to a subtitle or video track.
+- Files that lost flags that ffmpeg cannot write to MP4, M4V, MOV, or AVI files.
+- Files for which mkvmerge showed warnings.
+- Leftover temp files from an interrupted run, which the script skipped.
+
 ## `SKIP (...)` on a file that you expected to change
 
 Usually, the stereo track is in a different language from the current default track, or several stereo tracks are possible. You can solve both problems with `--prefer-lang`. See [Picking the track](how-it-works.md#-picking-the-track).

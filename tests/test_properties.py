@@ -299,7 +299,7 @@ def test_a_remux_that_lost_anything_is_rejected(case, data):
 
     if change == "flag" and plan.path.suffix not in ssd.MKV_EXTS:
         assert result.problem is None
-        assert len(result.notes) == 1 and "lost its" in result.notes[0]
+        assert len(result.notes) == 1 and "lost its" in result.notes[0].what
     else:
         assert result.problem
         assert result.notes == ()

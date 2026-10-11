@@ -126,7 +126,7 @@ The script also searches the subfolders of each folder. You can also give it ind
 
 ## 🩺 Troubleshooting
 
-For each file that the script skips or does not fix, it writes a line with the reason. At the end of the run, it lists again each file that it did not fix. It groups these files by the action that you must take. [Troubleshooting](docs/troubleshooting.md) explains each message. If a result still looks wrong, [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues).
+For each file that the script skips or does not fix, it writes a line with the reason. At the end of the run, it lists again each file that got a warning and each file that it did not fix. It groups the files that it did not fix by the action that you must take. [Troubleshooting](docs/troubleshooting.md) explains each message. If a result still looks wrong, [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues).
 
 ## 🧪 How it is tested
 

@@ -9,6 +9,7 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 ### Changed
 
 - In MP4, M4V, and MOV files, the script now shows a warning when ffmpeg gives the default flag to a subtitle or video track. If no subtitle track in a file has the default flag, ffmpeg gives it to the first subtitle track, and nothing can prevent this. Before, the script did not tell you. Some players start subtitles automatically when a subtitle track has the default flag, so the warning names each file in which subtitles can now appear. The troubleshooting page tells you how to remove the flag with MP4Box. Tests with ffmpeg 4.4 to 9.0 show this behavior, and a new test makes such a file and runs the script on it.
+- At the end of the run, the script now lists each file that got a warning, before the list of files that it did not fix. Each file has a short note about its warning, under a heading that tells you what the warning means. The list includes files in which ffmpeg gave a subtitle track the default flag, files that lost flags that ffmpeg cannot write, files for which mkvmerge showed warnings, and leftover temp files that the script skipped. Before, these warnings scrolled away in a long run.
 
 ## 2026-10-10 · [#23](https://github.com/tronyx/Set-Stereo-Default/pull/23)
 

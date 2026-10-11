@@ -932,6 +932,7 @@ def test_a_backup_left_half_made_is_reported_as_a_leftover(tmp_path, caplog):
 
     assert list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, recursive=True)) == []
     assert "Skipping leftover temp file from an interrupted run (safe to delete)" in caplog.text
+    assert ssd._warned_files == [(str(tmp_path / "v.mkv.bak.tmp_remux.mkv"), "leftover", "")]
 
 
 @pytest.mark.parametrize("answers, expected", [
@@ -1315,7 +1316,8 @@ def test_verify_remux_warns_when_an_mp4_subtitle_or_video_default_changed(fake_f
     fake_ffprobe[remux] = rich_layout(**remuxed)
     checked = ssd.verify_remux(plan)
     assert checked.problem is None
-    assert checked.notes == ((note,) if note else ())
+    assert tuple(n.line(name) for n in checked.notes) == ((note,) if note else ())
+    assert all(n.kind == "default" for n in checked.notes)
 
 
 def test_verify_remux_notes_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
@@ -1331,9 +1333,11 @@ def test_verify_remux_notes_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
     checked = ssd.verify_remux(plan)
 
     assert checked.problem is None
-    assert checked.notes == (
+    assert [n.line("v.mp4") for n in checked.notes] == [
         "    v.mp4: stream#3 lost its comment flag, which ffmpeg can't write to .mp4 files",
-        "    v.mp4: stream#4 lost its forced flag, which ffmpeg can't write to .mp4 files")
+        "    v.mp4: stream#4 lost its forced flag, which ffmpeg can't write to .mp4 files"]
+    assert [(n.kind, n.what) for n in checked.notes] == [("flags", "stream#3 lost its comment flag"),
+                                                         ("flags", "stream#4 lost its forced flag")]
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
@@ -1358,7 +1362,8 @@ def test_a_lost_mp4_flag_is_only_warned_about_if_the_remux_is_kept(fake_ffprobe,
                                                                    default_on, kept):
     """The warning says the file was fixed but lost a flag. If a later check
     rejects the remux (here, the default flag stayed on the 5.1 track), the
-    file wasn't changed, so only the rejection may be reported."""
+    file wasn't changed, so only the rejection may be reported, and the
+    file isn't listed with the warnings at the end of the run either."""
     monkeypatch.chdir(tmp_path)
     plan, remux = rich_plan("v.mp4")
     plan.path.write_bytes(b"original")
@@ -1372,6 +1377,7 @@ def test_a_lost_mp4_flag_is_only_warned_about_if_the_remux_is_kept(fake_ffprobe,
 
     warned = "stream#3 lost its comment flag, which ffmpeg can't write" in caplog.text
     assert warned is kept
+    assert ssd._warned_files == ([("v.mp4", "flags", "stream#3 lost its comment flag")] if kept else [])
     assert plan.path.read_bytes() == (b"remuxed" if kept else b"original")
     if not kept:
         assert "post-remux check failed (default flag is on stream#1" in caplog.text
@@ -1544,6 +1550,51 @@ def test_failed_files_are_listed_just_before_the_summary(tmp_path, monkeypatch, 
     assert f"\n    {tmp_path / 'e01.mkv'}\n" in out
     ssd._reset_run_state()
     assert ssd._failed_files == {}
+
+
+@pytest.mark.parametrize("stopped", [False, True], ids=["finished", "stopped"])
+def test_files_with_warnings_are_listed_before_the_failed_files(tmp_path, monkeypatch, capsys, stopped):
+    """At the end of the run, after the per-file lines have scrolled away,
+    each file that got a warning is listed with what the warning was
+    about, under a heading that says what it means. The files that
+    couldn't be fixed come after them, nearest the summary, since they
+    matter more. A file with two kinds of warning is listed under each. A
+    stopped run lists the ones it found too, and a second run starts
+    afresh."""
+    make_videos(tmp_path, 4)
+
+    def warned_files(path, args, on_progress=None):
+        ssd.log.info(f"  {path.name}: done")
+        if path.name == "e00.mkv":
+            ssd._note_warnings(path, [ssd.Note("tool", "mkvmerge finished with warnings: odd timestamps")])
+        if path.name == "e01.mkv":
+            ssd._note_warnings(path, [ssd.Note("flags", "stream#3 lost its comment flag"),
+                                      ssd.Note("default", "stream#4 gained the default flag")])
+        if path.name == "e02.mkv":
+            ssd._note_failure(path, "damaged")
+            return "error"
+        if stopped and path.name == "e03.mkv":
+            signal.raise_signal(signal.SIGINT)
+        return "changed"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", warned_files)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--no-progress"])
+
+    assert ssd.main() == (130 if stopped else 1)
+
+    out = capsys.readouterr().out
+    warnings, failures = out.index("2 files had warnings:"), out.index("1 file couldn't be fixed")
+    assert out.index("e03.mkv: done") < warnings < failures < out.index("----- Summary")
+    listing = out[warnings:failures]
+    expected = [ssd.WARNING_GROUPS["default"], f"    {tmp_path / 'e01.mkv'}: stream#4 gained the default flag\n",
+                ssd.WARNING_GROUPS["flags"], f"    {tmp_path / 'e01.mkv'}: stream#3 lost its comment flag\n",
+                ssd.WARNING_GROUPS["tool"],
+                f"    {tmp_path / 'e00.mkv'}: mkvmerge finished with warnings: odd timestamps\n"]
+    assert [listing.index(part) for part in expected] == sorted(listing.index(part) for part in expected)
+    assert ssd.WARNING_GROUPS["leftover"] not in listing
+    ssd._reset_run_state()
+    assert ssd._warned_files == []
 
 
 def test_a_changed_file_is_probed_once_and_its_remux_once(tmp_path, monkeypatch):

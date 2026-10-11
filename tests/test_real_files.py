@@ -493,9 +493,10 @@ def test_a_subtitle_ffmpeg_flags_default_is_warned_about(tmp_path, ext, subtitle
     """In a file where no subtitle track has the default flag, ffmpeg's MP4
     muxer gives it to the first one, and nothing stops it. A player that
     starts default subtitles by itself may then show them, so the script
-    must say so, naming the track, though the file is still fixed. If a
-    subtitle track already has the flag, ffmpeg keeps every subtitle flag
-    as it was, and there's nothing to warn about."""
+    must say so, naming the track, though the file is still fixed, and
+    list the file again at the end of the run. If a subtitle track already
+    has the flag, ffmpeg keeps every subtitle flag as it was, and there's
+    nothing to warn about."""
     need("ffmpeg", "ffprobe")
     srt = tmp_path / "subs.srt"
     srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
@@ -524,6 +525,8 @@ def test_a_subtitle_ffmpeg_flags_default_is_warned_about(tmp_path, ext, subtitle
     assert subtitle_defaults() == [1, 0]
     warning = f"stream#3 gained the default flag, which ffmpeg gives the first subtitle track in {ext} files"
     assert (warning in output) is not subtitle_on, output
+    listed = f"\n    {video}: stream#3 gained the default flag\n"
+    assert ("1 file had warnings:" in output and listed in output) is not subtitle_on, output
 
 
 @pytest.mark.parametrize("ext", [".mkv", ".mp4"])
