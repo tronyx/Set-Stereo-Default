@@ -13,6 +13,7 @@ Nothing yet.
 ### Fixed
 
 - With mkvmerge 57 or older, the script changed more than the audio default flags in some MKV files. If two subtitle tracks had the default flag, mkvmerge removed it from the second track. The post-remux test compared all flags except the default flag, so it did not find this change. Now, in MKV and WebM files, the post-remux test also compares the default flag of each subtitle and video track. With mkvmerge 57 or older, the script rejects such a remux, does not change the file, and tells you to update MKVToolNix to 58 or newer. The docs now recommend MKVToolNix 58 or newer instead of 54. The random-layout tests found the problem with mkvmerge 45. A new test runs the script on a file with two default subtitle tracks.
+- Sometimes a stop (Ctrl+C or SIGTERM) during a remux made the partial summary count the file as an error, although the line of the file said "cancelled". The file was not changed, and the script removed its temp file. This occurred when Python dropped the exception that the stop raised, so the run continued with the result of the killed remux. Now the script counts such a file as cancelled. The random-stop tests found the problem on macOS.
 
 ### Project
 

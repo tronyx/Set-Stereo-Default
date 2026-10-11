@@ -525,9 +525,10 @@ def _unraisable(unraisable: sys.UnraisableHookArgs,
 
 
 class Cancelled(Exception):
-    """Raised by run() when a stop (Ctrl+C, SIGTERM) killed the command it
-    was waiting for. process_file() reports the file as cancelled, rather
-    than reporting the killed command as a failure."""
+    """Raised by run(), or by _remux_and_swap() for a remux, when a stop
+    (Ctrl+C, SIGTERM) killed the command it was waiting for.
+    process_file() reports the file as cancelled, rather than reporting the
+    killed command as a failure."""
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1583,6 +1584,12 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     damaged. A killed process can also exit with that code (mkvmerge on
     Windows), so it only counts as finished if no stop was requested.
 
+    A remux that failed after a stop was requested raises Cancelled, so
+    process_file() reports the file as cancelled, not as an error: the stop
+    killed it (see _stop_handler()). That matters when Python drops the
+    Stopped the stop raised (see _check_stop()) and the run carries on to
+    here, as it always does in a --jobs worker thread.
+
     Whatever already has the temp name is removed before the remux, so the
     tool writes a new file rather than through a symlink someone left there
     (see check_and_swap_in()). A temp name the file system refuses, because
@@ -1611,9 +1618,8 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         with_warnings = returncode == warnings_exit and not _cancelled.is_set()
         if (returncode != 0 and not with_warnings) or not tmp_path.exists():
             if _cancelled.is_set():
-                log.info(f"    {path.name}: cancelled")
-            else:
-                log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
+                raise Cancelled
+            log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
             tmp_path.unlink(missing_ok=True)
             return False
 

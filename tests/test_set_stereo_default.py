@@ -2188,14 +2188,49 @@ def test_failed_or_rejected_remux_keeps_the_original(remux, outcome, caplog):
         assert outcome in caplog.text
 
 
-def test_cancelled_remux_names_the_file(remux, caplog):
+def test_a_remux_killed_by_a_stop_raises_cancelled(remux, caplog):
+    """A stop kills the running remux, so the tool fails, but the stop
+    caused that, not a failed remux. Cancelled has process_file() report
+    the file as cancelled; the original stays and the temp file is gone."""
     apply, video, set_outcome = remux
-    caplog.set_level("INFO")
     set_outcome("fail")
     ssd._cancelled.set()
-    assert apply() is False
-    assert f"{video.name}: cancelled" in caplog.text
+    with pytest.raises(ssd.Cancelled):
+        apply()
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
     assert "remux failed" not in caplog.text
+
+
+@pytest.mark.parametrize("name", ["v.mkv", "v.mp4"])
+def test_a_remux_killed_by_a_stop_whose_exception_was_lost_counts_as_cancelled(tmp_path, monkeypatch,
+                                                                               caplog, name):
+    """A stop kills the running remux, then raises Stopped in the main
+    thread, but Python can drop that exception (see _check_stop()), and
+    the run carries on with the killed remux's result. The file must count
+    as cancelled, as its line says, not as an error: a stopped run on
+    macOS in CI said "Error: 1" for it. The original stays and the temp
+    file is gone."""
+    caplog.set_level("INFO")
+    video = tmp_path / name
+    video.write_bytes(b"original")
+
+    def fake_ffprobe(cmd, **kw):
+        data = {"streams": ORIGINAL_LAYOUT, "format": {"duration": "60.0"}}
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+
+    def stopped_remux(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"partial")
+        ssd._cancelled.set()
+        return -15, ""
+    monkeypatch.setattr(ssd, "run", fake_ffprobe)
+    monkeypatch.setattr(ssd, "run_with_progress", stopped_remux)
+
+    assert ssd.process_file(video, file_args(dry_run=False)) == "cancelled"
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert caplog.records[-1].getMessage() == f"  {name}: cancelled"
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
 @pytest.mark.parametrize("apply, ext", [(remux_with_mkvmerge, ".mkv"), (remux_with_ffmpeg, ".mp4")],
@@ -2462,14 +2497,13 @@ def test_warning_exit_code_is_still_rejected_if_the_check_fails(remux, caplog):
     assert not leftover_temp_files(video)
 
 
-def test_exit_code_1_after_ctrl_c_counts_as_cancelled(remux, caplog):
+def test_exit_code_1_after_ctrl_c_counts_as_cancelled(remux):
     apply, video, set_outcome = remux
-    caplog.set_level("INFO")
     set_outcome("warn")
     ssd._cancelled.set()
-    assert apply() is False
+    with pytest.raises(ssd.Cancelled):
+        apply()
     assert video.read_bytes() == b"original"
-    assert f"{video.name}: cancelled" in caplog.text
     assert not leftover_temp_files(video)
 
 
