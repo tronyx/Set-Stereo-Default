@@ -35,6 +35,8 @@ Each change is a remux. The script copies the audio and video without changes in
 
 If a test fails, the script keeps the original and counts the file as an `Error`. There is one exception: a flag such as "commentary" in an MP4, MOV, or AVI file. ffmpeg cannot write these flags to these formats. So if the new file loses such a flag, the script shows a warning, not an error (see [Troubleshooting](troubleshooting.md)).
 
+In MP4, M4V, and MOV files, ffmpeg also sets one flag by itself. If no subtitle track has the default flag, ffmpeg gives it to the first subtitle track. It does the same with video tracks. The script cannot prevent this, so it uses the new file and shows a warning (see [Troubleshooting](troubleshooting.md)).
+
 The script also does not use the new file if the original changed during the remux. For example, Sonarr or Radarr can import an upgrade (a better version of the video) over the original. The new file does not have this change. So the script leaves the file as it is and counts it as an `Error`. The next run fixes the new version.
 
 > [!NOTE]

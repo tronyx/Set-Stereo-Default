@@ -154,6 +154,39 @@ def top_level_boxes(path):
     return kinds
 
 
+def child_boxes(data, start, end):
+    """(type, start of its contents, end) for each MP4 box in data from
+    start to end, e.g. b"moov" and its offsets."""
+    pos = start
+    while pos + 8 <= end:
+        size = int.from_bytes(data[pos:pos + 4], "big")
+        kind, body = bytes(data[pos + 4:pos + 8]), pos + 8
+        if size == 1:
+            size, body = int.from_bytes(data[pos + 8:pos + 16], "big"), pos + 16
+        elif size == 0:
+            size = end - pos
+        if size < 8:
+            break
+        yield kind, body, pos + size
+        pos += size
+
+
+def set_enabled_bits(path, bits):
+    """Set the enabled bit of each track in an MP4 or MOV file, which ffmpeg
+    reads as the default flag: bits has one "0" or "1" per track, in file
+    order. It's bit 0x1 of the flags in the track's tkhd box. ffmpeg can't
+    write a file whose subtitle tracks are all off, since its muxer turns
+    the first one on, so the tests set the bits here."""
+    data = bytearray(path.read_bytes())
+    tkhds = [tkhd for kind, body, end in child_boxes(data, 0, len(data)) if kind == b"moov"
+             for trak, trak_body, trak_end in child_boxes(data, body, end) if trak == b"trak"
+             for box, tkhd, _ in child_boxes(data, trak_body, trak_end) if box == b"tkhd"]
+    assert len(tkhds) == len(bits), (len(tkhds), bits)
+    for tkhd, bit in zip(tkhds, bits):
+        data[tkhd + 3] = data[tkhd + 3] & 0xFE | int(bit)
+    path.write_bytes(data)
+
+
 def digest(path):
     """SHA-256 of path's contents, to tell whether a file changed at all."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -452,6 +485,45 @@ def test_two_default_subtitle_tracks_both_keep_the_flag(tmp_path):
     assert summary(output)["changed"] == 1, output
     assert audio_defaults(video) == [(6, False), (2, True)]
     assert contents(video) == before
+
+
+@pytest.mark.parametrize("ext", [".mp4", ".mov"])
+@pytest.mark.parametrize("subtitle_on", [False, True], ids=["subtitles off", "a subtitle on"])
+def test_a_subtitle_ffmpeg_flags_default_is_warned_about(tmp_path, ext, subtitle_on):
+    """In a file where no subtitle track has the default flag, ffmpeg's MP4
+    muxer gives it to the first one, and nothing stops it. A player that
+    starts default subtitles by itself may then show them, so the script
+    must say so, naming the track, though the file is still fixed. If a
+    subtitle track already has the flag, ffmpeg keeps every subtitle flag
+    as it was, and there's nothing to warn about."""
+    need("ffmpeg", "ffprobe")
+    srt = tmp_path / "subs.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello\n", encoding="utf-8")
+    video = tmp_path / f"subtitles{ext}"
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1",
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-i", str(srt), "-i", str(srt),
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s", "-map", "4:s",
+                    "-c:v", "mpeg4", "-c:a", "aac", "-c:s", "mov_text",
+                    "-disposition:a:0", "default", "-disposition:a:1", "0", str(video)],
+                   check=True, capture_output=True, text=True)
+    set_enabled_bits(video, "11010" if subtitle_on else "11000")
+
+    def subtitle_defaults():
+        """Each subtitle track's default flag, as ffprobe reads it."""
+        return [s["disposition"]["default"] for s in probe(video) if s["codec_type"] == "subtitle"]
+    assert subtitle_defaults() == [int(subtitle_on), 0]
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert subtitle_defaults() == [1, 0]
+    warning = f"stream#3 gained the default flag, which ffmpeg gives the first subtitle track in {ext} files"
+    assert (warning in output) is not subtitle_on, output
 
 
 @pytest.mark.parametrize("ext", [".mkv", ".mp4"])

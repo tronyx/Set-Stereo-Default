@@ -33,6 +33,18 @@ A similar test rejects a remux that changed the codec or the language of a track
 
 This line is a warning, not an error. The script fixed the file. But ffmpeg cannot store flags such as "commentary" in MP4, MOV, or AVI files, so the flag is gone. The tracks did not change. But now a player cannot know that a track is a commentary track, for example, unless the name of the track says so.
 
+## `stream#N gained the default flag, which ffmpeg gives the first subtitle track in .mp4 files when no subtitle track has it`
+
+This line is a warning, not an error. The script fixed the file. But in the original file, no subtitle track had the default flag. In such a file, ffmpeg always gives the default flag to the first subtitle track. Some players and media servers start subtitles automatically when a subtitle track has the default flag. With these players, the subtitles can now appear.
+
+To turn the subtitles off, change the subtitle setting in your player. To remove the flag from the file, use MP4Box, which is part of [GPAC](https://gpac.io). The track ID is the stream number plus 1. For example, for `stream#3`, run this command:
+
+```bash
+MP4Box -disable 4 "file.mp4"
+```
+
+A later run of the script does not change the file again, because the correct audio track is already the default track. The warning can also name a video track. In that case, the original video track had no default flag, and ffmpeg gave it one.
+
 ## `changed by another program during the remux, so it's left as it is now`
 
 Another program replaced or edited the file while the script remuxed it. For example, Sonarr or Radarr imported an upgrade (a better version of the video). The script made its new file from the old version. So the script deleted its new file and left the file as it is now. To fix the new version, run the script again. See [Changing the file](how-it-works.md#-changing-the-file).

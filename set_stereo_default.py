@@ -153,7 +153,9 @@ AVI_EXTS = {".avi"}
 """No default-track flag exists; only handled with --avi-reorder."""
 
 MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
-"""Remuxed with -movflags +faststart, keeping the index at the front of the file."""
+"""Written by ffmpeg's MP4 muxer: remuxed with -movflags +faststart, keeping
+the index at the front of the file, and checked for the default flags that
+muxer sets on its own (see _mp4_default_note())."""
 
 IN_DOCKER_VAR = "SET_STEREO_DEFAULT_IN_DOCKER"
 """Set to "1" by the project's Docker image (see _in_docker())."""
@@ -862,6 +864,27 @@ def _mkv_default_change(was: Stream, now: Stream) -> str | None:
     return f"stream#{was.index} gained a default flag"
 
 
+def _mp4_default_note(plan: Plan, was: Stream, now: Stream) -> str | None:
+    """The warning to give if an MP4, M4V or MOV remux changed the default
+    flag of a subtitle or video track (was, before; now, after), or None if
+    it came through as it was.
+
+    When no subtitle track has the flag, ffmpeg's MP4 muxer gives it to the
+    first one, whatever the original said, and likewise for video; ffmpeg
+    4.4 to 9.0 all do. The remux is still used, since ffmpeg can't write
+    the file any other way, but a player that starts default subtitles by
+    itself may now show ones it didn't before, so the user is told. ffmpeg
+    hasn't been seen to clear the flag, but if it does, that's said too.
+    Data tracks are left out: the muxer's rule doesn't touch them."""
+    if was.type not in ("subtitle", "video") or was.default == now.default:
+        return None
+    name, ext = plan.path.name, plan.path.suffix.lower()
+    if now.default:
+        return (f"    {name}: stream#{was.index} gained the default flag, which ffmpeg gives the first "
+                f"{was.type} track in {ext} files when no {was.type} track has it")
+    return f"    {name}: stream#{was.index} lost its default flag"
+
+
 def _content_problem(plan: Plan, after: list[Stream]) -> str | None:
     """Whether the remux (after) lost any stream outright: it must have as
     many streams, chapter tracks (see is_chapter_track()) and audio tracks
@@ -955,17 +978,19 @@ def _streams_problem(plan: Plan, order: list[Stream],
     note, and the remux is still used.
 
     In MKV files, the default flag of a subtitle or video track must
-    survive too (_mkv_default_change()). MP4 and MOV files are left out of
-    that: ffmpeg's MP4 muxer sets those flags by its own rules (it turns
-    the flag on for the first track of a type when none has it), so a
-    change there doesn't by itself mean the remux went wrong. AVI has no
-    default flag."""
+    survive too (_mkv_default_change()). In MP4, M4V and MOV files, ffmpeg's
+    MP4 muxer sets those flags by its own rules, so a change there becomes
+    a note too (_mp4_default_note()). AVI has no default flag."""
     is_mkv = plan.path.suffix.lower() in MKV_EXTS
+    is_mp4 = plan.path.suffix.lower() in MOV_FASTSTART_EXTS
     notes: list[str] = []
     for was, now in zip(order, after, strict=True):
         loss = _stream_loss(was, now) or (_mkv_default_change(was, now) if is_mkv else None)
         if loss:
             return loss, ()
+        default_note = _mp4_default_note(plan, was, now) if is_mp4 else None
+        if default_note:
+            notes.append(default_note)
         lost = sorted(was.flags - now.flags)
         if not lost:
             continue

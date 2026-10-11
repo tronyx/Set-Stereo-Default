@@ -1274,9 +1274,7 @@ that lost its default flag."""
     ("v.mkv", {}, {"stream0": described(0, "video", "h264", 0)}, f"stream#0 {OLD_MKVMERGE_DEFAULT}"),
     ("v.mkv", {}, {"stream4": DEFAULT_SIGNS}, "stream#4 gained a default flag"),
     ("v.mkv", {"stream4": DEFAULT_SIGNS}, {"stream4": DEFAULT_SIGNS}, None),
-    ("v.mp4", {"stream4": DEFAULT_SIGNS}, {}, None),
-], ids=["mkv subtitle lost it", "mkv video lost it", "mkv subtitle gained it", "mkv subtitle kept it",
-        "mp4 not compared"])
+], ids=["mkv subtitle lost it", "mkv video lost it", "mkv subtitle gained it", "mkv subtitle kept it"])
 def test_verify_remux_checks_the_default_flag_of_subtitle_and_video_tracks(fake_ffprobe, name, original,
                                                                          remuxed, problem):
     """Only the audio tracks' default flags may change. mkvmerge 57 and
@@ -1284,11 +1282,40 @@ def test_verify_remux_checks_the_default_flag_of_subtitle_and_video_tracks(fake_
     subtitle tracks, the second came out without it, and the remux was used
     anyway: every flag was compared but the default one. In an MKV file, a
     subtitle or video track's default flag must now come through as it was,
-    and the fix is named if it was lost. MP4 files are left out, since
-    ffmpeg's MP4 muxer sets those flags by its own rules."""
+    and the fix is named if it was lost. (In MP4 files, a change is only
+    warned about; see the next test.)"""
     plan, remux = rich_plan(name, **original)
     fake_ffprobe[remux] = rich_layout(**remuxed)
     assert ssd.verify_remux(plan).problem == problem
+
+
+@pytest.mark.parametrize("name, original, remuxed, note", [
+    ("v.mp4", {}, {"stream4": DEFAULT_SIGNS},
+     ("    v.mp4: stream#4 gained the default flag, which ffmpeg gives the first subtitle track in .mp4 files "
+      "when no subtitle track has it")),
+    ("v.mov", {"stream0": described(0, "video", "h264", 0)}, {},
+     ("    v.mov: stream#0 gained the default flag, which ffmpeg gives the first video track in .mov files "
+      "when no video track has it")),
+    ("v.m4v", {"stream4": DEFAULT_SIGNS}, {}, "    v.m4v: stream#4 lost its default flag"),
+    ("v.mp4", {"stream4": DEFAULT_SIGNS}, {"stream4": DEFAULT_SIGNS}, None),
+    ("v.mp4", {"stream4": described(4, "data", "bin_data", 1)}, {"stream4": described(4, "data", "bin_data")},
+     None),
+], ids=["mp4 subtitle gained it", "mov video gained it", "m4v subtitle lost it", "mp4 subtitle kept it",
+        "mp4 data track not compared"])
+def test_verify_remux_warns_when_an_mp4_subtitle_or_video_default_changed(fake_ffprobe, name, original,
+                                                                         remuxed, note):
+    """When no subtitle track has the default flag, ffmpeg's MP4 muxer gives
+    it to the first one, and likewise for video, so the remux can't be
+    rejected for it: the file could never be fixed. But a player that
+    starts default subtitles by itself may now show them, so the remux is
+    used with a note for the warning, naming the track. A loss, which
+    ffmpeg hasn't been seen to cause, is noted too. Data tracks aren't
+    compared, since the muxer's rule doesn't touch them."""
+    plan, remux = rich_plan(name, **original)
+    fake_ffprobe[remux] = rich_layout(**remuxed)
+    checked = ssd.verify_remux(plan)
+    assert checked.problem is None
+    assert checked.notes == ((note,) if note else ())
 
 
 def test_verify_remux_notes_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
