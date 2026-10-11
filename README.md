@@ -108,10 +108,14 @@ The script also searches the subfolders of each folder. You can also give it ind
 > Each change replaces the original file with a new file. Read these three results before you run the script on your full library:
 >
 > - If another path is a hard link (a second name for the same file) to the file, that path keeps the old version. The two paths also stop sharing disk space. Sonarr, Radarr, and qBittorrent often make hard links. Run the script before you make the links, or make the links again after the script runs.
-> - If a torrent seeds the file, its hash check (the test that the data did not change) fails. The script does not re-encode the file, but the bytes of the new file are different. Cross-seeds of the file also fail. On a private tracker, this failure can look like a hit-and-run (a download that you did not seed).
+> - If a torrent seeds the file, its hash check (the test that the data did not change) fails. The script does not re-encode the file, but the bytes of the new file are different. A cross-seed that uses the same path also fails. On a private tracker, this failure can look like a hit-and-run (a download that you did not seed).
 > - The script needs free disk space. While it runs, it needs about the size of your largest file. With `--backup`, each backup also uses as much disk space as its file, until you delete the backup.
 >
 > For more information, see [Limitations](docs/how-it-works.md#%EF%B8%8F-limitations) and [Disk space](docs/installation.md#-disk-space).
+
+## 🤔 Why not edit the file in place?
+
+Tools such as mkvpropedit can change the flags directly in the original file. This is much faster than writing a new file. But in MKV files, such an edit can move the track list to the end of the file. Then Windows Explorer cannot show a thumbnail. A new file also keeps the original safe, because the script tests the new file before it replaces the original in one step. [Why not edit the file in place?](docs/how-it-works.md#-why-not-edit-the-file-in-place) explains all the reasons.
 
 ## 📖 Documentation
 
@@ -120,7 +124,7 @@ The script also searches the subfolders of each folder. You can also give it ind
 | [📦 Installation](docs/installation.md) | Requirements, the tested versions, installation on Linux, macOS, and Windows, and the disk space that the script needs |
 | [🚀 Usage](docs/usage.md) | The files that the script processes and their order, lists of folders, all the options, sample output, and exit codes |
 | [🐳 Docker](docs/docker.md) | Your videos in the container, several folders, file owners, the log, schedules, and image updates |
-| [🔍 How it works](docs/how-it-works.md) | How the script picks the track and changes a file, backups, symlinks, file owners, file dates, temporary files, and limitations |
+| [🔍 How it works](docs/how-it-works.md) | How the script picks the track and changes a file, why it does not edit files in place, backups, symlinks, file owners, file dates, temporary files, and limitations |
 | [🩺 Troubleshooting](docs/troubleshooting.md) | What each message means, and what to do |
 | [🧪 How it is tested](docs/testing.md) | The tests, and the tests that GitHub runs on each change |
 

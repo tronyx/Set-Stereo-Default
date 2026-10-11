@@ -44,9 +44,27 @@ The script also does not use the new file if the original changed during the rem
 
 | Format | How the script changes it |
 | --- | --- |
-| `.mkv` `.webm` | The script remuxes these files with `mkvmerge`. It does not edit the file in place (change the original file directly). An edit in place can move the track list to the end of the file. Then Windows Explorer cannot show a thumbnail, but the video still plays correctly. |
+| `.mkv` `.webm` | The script remuxes these files with `mkvmerge`. It does not edit the file in place (change the original file directly). An edit in place can move the track list to the end of the file. Then Windows Explorer cannot show a thumbnail, but the video still plays correctly (see [Why not edit the file in place?](#-why-not-edit-the-file-in-place)). |
 | `.mp4` `.m4v` `.mov` | The script remuxes these files with `ffmpeg`. It keeps the index of the file at the start, where thumbnail programs look for it (`-movflags +faststart`). ffmpeg makes a new chapter track from the chapters of the file. It does not copy the old chapter track. |
 | `.avi` | AVI files have no "default track" flag. With `--avi-reorder`, the script moves the stereo track to the front instead. Most players use the first track in the same way as a default track. Without `--avi-reorder`, the script skips AVI files. |
+
+## 🤔 Why not edit the file in place?
+
+An edit in place changes the flags directly in the original file. For MKV files, the mkvpropedit tool from MKVToolNix can do this. It is much faster than a remux, because it writes only a few kilobytes, not a copy of the full file. It also needs no free disk space. But the script uses a remux, for four reasons.
+
+The first reason is the thumbnails in Windows Explorer. In an MKV file, a track that does not store the default flag counts as a default track. So many files do not store the default flag on their default track. To remove the flag from such a track, mkvpropedit must add data to the track list, so the track list becomes larger. If the larger track list does not fit in its old place, mkvpropedit writes it at the end of the file. The video still plays correctly, but Windows Explorer reads only the start of a file to make a thumbnail, so the thumbnail disappears.
+
+Earlier versions of the script used mkvpropedit and had this problem. If another tool edited a file in place, `--force` remuxes it and puts the track list back where Windows Explorer looks for it (see [Troubleshooting](troubleshooting.md)).
+
+The second reason is the protection of the original. With a remux, the script writes a new file and tests it. Then it replaces the original in one step, which is either complete or not done at all. An edit in place changes the original directly. If the power fails during the write, the original can be damaged. Also, the script can test the result only after the change.
+
+The third reason is the backups. `--backup` keeps the original as a hard link (a second name for the same file). So a backup needs no extra disk space while the script runs (see [Backups](#-backups)). An edit in place changes the file under all its names, so such a backup changes too. With an edit in place, each backup must be a full copy.
+
+The fourth reason is the hard links to other folders. Sonarr, Radarr, and qBittorrent often use a hard link to connect the file in the library folder to the file in the download folder. A remux gives the library path a new file. The download path keeps the old file, so a torrent that seeds from the download path continues to work. An edit in place changes the file under both paths, so this torrent fails its hash check too.
+
+For MP4, M4V, and MOV files, the default flag is one bit in the header of each track. So an edit in place never moves data in these files. But the second, third, and fourth reasons apply to them too.
+
+The remux also has costs. It copies the full file, so it is slower, and it needs free disk space (see [Disk space](installation.md#-disk-space)). The new file must get the owner of the original (see [Permissions and ownership](#-permissions-and-ownership)). And other hard links to the file break (see [Limitations](#%EF%B8%8F-limitations)). The script accepts these costs, because the original stays safe until a tested file replaces it.
 
 ## 🛟 Backups
 
@@ -125,6 +143,6 @@ If you use hard links, run this script before you make the links. Or make the li
 
 ### 🌱 Seeding and cross-seeding will break
 
-The script does not re-encode the file (convert the audio or video to a new format). But the bytes of the remuxed file are different. So the file does not match the piece hashes (checksums) of the torrent any more. Each torrent that seeds (shares) this file will fail its hash check. This includes cross-seeds that share the file through a hard link.
+The script does not re-encode the file (convert the audio or video to a new format). But the bytes of the remuxed file are different. So the file does not match the piece hashes (checksums) of the torrent any more. Each torrent that seeds (shares) the file from the path that the script changed will fail its hash check. This includes a cross-seed that uses the same path. A torrent that seeds from another path, which is a hard link to the original, continues to work, because that path keeps the old file (see [Hard links will be broken](#-hard-links-will-be-broken)).
 
 Do not run this script on files that you seed, unless you are ready to download them again or re-check them. Before you do this, read the rules of your private trackers. A failed hash check can look like a hit-and-run (a download without the required seeding).
