@@ -8,6 +8,12 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 Nothing yet.
 
+## 2026-10-11 · [#25](https://github.com/tronyx/Set-Stereo-Default/pull/25)
+
+### Project
+
+- The README and the How it works page now explain why the script writes a new file, and does not edit the file in place with a tool such as mkvpropedit. The page about seeding also says more exactly which torrents fail: a torrent that seeds from the path that the script changed. A torrent that seeds from another path, which is a hard link to the original, continues to work.
+
 ## 2026-10-11 · [#24](https://github.com/tronyx/Set-Stereo-Default/pull/24)
 
 ### Changed
