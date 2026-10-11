@@ -525,9 +525,10 @@ def _unraisable(unraisable: sys.UnraisableHookArgs,
 
 
 class Cancelled(Exception):
-    """Raised by run() when a stop (Ctrl+C, SIGTERM) killed the command it
-    was waiting for. process_file() reports the file as cancelled, rather
-    than reporting the killed command as a failure."""
+    """Raised by run(), or by _remux_and_swap() for a remux, when a stop
+    (Ctrl+C, SIGTERM) killed the command it was waiting for.
+    process_file() reports the file as cancelled, rather than reporting the
+    killed command as a failure."""
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -843,6 +844,24 @@ def _stream_loss(was: Stream, now: Stream) -> str | None:
     return None
 
 
+def _mkv_default_change(was: Stream, now: Stream) -> str | None:
+    """Whether an MKV remux changed the default flag of a stream that isn't
+    audio (was, before; now, after), as a short reason, or None if it came
+    through as it was. Only the audio tracks' flags may change, and
+    _default_flag_problem() checks those.
+
+    mkvmerge 57 and older keep the default flag on only one track of each
+    type, even when --default-track sets it on more, so of two default
+    subtitle tracks, the second comes out without it. mkvmerge 58 and newer
+    keep every one."""
+    if was.type == "audio" or was.default == now.default:
+        return None
+    if was.default:
+        return (f"stream#{was.index} lost its default flag; mkvmerge 57 and older keep it on only one "
+                f"track of each type, so update MKVToolNix to 58 or newer")
+    return f"stream#{was.index} gained a default flag"
+
+
 def _content_problem(plan: Plan, after: list[Stream]) -> str | None:
     """Whether the remux (after) lost any stream outright: it must have as
     many streams, chapter tracks (see is_chapter_track()) and audio tracks
@@ -933,11 +952,18 @@ def _streams_problem(plan: Plan, order: list[Stream],
     hearing-impaired and original-language flags, which players use to
     label and choose tracks. ffmpeg can't write any of these flags to MP4,
     MOV or AVI files, so a flag lost there is unavoidable: it becomes a
-    note, and the remux is still used."""
+    note, and the remux is still used.
+
+    In MKV files, the default flag of a subtitle or video track must
+    survive too (_mkv_default_change()). MP4 and MOV files are left out of
+    that: ffmpeg's MP4 muxer sets those flags by its own rules (it turns
+    the flag on for the first track of a type when none has it), so a
+    change there doesn't by itself mean the remux went wrong. AVI has no
+    default flag."""
     is_mkv = plan.path.suffix.lower() in MKV_EXTS
     notes: list[str] = []
     for was, now in zip(order, after, strict=True):
-        loss = _stream_loss(was, now)
+        loss = _stream_loss(was, now) or (_mkv_default_change(was, now) if is_mkv else None)
         if loss:
             return loss, ()
         lost = sorted(was.flags - now.flags)
@@ -996,7 +1022,8 @@ def verify_remux(plan: Plan) -> Verification:
     - after an AVI reorder (plan.reordered), the target is the first audio
       track (_first_audio_problem());
     - every stream but a chapter track came through as it was, in the
-      expected order (_expected_order(), _streams_problem());
+      expected order (_expected_order(), _streams_problem()), in an MKV
+      file with the default flag of each subtitle or video track too;
     - except after an AVI reorder, which has no default flag, the target
       is the only audio track flagged default (_default_flag_problem())."""
     after, after_duration = probe_streams(plan.tmp_path, report=False)
@@ -1557,6 +1584,12 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     damaged. A killed process can also exit with that code (mkvmerge on
     Windows), so it only counts as finished if no stop was requested.
 
+    A remux that failed after a stop was requested raises Cancelled, so
+    process_file() reports the file as cancelled, not as an error: the stop
+    killed it (see _stop_handler()). That matters when Python drops the
+    Stopped the stop raised (see _check_stop()) and the run carries on to
+    here, as it always does in a --jobs worker thread.
+
     Whatever already has the temp name is removed before the remux, so the
     tool writes a new file rather than through a symlink someone left there
     (see check_and_swap_in()). A temp name the file system refuses, because
@@ -1585,9 +1618,8 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         with_warnings = returncode == warnings_exit and not _cancelled.is_set()
         if (returncode != 0 and not with_warnings) or not tmp_path.exists():
             if _cancelled.is_set():
-                log.info(f"    {path.name}: cancelled")
-            else:
-                log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
+                raise Cancelled
+            log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
             tmp_path.unlink(missing_ok=True)
             return False
 

@@ -2,28 +2,67 @@
 
 [← All documentation](README.md)
 
-Every skipped or failed file gets a line saying why. Here's what the common ones mean. Every file that couldn't be fixed is also listed again at the end of the run, just before the summary, with its full path, grouped by what to do about it: damaged files, files another program has open, files another program changed during the run, and everything else. So none gets lost in a long run's output.
+For each file that the script skips or cannot change, the script shows a line with the reason. This page tells you what the common lines mean.
 
-**`SKIP (...)` on a file you expected to change.** Usually the stereo track is in a different language from the current default, or several stereo tracks qualify. Both are settled with `--prefer-lang`. See [Picking the track](how-it-works.md#-picking-the-track).
+At the end of the run, before the summary, the script shows a list of the files that it was not able to fix. The list gives the full path of each file. So no file gets lost in the long output of a run. The script puts these files into groups by what you must do:
 
-**`only 9:41 of this 41:52 video could be read, so the file seems to be damaged or an incomplete download`.** The file stops being readable partway through, so it can't be fixed, and it was left as it is. It's usually an incomplete download: some download clients make a file its full size before downloading it, so one that never finished can be the right size with nothing after a point. Such a file stops playing at the same spot in any player. Replace it (in Sonarr or Radarr, search for it again), then run the script again. Rarely, the file plays to the end anyway: then nothing is missing, and its header just claims it's longer than it is, which some tools write by mistake. Remuxing it once yourself (e.g. `mkvmerge -o fixed.mkv original.mkv` for an MKV) gives it a correct header, and the script can then fix it. See [Changing the file](how-it-works.md#-changing-the-file).
+- Damaged files.
+- Files that another program has open.
+- Files that another program changed during the run.
+- All other files.
 
-**`post-remux check failed (stream#N lost its ... flag; ...)`.** Your mkvmerge is too old to keep a track flag (commentary, hearing impaired, ...) that the file has, so the file is left untouched. Update MKVToolNix to 54 or newer and run the script again. A similar check rejects a remux that changed a track's codec or language or lost its name.
+## `SKIP (...)` on a file that you expected to change
 
-**`stream#N lost its ... flag, which ffmpeg can't write to .mp4 files`.** A warning, not an error: the file was fixed, but ffmpeg can't store flags such as "commentary" in MP4, MOV or AVI files at all, so that flag is gone. The tracks themselves are unchanged, but players can no longer tell, for example, that a track is commentary unless its name says so.
+Usually, the stereo track is in a different language from the current default track, or several stereo tracks are possible. You can solve both problems with `--prefer-lang`. See [Picking the track](how-it-works.md#-picking-the-track).
 
-**`changed by another program during the remux, so it's left as it is now`.** Another program, such as Sonarr or Radarr importing an upgrade, replaced or edited the file while the script was remuxing it. The remux was made from the old version, so it was discarded and the file was left as it is now. Run the script again to fix the new version. See [Changing the file](how-it-works.md#-changing-the-file).
+## `only 9:41 of this 41:52 video could be read, so the file seems to be damaged or an incomplete download`
 
-**`couldn't swap the new file in (Access is denied), so it's left as it was -- is it read-only, or open in another program?`.** On Windows, a file another program has open can't be replaced: a media player, or Plex, Jellyfin or Emby while it scans the file. The remux was discarded and the file left as it was, with no backup made. Close the other program, or wait for the scan to finish, and run the script again. A read-only file gives the same error; clear the attribute first. A file another program has opened exclusively can't even be read, and is reported as `ffprobe failed on <name>: ... Permission denied` instead.
+The script cannot read the file after a point in the video. So the script cannot fix the file, and it does not change it. Usually, the file is an incomplete download. Some download clients give a file its full size before they download it. So an incomplete download can have the correct size, but contain no data after a point. Such a file stops at the same point in each player.
 
-**`can't use the temp name <name>.tmp_remux.<ext> (...); the name may be too long for this file system`.** The remux is written next to the original under its name plus `.tmp_remux.<ext>`, and most file systems allow names of 255 characters at most, so a file whose name is already close to that can't be fixed. Shorten the name and run the script again.
+Replace the file, for example with a new search in Sonarr or Radarr. Then run the script again.
 
-**`mkvmerge sees N audio track(s), but ffprobe sees M`.** The two tools disagree about the file, so the script won't guess which track is which and leaves it alone. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues) with the file's `mkvmerge -J` output.
+In rare cases, the file plays to the end. Then no data is missing. Instead, the header of the file (the information at its start) gives a length that is too long. Some tools write such headers by mistake. To correct the header, remux the file yourself (copy its tracks into a new file), for example with `mkvmerge -o fixed.mkv original.mkv` for an MKV file. Then the script can fix the file. See [Changing the file](how-it-works.md#-changing-the-file).
 
-**`Couldn't give remuxed files their original owner`.** The new files play fine, but belong to the wrong user, which can stop Sonarr, Radarr and similar tools from renaming or replacing them. On an NFS share, run the script as the user that owns your media; the warning shows the `sudo -u` command to use, or in the Docker image, the `docker run --user` one. See [Permissions and ownership](how-it-works.md#-permissions-and-ownership).
+## `post-remux check failed (stream#N lost its ... flag; ...)`
 
-**`Skipping leftover temp file`.** An earlier run was killed mid-file. The temp file is safe to delete. See [Leftover temp files](how-it-works.md#-leftover-temp-files).
+Your mkvmerge is too old to keep a flag (a marker on a track) that the file has. Examples are the commentary flag, the hearing-impaired flag, and the default flag on a second subtitle track. So the script does not change the file. Update MKVToolNix to version 58 or newer. Then run the script again.
 
-**No thumbnail in Windows Explorer.** If another tool (such as `mkvpropedit`) edited the file in place, its track list may have moved to the end of the file, where Explorer doesn't look. `--force` remuxes the file even when the right track is already default, which puts everything back where it belongs.
+A similar test rejects a remux that changed the codec or the language of a track, or that lost the name of a track.
 
-**`Missing required tool(s)`.** ffmpeg, ffprobe or mkvmerge isn't on your `PATH`. See [Installation](installation.md).
+## `stream#N lost its ... flag, which ffmpeg can't write to .mp4 files`
+
+This line is a warning, not an error. The script fixed the file. But ffmpeg cannot store flags such as "commentary" in MP4, MOV, or AVI files, so the flag is gone. The tracks did not change. But now a player cannot know that a track is a commentary track, for example, unless the name of the track says so.
+
+## `changed by another program during the remux, so it's left as it is now`
+
+Another program replaced or edited the file while the script remuxed it. For example, Sonarr or Radarr imported an upgrade (a better version of the video). The script made its new file from the old version. So the script deleted its new file and left the file as it is now. To fix the new version, run the script again. See [Changing the file](how-it-works.md#-changing-the-file).
+
+## `couldn't swap the new file in (Access is denied), so it's left as it was -- is it read-only, or open in another program?`
+
+On Windows, the script cannot replace a file that another program has open. Examples are a media player, or Plex, Jellyfin, or Emby while it scans the file. The script deleted its new file and did not change the original. It also did not make a backup. Close the other program, or wait until the scan is done. Then run the script again.
+
+A read-only file causes the same error. Before you run the script again, remove the read-only attribute. If another program has exclusive access to the file (it blocks all other programs), the script cannot even read the file. Then the script shows `ffprobe failed on <name>: ... Permission denied` instead.
+
+## `can't use the temp name <name>.tmp_remux.<ext> (...); the name may be too long for this file system`
+
+The script writes the new file next to the original. The name of the new file is the original name plus `.tmp_remux.<ext>`. Most file systems allow names of 255 characters or fewer. So if the name of a file is already almost that long, the script cannot fix the file. Make the name shorter. Then run the script again.
+
+## `mkvmerge sees N audio track(s), but ffprobe sees M`
+
+The two tools do not agree about the file. The script does not guess which track is which, so it does not change the file. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues), and include the `mkvmerge -J` output for the file.
+
+## `Couldn't give remuxed files their original owner`
+
+The new files play correctly, but they belong to the wrong user. Then Sonarr, Radarr, and similar tools can fail to rename or replace them. On an NFS share, run the script as the user that owns your media. The warning shows the `sudo -u` command to use. In the Docker image, it shows the `docker run --user` option instead. See [Permissions and ownership](how-it-works.md#-permissions-and-ownership).
+
+## `Skipping leftover temp file`
+
+An earlier run stopped suddenly while it processed a file. You can safely delete the temporary file. See [Leftover temp files](how-it-works.md#-leftover-temp-files).
+
+## No thumbnail in Windows Explorer
+
+Another tool, such as `mkvpropedit`, can edit a file in place (change the original file directly). After such an edit, the track list can be at the end of the file. Explorer does not look for it there. `--force` remuxes the file also when the correct track is already the default track. The remux puts the track list back where Explorer looks for it.
+
+## `Missing required tool(s)`
+
+ffmpeg, ffprobe, or mkvmerge is not on your `PATH` (the list of folders where your system looks for programs). See [Installation](installation.md).

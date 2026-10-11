@@ -1134,13 +1134,16 @@ ORIGINAL_AUDIO = [audio(1, 6, "eac3", default=True), audio(2, 2, "aac")]
 
 REMUX = str(Path("v.mkv" + ssd.TMP_MARKER + ".mkv"))
 
+AVI_REMUX = str(Path("v.avi" + ssd.TMP_MARKER + ".avi"))
+
 
 def plan_to_check(duration=None, reordered=False):
     """The Plan _process_file() would make for v.mkv: ORIGINAL_LAYOUT's
     streams, of which ORIGINAL_AUDIO are the audio ones, making stream 2
-    default, or with reordered, moving it first as for an AVI.
-    verify_remux() probes its remux, REMUX."""
-    return ssd.Plan(Path("v.mkv"), ORIGINAL_AUDIO, 2, duration,
+    default. With reordered, the Plan for v.avi instead, moving stream 2
+    first, since only an AVI is reordered. verify_remux() probes its
+    remux, REMUX or AVI_REMUX."""
+    return ssd.Plan(Path("v.avi" if reordered else "v.mkv"), ORIGINAL_AUDIO, 2, duration,
                     layout=[ssd._stream_info(s) for s in ORIGINAL_LAYOUT], reordered=reordered)
 
 
@@ -1168,11 +1171,11 @@ def test_verify_remux(fake_ffprobe, remuxed, expected):
 
 
 def test_verify_remux_avi_reorder(fake_ffprobe):
-    fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, "eng"),
-                           stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
+    fake_ffprobe[AVI_REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, "eng"),
+                               stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
     assert ssd.verify_remux(plan_to_check(reordered=True)).problem is None
 
-    fake_ffprobe[REMUX] = ORIGINAL_LAYOUT
+    fake_ffprobe[AVI_REMUX] = ORIGINAL_LAYOUT
     assert "didn't end up first" in ssd.verify_remux(plan_to_check(reordered=True)).problem
 
 
@@ -1181,8 +1184,8 @@ def test_verify_remux_avi_reorder_compares_languages_however_theyre_written(fake
                                                                             accepted):
     """The target is tagged "eng"; the remux's first track may say the same
     language another way."""
-    fake_ffprobe[REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, tagged),
-                           stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
+    fake_ffprobe[AVI_REMUX] = [stream(0, "video", 0, "h264"), stream(1, "audio", 0, "aac", 2, tagged),
+                               stream(2, "audio", 0, "eac3", 6, "eng"), stream(3, "subtitle")]
     problem = ssd.verify_remux(plan_to_check(reordered=True)).problem
     assert (problem is None) is accepted
 
@@ -1213,11 +1216,13 @@ def rich_layout(**changes):
     return streams
 
 
-def rich_plan(name):
+def rich_plan(name, **changes):
     """The Plan for name (e.g. "v.mkv") with rich_layout()'s original
-    streams, making stream 2 default. Returns (plan, its remux's path)."""
+    streams, making stream 2 default. changes replaces more of the
+    original's streams, as in rich_layout(). Returns (plan, its remux's
+    path)."""
     original = rich_layout(stream1=described(1, "audio", "eac3", 1, 6, title="Surround"),
-                           stream2=described(2, "audio", "aac", 0, 2, title="Stereo"))
+                           stream2=described(2, "audio", "aac", 0, 2, title="Stereo"), **changes)
     layout = [ssd._stream_info(s) for s in original]
     plan = ssd.Plan(Path(name), [s for s in layout if s.type == "audio"], 2, layout=layout)
     return plan, str(plan.tmp_path)
@@ -1253,6 +1258,37 @@ def test_verify_remux_rejects_a_flag_lost_from_an_mkv_file(fake_ffprobe):
     assert ssd.verify_remux(plan).problem == (
         "stream#3 lost its comment flag; mkvmerge 52 and older drop it, so update MKVToolNix "
         "to 54 or newer")
+
+
+DEFAULT_SIGNS = described(4, "subtitle", "subrip", 1, title="Signs", flags=("forced",))
+"""rich_layout()'s subtitle, flagged default."""
+
+OLD_MKVMERGE_DEFAULT = ("lost its default flag; mkvmerge 57 and older keep it on only one track of each "
+                        "type, so update MKVToolNix to 58 or newer")
+"""The end of verify_remux()'s problem for an MKV subtitle or video track
+that lost its default flag."""
+
+
+@pytest.mark.parametrize("name, original, remuxed, problem", [
+    ("v.mkv", {"stream4": DEFAULT_SIGNS}, {}, f"stream#4 {OLD_MKVMERGE_DEFAULT}"),
+    ("v.mkv", {}, {"stream0": described(0, "video", "h264", 0)}, f"stream#0 {OLD_MKVMERGE_DEFAULT}"),
+    ("v.mkv", {}, {"stream4": DEFAULT_SIGNS}, "stream#4 gained a default flag"),
+    ("v.mkv", {"stream4": DEFAULT_SIGNS}, {"stream4": DEFAULT_SIGNS}, None),
+    ("v.mp4", {"stream4": DEFAULT_SIGNS}, {}, None),
+], ids=["mkv subtitle lost it", "mkv video lost it", "mkv subtitle gained it", "mkv subtitle kept it",
+        "mp4 not compared"])
+def test_verify_remux_checks_the_default_flag_of_subtitle_and_video_tracks(fake_ffprobe, name, original,
+                                                                         remuxed, problem):
+    """Only the audio tracks' default flags may change. mkvmerge 57 and
+    older keep the flag on only one track of each type, so of two default
+    subtitle tracks, the second came out without it, and the remux was used
+    anyway: every flag was compared but the default one. In an MKV file, a
+    subtitle or video track's default flag must now come through as it was,
+    and the fix is named if it was lost. MP4 files are left out, since
+    ffmpeg's MP4 muxer sets those flags by its own rules."""
+    plan, remux = rich_plan(name, **original)
+    fake_ffprobe[remux] = rich_layout(**remuxed)
+    assert ssd.verify_remux(plan).problem == problem
 
 
 def test_verify_remux_notes_a_flag_lost_from_an_mp4_file(fake_ffprobe, caplog):
@@ -2152,14 +2188,49 @@ def test_failed_or_rejected_remux_keeps_the_original(remux, outcome, caplog):
         assert outcome in caplog.text
 
 
-def test_cancelled_remux_names_the_file(remux, caplog):
+def test_a_remux_killed_by_a_stop_raises_cancelled(remux, caplog):
+    """A stop kills the running remux, so the tool fails, but the stop
+    caused that, not a failed remux. Cancelled has process_file() report
+    the file as cancelled; the original stays and the temp file is gone."""
     apply, video, set_outcome = remux
-    caplog.set_level("INFO")
     set_outcome("fail")
     ssd._cancelled.set()
-    assert apply() is False
-    assert f"{video.name}: cancelled" in caplog.text
+    with pytest.raises(ssd.Cancelled):
+        apply()
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
     assert "remux failed" not in caplog.text
+
+
+@pytest.mark.parametrize("name", ["v.mkv", "v.mp4"])
+def test_a_remux_killed_by_a_stop_whose_exception_was_lost_counts_as_cancelled(tmp_path, monkeypatch,
+                                                                               caplog, name):
+    """A stop kills the running remux, then raises Stopped in the main
+    thread, but Python can drop that exception (see _check_stop()), and
+    the run carries on with the killed remux's result. The file must count
+    as cancelled, as its line says, not as an error: a stopped run on
+    macOS in CI said "Error: 1" for it. The original stays and the temp
+    file is gone."""
+    caplog.set_level("INFO")
+    video = tmp_path / name
+    video.write_bytes(b"original")
+
+    def fake_ffprobe(cmd, **kw):
+        data = {"streams": ORIGINAL_LAYOUT, "format": {"duration": "60.0"}}
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+
+    def stopped_remux(cmd, *args, **kwargs):
+        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"partial")
+        ssd._cancelled.set()
+        return -15, ""
+    monkeypatch.setattr(ssd, "run", fake_ffprobe)
+    monkeypatch.setattr(ssd, "run_with_progress", stopped_remux)
+
+    assert ssd.process_file(video, file_args(dry_run=False)) == "cancelled"
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert caplog.records[-1].getMessage() == f"  {name}: cancelled"
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
 @pytest.mark.parametrize("apply, ext", [(remux_with_mkvmerge, ".mkv"), (remux_with_ffmpeg, ".mp4")],
@@ -2426,14 +2497,13 @@ def test_warning_exit_code_is_still_rejected_if_the_check_fails(remux, caplog):
     assert not leftover_temp_files(video)
 
 
-def test_exit_code_1_after_ctrl_c_counts_as_cancelled(remux, caplog):
+def test_exit_code_1_after_ctrl_c_counts_as_cancelled(remux):
     apply, video, set_outcome = remux
-    caplog.set_level("INFO")
     set_outcome("warn")
     ssd._cancelled.set()
-    assert apply() is False
+    with pytest.raises(ssd.Cancelled):
+        apply()
     assert video.read_bytes() == b"original"
-    assert f"{video.name}: cancelled" in caplog.text
     assert not leftover_temp_files(video)
 
 

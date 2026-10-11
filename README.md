@@ -5,39 +5,41 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](docs/installation.md#-requirements)
 [![License: MIT](https://img.shields.io/github/license/tronyx/Set-Stereo-Default)](LICENSE.md)
 
-**Make the stereo track play by default, across your whole video library.**
+set_stereo_default makes the stereo audio track the default track in each video file of your library.
 
-Plenty of ripped and downloaded videos flag a 5.1 or 7.1 surround track as the default audio. On a TV, soundbar or laptop, that often means quiet dialogue and booming effects. `set_stereo_default.py` finds the 2-channel stereo track in each file and makes it the default instead. Nothing is re-encoded, so picture and sound quality stay exactly the same.
+Many ripped and downloaded videos set a 5.1 or 7.1 surround track as the default audio track. On a TV, a soundbar, or a laptop, the dialogue is then often quiet and the effects are loud. `set_stereo_default.py` finds the stereo track (the audio track with 2 channels) in each file and makes it the default track. The script does not re-encode (compress again) the audio or the video, so the picture and the sound do not change.
 
-Here's a typical movie before and after:
+This table shows the audio tracks of a typical movie before and after the change:
 
 | Audio track | Before | After |
 | --- | :---: | :---: |
-| English, 5.1 surround | ✅ default | |
-| English, stereo | | ✅ default |
+| English, 5.1 surround | ✅ Default | |
+| English, stereo | | ✅ Default |
 | Director's commentary, stereo | | |
 
-The commentary is stereo too, but it's never picked (see [Picking the track](docs/how-it-works.md#-picking-the-track)).
+The commentary track is also stereo, but the script never picks a commentary track. For the rules, see [Picking the track](docs/how-it-works.md#-picking-the-track).
 
 > [!WARNING]
-> **This is beta software.** It's been tested heavily on my own library, but it's still early. Try it on a few files first, start with `--dry-run`, and use `--backup` until you're happy with how it behaves.
+> Use the script on a few files first. Start with `--dry-run`, and use `--backup` until you are satisfied with the results. This is beta software. I tested it carefully on my own library, but it is new.
 
 ## ✨ Features
 
-- 🛡️ **Safe by default.** Files that are already right are left alone, `--dry-run` previews every change, and each new file is checked before it replaces the original.
-- 🎯 **Picks the right track.** Commentary and audio-description tracks are never chosen, and a stereo dub in another language never replaces the original language.
-- 🧩 **Format-aware.** MKV, WebM, MP4, M4V, MOV and AVI, each handled in a way that keeps Windows Explorer thumbnails working.
-- 📊 **Live progress.** A bar for the current file and one for the whole batch.
-- ⚡ **Parallel.** `--jobs N` works on several files at once.
-- 📝 **Quiet logging.** `--log-file` keeps the details in a file and the console tidy.
-- 🛑 **Stops cleanly.** Ctrl+C or `docker stop` halts mid-run without leaving half-written files.
-- 🐳 **Docker image.** Everything it needs in one image, for amd64 and arm64 (see [Docker](docs/docker.md)).
+The script has these features:
+
+- 🛡️ It does not change a file that is already correct. `--dry-run` shows each change before the script makes it. Before it replaces an original file, it makes sure that the new file is correct.
+- 🎯 It never picks a commentary track or an audio-description track. A stereo dub (a track in another language) never replaces the original language.
+- 🧩 It works with MKV, WebM, MP4, M4V, MOV, and AVI files. For each format, it changes the file in a way that keeps the thumbnails in Windows Explorer.
+- 📊 It shows a progress bar for the current file and a progress bar for the full batch.
+- ⚡ `--jobs N` processes several files at the same time.
+- 📝 `--log-file` writes the details to a file, so the console shows less.
+- 🛑 If you press Ctrl+C or run `docker stop`, the script stops and does not leave incomplete files.
+- 🐳 A Docker image for amd64 and arm64 contains everything that the script needs. See [Docker](docs/docker.md).
 
 ## 🚀 Quick start
 
 ### 🐳 With Docker
 
-The image has the script and everything it needs, for `amd64` and `arm64`, on Docker Hub (`tronyx/set-stereo-default`) and GitHub (`ghcr.io/tronyx/set-stereo-default`). It's rebuilt every week for Alpine's security fixes, and scanned for known vulnerabilities before it's published.
+The Docker image contains the script and all the tools that it needs. It is available for `amd64` and `arm64` on Docker Hub (`tronyx/set-stereo-default`) and on GitHub (`ghcr.io/tronyx/set-stereo-default`). Each week, a new image is built with the security fixes from Alpine (the Linux system in the image). Before an image is published, a scanner looks for known vulnerabilities in it.
 
 ```bash
 # 1. See what would change, without touching anything
@@ -50,13 +52,13 @@ docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default "/vid
 docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default --jobs 3
 ```
 
-`-v` lets the container see your videos, at `/videos` inside it, and everything after the image name is passed to the script. `-it` shows the progress bars and lets the script ask the [backup question](docs/how-it-works.md#-backups). The [Docker guide](docs/docker.md) covers several folders, running as the files' owner (needed on most NFS shares), keeping the log, and running on a schedule.
+The `-v` option makes your video folder available inside the container at `/videos`. Docker gives everything after the image name to the script. The `-it` options show the progress bars and let the script ask the [backup question](docs/how-it-works.md#-backups). The [Docker guide](docs/docker.md) tells you how to use several folders, keep the log, and run the script on a schedule. It also tells you how to run the script as the owner of the files, which most NFS shares need.
 
 ### 🐍 With Python
 
-You need Python 3.10 or newer, ffmpeg 4.4 or newer, and for `.mkv` and `.webm` files, MKVToolNix 45 or newer (54 or newer recommended). [tqdm](https://github.com/tqdm/tqdm) adds the progress bars.
+You must have Python 3.10 or newer and ffmpeg 4.4 or newer. For `.mkv` and `.webm` files, you must also have MKVToolNix 45 or newer. MKVToolNix 58 or newer is recommended. The [tqdm](https://github.com/tqdm/tqdm) package is optional. It shows the progress bars.
 
-1. Get the script, and optionally tqdm:
+1. Download the script, and install tqdm:
 
    ```bash
    git clone https://github.com/tronyx/Set-Stereo-Default.git
@@ -72,7 +74,7 @@ You need Python 3.10 or newer, ffmpeg 4.4 or newer, and for `.mkv` and `.webm` f
    | macOS ([Homebrew](https://brew.sh)) | `brew install ffmpeg mkvtoolnix` |
    | Windows | `winget install Gyan.FFmpeg` and `winget install MoritzBunkus.MKVToolNix` |
 
-3. Run it:
+3. Run the script:
 
    ```bash
    # 1. See what would change, without touching anything
@@ -85,54 +87,54 @@ You need Python 3.10 or newer, ffmpeg 4.4 or newer, and for `.mkv` and `.webm` f
    python3 set_stereo_default.py "/path/to/videos"
    ```
 
-Folders are searched recursively, and you can pass individual files too. On Windows, type `py` instead of `python3`. [Installation](docs/installation.md) has the versions tested and a tip for Windows, and [Usage](docs/usage.md) has the rest.
+The script also searches the subfolders of each folder. You can also give it individual files. On Windows, type `py` instead of `python3`. [Installation](docs/installation.md) lists the tested versions and has a tip for Windows. [Usage](docs/usage.md) has all the other information.
 
 ## ⚙️ Common options
 
 | Option | What it does |
 | --- | --- |
-| `--dry-run` | Show what would change without touching any files |
-| `--backup` | Keep each original as `<name>.bak`. Each backup takes as much space as the original |
-| `--prefer-lang LANG` | Use the stereo track in this language wherever a file has one, e.g. `en`. Files without one are handled as usual |
-| `--jobs N` | Work on up to `N` files at once (default: `1`) |
-| `--input-file FILE` | Also process the folders listed in `FILE`, one per line, in order |
-| `--log-file PATH` | Write the details to a file. Warnings, errors and the summary still show on the console |
+| `--dry-run` | Show the changes, but do not make them |
+| `--backup` | Keep each original file as `<name>.bak`. Each backup uses as much disk space as its original file |
+| `--prefer-lang LANG` | Use the stereo track in this language (for example, `en`) if the file has one. If it does not, the usual rules apply |
+| `--jobs N` | Process up to `N` files at the same time (default: `1`) |
+| `--input-file FILE` | Also process the folders that `FILE` lists, one folder on each line, in that order |
+| `--log-file PATH` | Write the details to a file. The console still shows warnings, errors, and the summary |
 
-Every option is described in [Usage](docs/usage.md#%EF%B8%8F-all-options), and `--help` lists them too.
+[Usage](docs/usage.md#%EF%B8%8F-all-options) describes all the options. The `--help` option also lists them.
 
 ## ⚠️ Before you run it on your whole library
 
 > [!CAUTION]
-> Every change replaces the original with a new file, which has three consequences:
+> Each change replaces the original file with a new file. Read these three results before you run the script on your full library:
 >
-> - **Hard links break.** Another path hard-linked to the file, as Sonarr, Radarr and qBittorrent often set up, keeps the old, unfixed version, and the two stop sharing disk space. Run the script before linking, or re-link afterwards.
-> - **Seeding breaks.** Nothing is re-encoded, but the new file's bytes differ, so any torrent seeding it, cross-seeds included, fails its hash check. On a private tracker that can look like a hit-and-run.
-> - **It needs free space:** about the size of your largest file while it runs. With `--backup`, every backup also takes as much space as the file it backs up, until you delete it.
+> - If another path is a hard link (a second name for the same file) to the file, that path keeps the old version. The two paths also stop sharing disk space. Sonarr, Radarr, and qBittorrent often make hard links. Run the script before you make the links, or make the links again after the script runs.
+> - If a torrent seeds the file, its hash check (the test that the data did not change) fails. The script does not re-encode the file, but the bytes of the new file are different. Cross-seeds of the file also fail. On a private tracker, this failure can look like a hit-and-run (a download that you did not seed).
+> - The script needs free disk space. While it runs, it needs about the size of your largest file. With `--backup`, each backup also uses as much disk space as its file, until you delete the backup.
 >
-> See [Limitations](docs/how-it-works.md#%EF%B8%8F-limitations) and [Disk space](docs/installation.md#-disk-space) for the details.
+> For more information, see [Limitations](docs/how-it-works.md#%EF%B8%8F-limitations) and [Disk space](docs/installation.md#-disk-space).
 
 ## 📖 Documentation
 
-| Page | What's in it |
+| Page | Contents |
 | --- | --- |
-| [📦 Installation](docs/installation.md) | Requirements and the versions tested, installing on Linux, macOS and Windows, and the disk space it needs |
-| [🚀 Usage](docs/usage.md) | Which files are processed and in what order, lists of folders, every option, sample output and exit codes |
-| [🐳 Docker](docs/docker.md) | Mounting your videos, several folders, running as the files' owner, keeping the log, running on a schedule, and how the image is kept up to date |
-| [🔍 How it works](docs/how-it-works.md) | How the track is picked, how a file is changed and checked, backups, symlinks, ownership, file dates, leftover temp files, and the limitations |
-| [🩺 Troubleshooting](docs/troubleshooting.md) | What each message means, and what to do about it |
-| [🧪 How it's tested](docs/testing.md) | The tests, and what GitHub runs on every change |
+| [📦 Installation](docs/installation.md) | Requirements, the tested versions, installation on Linux, macOS, and Windows, and the disk space that the script needs |
+| [🚀 Usage](docs/usage.md) | The files that the script processes and their order, lists of folders, all the options, sample output, and exit codes |
+| [🐳 Docker](docs/docker.md) | Your videos in the container, several folders, file owners, the log, schedules, and image updates |
+| [🔍 How it works](docs/how-it-works.md) | How the script picks the track and changes a file, backups, symlinks, file owners, file dates, temporary files, and limitations |
+| [🩺 Troubleshooting](docs/troubleshooting.md) | What each message means, and what to do |
+| [🧪 How it is tested](docs/testing.md) | The tests, and the tests that GitHub runs on each change |
 
 ## 🩺 Troubleshooting
 
-Every file that's skipped or couldn't be fixed gets a line saying why, and every file that couldn't be fixed is listed again at the end of the run, grouped by what to do about it. [Troubleshooting](docs/troubleshooting.md) explains each message. If something still looks wrong, please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues).
+For each file that the script skips or does not fix, it writes a line with the reason. At the end of the run, it lists again each file that it did not fix. It groups these files by the action that you must take. [Troubleshooting](docs/troubleshooting.md) explains each message. If a result still looks wrong, [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues).
 
-## 🧪 How it's tested
+## 🧪 How it is tested
 
-Every change is tested on Linux, macOS and Windows, against ffmpeg versions from 4.4 to the newest release and mkvmerge versions from 45 to the newest, and inside the Docker image on `amd64` and `arm64`. Besides a test for each case the script handles, the tests try random track layouts, stop the script at random moments and kill it outright partway through a file, and every file must come out either fixed or exactly as it was. See [How it's tested](docs/testing.md).
+Each change goes through tests on Linux, macOS, and Windows, and in the Docker image on `amd64` and `arm64`. The tests use ffmpeg versions from 4.4 to the newest release, and mkvmerge versions from 45 to the newest release. There is a test for each case that the script handles. Other tests use random track layouts, stop the script at random times, and kill the script while it changes a file. After each of these tests, each file must be correct or exactly the same as before. For more information, see [How it is tested](docs/testing.md).
 
 ## 🤝 Contributing
 
-Bug reports, ideas and pull requests are welcome; see the [contributing guide](.github/CONTRIBUTING.md). To report a security vulnerability, please see the [security policy](.github/SECURITY.md) instead of opening an issue. The [changelog](CHANGELOG.md) lists what's changed in each release.
+You can send bug reports, ideas, and pull requests. The [contributing guide](.github/CONTRIBUTING.md) tells you how. Do not open an issue to report a security vulnerability, because issues are public. Use the procedure in the [security policy](.github/SECURITY.md) instead. The [changelog](CHANGELOG.md) lists the changes in each release.
 
 ## 🤖 A note on how this was built
 
@@ -142,4 +144,4 @@ I'd rather say that plainly than let it pass as fully hand-written. There's a lo
 
 ## 📄 License
 
-MIT, see [LICENSE.md](LICENSE.md).
+The license is MIT. See [LICENSE.md](LICENSE.md).
