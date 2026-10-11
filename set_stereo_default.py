@@ -153,7 +153,9 @@ AVI_EXTS = {".avi"}
 """No default-track flag exists; only handled with --avi-reorder."""
 
 MOV_FASTSTART_EXTS = {".mp4", ".m4v", ".mov"}
-"""Remuxed with -movflags +faststart, keeping the index at the front of the file."""
+"""Written by ffmpeg's MP4 muxer: remuxed with -movflags +faststart, keeping
+the index at the front of the file, and checked for the default flags that
+muxer sets on its own (see _mp4_default_note())."""
 
 IN_DOCKER_VAR = "SET_STEREO_DEFAULT_IN_DOCKER"
 """Set to "1" by the project's Docker image (see _in_docker())."""
@@ -427,19 +429,49 @@ report_failed_files()."""
 _failed_lock = threading.Lock()
 """Guards _failed_files, which several --jobs threads add to at once."""
 
+Warned = Literal["default", "flags", "tool", "leftover"]
+"""What a file was warned about, as report_warned_files() groups them."""
+
+TROUBLESHOOTING_URL = "https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/troubleshooting.md"
+"""The docs page that says what each warning and error means."""
+
+WARNING_GROUPS: dict[Warned, str] = {
+    "default": ("Fixed, but the default flag of a subtitle or video track changed. ffmpeg gives the flag "
+                "to the first track of each kind in MP4, M4V and MOV files when none has it, so a player "
+                "that starts default subtitles by itself may now show them. "
+                f"{TROUBLESHOOTING_URL} says how to remove the flag:"),
+    "flags": ("Fixed, but flags that ffmpeg can't write to MP4, M4V, MOV or AVI files were lost, so "
+              "players can't tell, e.g., a commentary track by its flag any more:"),
+    "tool": "Fixed, though mkvmerge finished with warnings:",
+    "leftover": "Leftover temp files from an interrupted run, which were skipped. They're safe to delete:",
+}
+"""The heading report_warned_files() gives each kind of warning, saying
+what it means, in the order they're listed."""
+
+_warned_files: list[tuple[str, Warned, str]] = []
+"""(full path, kind, what) for each warning this run gave about a file (see
+_note_warnings()). Listed again at the end of the run by
+report_warned_files()."""
+
+_warned_lock = threading.Lock()
+"""Guards _warned_files, which several --jobs threads add to at once."""
+
 
 def _reset_run_state() -> None:
     """Forget what an earlier run in this process left behind, so main() can
     run more than once, e.g. when called from other Python code: a stop
     request (which would cancel every file), files that couldn't keep their
-    owner and files it couldn't fix (which would be reported again), the
-    headers printed last, and whether this mkvmerge can keep legacy font
-    types. No remux outlives its run, so _active_procs is already empty."""
+    owner, files it warned about and files it couldn't fix (which would be
+    reported again), the headers printed last, and whether this mkvmerge
+    can keep legacy font types. No remux outlives its run, so _active_procs
+    is already empty."""
     _cancelled.clear()
     with _ownership_lock:
         _ownership_failures.clear()
     with _failed_lock:
         _failed_files.clear()
+    with _warned_lock:
+        _warned_files.clear()
     _last_header.clear()
     _file_context.header = None
     mkvmerge_can_keep_legacy_font_types.cache_clear()
@@ -862,6 +894,44 @@ def _mkv_default_change(was: Stream, now: Stream) -> str | None:
     return f"stream#{was.index} gained a default flag"
 
 
+@dataclass(frozen=True)
+class Note:
+    """A warning about a remuxed file, logged once the remux has replaced the
+    original and listed again at the end of the run (see
+    report_warned_files()): kind, the group it's listed under; what, the
+    change, e.g. "stream#3 lost its comment flag"; and why, the rest of
+    the line that's logged, e.g. ", which ffmpeg can't write to .mp4
+    files". The list only gives what, under a heading that explains it."""
+    kind: Warned
+    what: str
+    why: str = ""
+
+    def line(self, name: str) -> str:
+        """The line logged under the file named name."""
+        return f"    {name}: {self.what}{self.why}"
+
+
+def _mp4_default_note(plan: Plan, was: Stream, now: Stream) -> Note | None:
+    """The warning to give if an MP4, M4V or MOV remux changed the default
+    flag of a subtitle or video track (was, before; now, after), or None if
+    it came through as it was.
+
+    When no subtitle track has the flag, ffmpeg's MP4 muxer gives it to the
+    first one, whatever the original said, and likewise for video; ffmpeg
+    4.4 to 9.0 all do. The remux is still used, since ffmpeg can't write
+    the file any other way, but a player that starts default subtitles by
+    itself may now show ones it didn't before, so the user is told. ffmpeg
+    hasn't been seen to clear the flag, but if it does, that's said too.
+    Data tracks are left out: the muxer's rule doesn't touch them."""
+    if was.type not in ("subtitle", "video") or was.default == now.default:
+        return None
+    if now.default:
+        return Note("default", f"stream#{was.index} gained the default flag",
+                    f", which ffmpeg gives the first {was.type} track in {plan.path.suffix.lower()} files "
+                    f"when no {was.type} track has it")
+    return Note("default", f"stream#{was.index} lost its default flag")
+
+
 def _content_problem(plan: Plan, after: list[Stream]) -> str | None:
     """Whether the remux (after) lost any stream outright: it must have as
     many streams, chapter tracks (see is_chapter_track()) and audio tracks
@@ -940,7 +1010,7 @@ def _expected_order(plan: Plan) -> list[Stream]:
 
 
 def _streams_problem(plan: Plan, order: list[Stream],
-                     after: list[Stream]) -> tuple[str | None, tuple[str, ...]]:
+                     after: list[Stream]) -> tuple[str | None, tuple[Note, ...]]:
     """Whether a stream failed to come through the remux as it was: each of
     order (see _expected_order()) against the remux's stream in the same
     place, by _stream_loss() and then by its flags (forced, commentary,
@@ -955,25 +1025,26 @@ def _streams_problem(plan: Plan, order: list[Stream],
     note, and the remux is still used.
 
     In MKV files, the default flag of a subtitle or video track must
-    survive too (_mkv_default_change()). MP4 and MOV files are left out of
-    that: ffmpeg's MP4 muxer sets those flags by its own rules (it turns
-    the flag on for the first track of a type when none has it), so a
-    change there doesn't by itself mean the remux went wrong. AVI has no
-    default flag."""
+    survive too (_mkv_default_change()). In MP4, M4V and MOV files, ffmpeg's
+    MP4 muxer sets those flags by its own rules, so a change there becomes
+    a note too (_mp4_default_note()). AVI has no default flag."""
     is_mkv = plan.path.suffix.lower() in MKV_EXTS
-    notes: list[str] = []
+    is_mp4 = plan.path.suffix.lower() in MOV_FASTSTART_EXTS
+    notes: list[Note] = []
     for was, now in zip(order, after, strict=True):
         loss = _stream_loss(was, now) or (_mkv_default_change(was, now) if is_mkv else None)
         if loss:
             return loss, ()
+        default_note = _mp4_default_note(plan, was, now) if is_mp4 else None
+        if default_note:
+            notes.append(default_note)
         lost = sorted(was.flags - now.flags)
         if not lost:
             continue
         what = f"stream#{was.index} lost its {', '.join(lost)} flag{'s' if len(lost) > 1 else ''}"
         if is_mkv:
             return f"{what}; mkvmerge 52 and older drop it, so update MKVToolNix to 54 or newer", ()
-        notes.append(f"    {plan.path.name}: {what}, which ffmpeg can't write to "
-                     f"{plan.path.suffix.lower()} files")
+        notes.append(Note("flags", what, f", which ffmpeg can't write to {plan.path.suffix.lower()} files"))
     return None, tuple(notes)
 
 
@@ -993,12 +1064,13 @@ def _default_flag_problem(plan: Plan, audio: list[Stream]) -> str | None:
 class Verification:
     """verify_remux()'s result: problem, why the remux must be rejected (None
     if it passed), and notes, warnings to log if the remux is then used (a
-    flag ffmpeg can't write; see _streams_problem()). A rejected remux
-    never carries notes, since they'd describe a change that isn't made.
-    damaged marks a problem with the original rather than the remux (see
-    _damage_problem()), whose message is complete as it is."""
+    flag ffmpeg can't write, or a default flag it set; see
+    _streams_problem()). A rejected remux never carries notes, since
+    they'd describe a change that isn't made. damaged marks a problem with
+    the original rather than the remux (see _damage_problem()), whose
+    message is complete as it is."""
     problem: str | None = None
-    notes: tuple[str, ...] = ()
+    notes: tuple[Note, ...] = ()
     damaged: bool = False
 
 
@@ -1033,7 +1105,7 @@ def verify_remux(plan: Plan) -> Verification:
     if damage:
         return Verification(damage, damaged=True)
     audio = [s for s in after if s.type == "audio"]
-    notes: tuple[str, ...] = ()
+    notes: tuple[Note, ...] = ()
     problem = _content_problem(plan, after)
     if problem is None and plan.reordered:
         problem = _first_audio_problem(plan, audio)
@@ -1267,6 +1339,35 @@ def report_failed_files() -> None:
     log.warning("\n" + "\n".join(lines))
 
 
+def _note_warnings(path: Path, notes: Iterable[Note]) -> None:
+    """Record the warnings path got (see Note), for report_warned_files()."""
+    with _warned_lock:
+        _warned_files.extend((str(path), note.kind, note.what) for note in notes)
+
+
+def report_warned_files() -> None:
+    """List every file this run warned about, with its full path and what
+    the warning was about, just before the files it couldn't fix (see
+    report_failed_files()), grouped by kind (see WARNING_GROUPS). Each was
+    logged as it happened, but like the failures, those lines have long
+    scrolled away by the end of a run over a whole library, and the
+    summary doesn't count warnings at all. A file with several kinds of
+    warning is listed under each. Sorted within each group, so a show's
+    episodes are together."""
+    with _warned_lock:
+        warned = list(_warned_files)
+    if not warned:
+        return
+    count = len({path for path, _, _ in warned})
+    lines = [f"{count} file{'s' if count > 1 else ''} had warnings:"]
+    for kind, heading in WARNING_GROUPS.items():
+        entries = sorted((path, what) for path, of_kind, what in warned if of_kind == kind)
+        if entries:
+            lines += ["", f"  {heading}",
+                      *(f"    {path}: {what}" if what else f"    {path}" for path, what in entries)]
+    log.warning("\n" + "\n".join(lines))
+
+
 class Superseded(Exception):
     """Raised by swap_in() when the original changed after it was probed: the
     remux was made from the old version, and swapping it in would undo
@@ -1386,7 +1487,7 @@ class Progress:
     on_progress: Callable[[int], None] | None = None
 
 
-def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = None) -> bool:
+def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: Note | None = None) -> bool:
     """Check a finished remux with verify_remux() and swap it in if it passes.
     Returns True if the original was replaced, False if the check failed
     (already logged). The check's warnings (see verify_remux()) are only
@@ -1397,9 +1498,12 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = Non
     (a damaged original, a file another program has open, and one it
     changed meanwhile) are recorded with that reason (see _note_failure()),
     to be listed under what to do about them at the end of the run (see
-    report_failed_files()).
+    report_failed_files()). The warnings about a file that was replaced,
+    the tool's included, are recorded too (see _note_warnings()), to be
+    listed with the other files that got warnings (see
+    report_warned_files()); a rejected file is listed with the failures.
 
-    tool_warnings is the line about the remux tool's warnings (see
+    tool_warnings is the warning about the remux tool's warnings (see
     _remux_and_swap()), logged before the result: once the check has run,
     or before saying the remux isn't a regular file, where they may help
     explain it. Not for a damaged original, though: the tool's warnings
@@ -1426,7 +1530,7 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = Non
     try:
         if not stat.S_ISREG(os.lstat(tmp_path).st_mode):
             if tool_warnings:
-                log.warning(tool_warnings)
+                log.warning(tool_warnings.line(path.name))
             log.error(f"    {path.name}: {tmp_path.name} isn't a regular file, "
                       f"keeping original untouched")
             tmp_path.unlink(missing_ok=True)
@@ -1438,7 +1542,7 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = Non
             tmp_path.unlink(missing_ok=True)
             return False
         if tool_warnings:
-            log.warning(tool_warnings)
+            log.warning(tool_warnings.line(path.name))
         if checked.problem:
             log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
                       f"keeping original untouched")
@@ -1465,7 +1569,8 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: str | None = Non
         tmp_path.unlink(missing_ok=True)
         raise
     for note in checked.notes:
-        log.warning(note)
+        log.warning(note.line(path.name))
+    _note_warnings(path, [*([tool_warnings] if tool_warnings else []), *checked.notes])
     return True
 
 
@@ -1579,10 +1684,12 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     starts (see _announce()). warnings_exit is an exit code that means the
     tool finished but printed warnings (mkvmerge's 1): the file is still
     checked and used, and the warnings, each kind once (see
-    _collapse_repeats()), are handed to check_and_swap_in(),
-    which logs them once the check has run, unless it found the original
-    damaged. A killed process can also exit with that code (mkvmerge on
-    Windows), so it only counts as finished if no stop was requested.
+    _collapse_repeats()), are handed to check_and_swap_in(), which logs
+    them once the check has run, unless it found the original damaged, and
+    lists the file again at the end of the run if the remux is used (see
+    report_warned_files()). A killed process can also exit with that code
+    (mkvmerge on Windows), so it only counts as finished if no stop was
+    requested.
 
     A remux that failed after a stop was requested raises Cancelled, so
     process_file() reports the file as cancelled, not as an error: the stop
@@ -1627,8 +1734,8 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         if with_warnings:
             warnings = _collapse_repeats([_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
                                           for line in output.splitlines() if "warning" in line.lower()])
-            tool_warnings = (f"    {path.name}: {tool} finished with warnings: "
-                             + ("; ".join(warnings) or output.strip() or "(no details given)"))
+            tool_warnings = Note("tool", f"{tool} finished with warnings: "
+                                 + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
         return check_and_swap_in(plan, opts, tool_warnings)
     except BaseException:
@@ -1953,6 +2060,7 @@ def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, ex
         return None
     if path.stem.endswith(TMP_MARKER):
         log.warning(f"Skipping leftover temp file from an interrupted run (safe to delete): {path}")
+        _note_warnings(path, [Note("leftover", "")])
         return None
     return path, real or os.path.realpath(path)
 
@@ -2377,9 +2485,10 @@ def main(argv: list[str] | None = None) -> int:
     couldn't be given their original owner are reported in one warning
     just before the summary (report_ownership_failures()), with the full
     list saved next to --log-file, or in the current folder. Then every file
-    that couldn't be fixed is listed with its full path, grouped by what to
-    do about it (report_failed_files()), so none needs finding in a long
-    run's output.
+    that got a warning is listed with its full path, grouped by kind
+    (report_warned_files()), and every file that couldn't be fixed,
+    grouped by what to do about it (report_failed_files()), so none needs
+    finding in a long run's output.
 
     The answer to the backup question goes into opts.existing_backups, in
     a copy of opts (Options is frozen), so the rest of the run reads it from
@@ -2471,12 +2580,14 @@ def _run(opts: Options) -> int:
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
         report_ownership_failures(list_folder)
+        report_warned_files()
         report_failed_files()
         finished = sum(stats[k] for k in ("changed", "unchanged", "skipped", "error"))
         print_summary(stats, opts, partial=True, cancelled=len(files) - finished)
         return 128 + signum
 
     report_ownership_failures(list_folder)
+    report_warned_files()
     report_failed_files()
     print_summary(stats, opts)
     return 1 if stats["error"] else 0
