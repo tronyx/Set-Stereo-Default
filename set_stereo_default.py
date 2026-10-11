@@ -462,9 +462,9 @@ def _reset_run_state() -> None:
     run more than once, e.g. when called from other Python code: a stop
     request (which would cancel every file), files that couldn't keep their
     owner, files it warned about and files it couldn't fix (which would be
-    reported again), the
-    headers printed last, and whether this mkvmerge can keep legacy font
-    types. No remux outlives its run, so _active_procs is already empty."""
+    reported again), the headers printed last, and whether this mkvmerge
+    can keep legacy font types. No remux outlives its run, so _active_procs
+    is already empty."""
     _cancelled.clear()
     with _ownership_lock:
         _ownership_failures.clear()
@@ -1684,11 +1684,12 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     starts (see _announce()). warnings_exit is an exit code that means the
     tool finished but printed warnings (mkvmerge's 1): the file is still
     checked and used, and the warnings, each kind once (see
-    _collapse_repeats()), are handed to check_and_swap_in(),
-    which logs them once the check has run, unless it found the original
-    damaged, and lists the file again at the end of the run if the remux
-    is used (see report_warned_files()). A killed process can also exit with that code (mkvmerge on
-    Windows), so it only counts as finished if no stop was requested.
+    _collapse_repeats()), are handed to check_and_swap_in(), which logs
+    them once the check has run, unless it found the original damaged, and
+    lists the file again at the end of the run if the remux is used (see
+    report_warned_files()). A killed process can also exit with that code
+    (mkvmerge on Windows), so it only counts as finished if no stop was
+    requested.
 
     A remux that failed after a stop was requested raises Cancelled, so
     process_file() reports the file as cancelled, not as an error: the stop
