@@ -29,7 +29,7 @@ The script skips a file, and counts it under `Skipped` in the summary, in these 
 
 Each change is a remux. The script copies the audio and video without changes into a new file, with the correct flags. Before the new file replaces the original, the script tests it. The new file passes the tests only if:
 
-- All streams (the tracks in the file) are still there, with the same codec (data format), language, name, and flags. A chapter track in an MP4 or MOV file is an exception. Because ffmpeg writes a new chapter track, the file must only still have a chapter track.
+- All streams (the tracks in the file) are still there, with the same codec (data format), language, name, and flags. A chapter track in an MP4 or MOV file is an exception. Because ffmpeg writes a new chapter track, the file must only still have a chapter track. If the original has chapters but lost its chapter track (ffprobe shows "Referenced QT chapter track not found"), the new file gets a chapter track. This repairs the file.
 - The correct track is the default track.
 - The new file is not noticeably shorter than the original.
 
