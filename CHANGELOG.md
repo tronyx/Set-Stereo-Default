@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-12 · [#26](https://github.com/tronyx/Set-Stereo-Default/pull/26)
+
 ### Fixed
 
 - The script could not fix an MP4, M4V, or MOV file that has chapters but lost its chapter track. Some web downloads are like this, and ffprobe shows "Referenced QT chapter track not found" for them. ffmpeg writes a new chapter track from the list of chapters, so the new file had one stream more than the original. The post-remux test then rejected it with "stream count changed". Now the new file can gain a chapter track when the original has none, which also repairs the file. A new test makes such a file and runs the script on it.
