@@ -187,6 +187,31 @@ def set_enabled_bits(path, bits):
     path.write_bytes(data)
 
 
+def hide_chapter_track(path):
+    """Make an MP4 or MOV file that ffmpeg wrote look as if it had lost its
+    chapter track: the track's trak box becomes a free box, which readers
+    skip, while the other tracks still point to it and the chapter list
+    stays. Some web downloads look like that (ffprobe says "Referenced QT
+    chapter track not found"). The chapter track is the one whose handler
+    is "text", so the file must have no subtitle track, which in a MOV
+    file has that handler too."""
+    data = bytearray(path.read_bytes())
+    found = []
+    for kind, body, end in child_boxes(data, 0, len(data)):
+        if kind != b"moov":
+            continue
+        for trak, trak_body, trak_end in child_boxes(data, body, end):
+            handlers = [bytes(data[hdlr + 8:hdlr + 12])
+                        for mdia, mdia_body, mdia_end in child_boxes(data, trak_body, trak_end)
+                        if mdia == b"mdia"
+                        for box, hdlr, _ in child_boxes(data, mdia_body, mdia_end) if box == b"hdlr"]
+            if trak == b"trak" and handlers == [b"text"]:
+                found.append(trak_body)
+    assert len(found) == 1 and data[found[0] - 4:found[0]] == b"trak", found
+    data[found[0] - 4:found[0]] = b"free"
+    path.write_bytes(data)
+
+
 def digest(path):
     """SHA-256 of path's contents, to tell whether a file changed at all."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -598,6 +623,43 @@ def test_a_chapter_track_comes_through_once(tmp_path, ext):
     assert summary(output)["changed"] == 1, output
     assert audio_defaults(video) == [(6, False), (2, True)]
     assert contents(video) == before
+
+
+@pytest.mark.parametrize("ext", [".mp4", ".m4v", ".mov"])
+def test_chapters_without_their_chapter_track_are_fixed(tmp_path, ext):
+    """Some web downloads list chapters but have lost the chapter track
+    that their other tracks point to (ffprobe says "Referenced QT chapter
+    track not found"). ffmpeg writes a new chapter track from the list, so
+    the remux has one stream more than the original, and the script
+    rejected it with "stream count changed" (from 3 to 4 here), so the
+    file couldn't be fixed. The remux must be used now: the chapters come
+    through in a new chapter track, and everything else as it was."""
+    need("ffmpeg", "ffprobe")
+    chapters = tmp_path / "chapters.txt"
+    chapters.write_text(CHAPTERS, encoding="utf-8")
+    video = tmp_path / f"video{ext}"
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=2",
+                    "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+                    "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-i", str(chapters), "-map", "0", "-map", "1", "-map", "2",
+                    "-map_metadata", "3", "-map_chapters", "3",
+                    "-c:v", "mpeg4", "-c:a", "aac",
+                    "-disposition:a:0", "default", "-disposition:a:1", "0", str(video)],
+                   check=True, capture_output=True, text=True)
+    hide_chapter_track(video)
+    before = contents(video)
+    assert [s["type"] for s in before["streams"]] == ["video", "audio", "audio"], before
+    assert len(before["chapters"]) == 2, before
+
+    code, output = run_script(video)
+
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    after = contents(video)
+    assert [s["type"] for s in after["streams"]] == ["video", "audio", "audio", "data"], after
+    assert dict(after, streams=after["streams"][:3]) == before
 
 
 FUZZ_SEED = os.environ.get("SSD_FUZZ_SEED") or str(int(time.time()))

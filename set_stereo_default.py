@@ -767,7 +767,8 @@ def is_chapter_track(stream: Stream) -> bool:
     chapter titles, which ffprobe lists as a data stream. ffmpeg writes a
     new one from the file's chapter list on every remux, so apply_remux()
     leaves the original's out, and the post-remux check takes the new one
-    in its place (see verify_remux())."""
+    in its place, or accepts it in a file that had lost its own (see
+    _content_problem())."""
     return stream.type == "data" and stream.tag in ("text", "tx3g")
 
 
@@ -932,16 +933,32 @@ def _mp4_default_note(plan: Plan, was: Stream, now: Stream) -> Note | None:
     return Note("default", f"stream#{was.index} lost its default flag")
 
 
+def _chapter_tracks(streams: list[Stream]) -> int:
+    """How many of streams are chapter tracks (see is_chapter_track())."""
+    return sum(1 for s in streams if is_chapter_track(s))
+
+
 def _content_problem(plan: Plan, after: list[Stream]) -> str | None:
     """Whether the remux (after) lost any stream outright: it must have as
-    many streams, chapter tracks (see is_chapter_track()) and audio tracks
-    as the original."""
+    many streams besides chapter tracks (see is_chapter_track()), and as
+    many audio tracks, as the original. It must have as many chapter
+    tracks too, except that an original without one may gain one.
+
+    ffmpeg writes the chapter track afresh from the chapter list, which an
+    MP4 or MOV file also keeps elsewhere. Some web downloads have lost
+    their chapter track but still point to it (ffprobe says "Referenced QT
+    chapter track not found"), so their remux comes out with one: that
+    loses nothing, and repairs the file. Any other change in the count is
+    a loss: a chapter track gone, or copied as well as written afresh."""
     before = plan.layout
-    if len(after) != len(before):
-        return f"stream count changed from {len(before)} to {len(after)}"
-    had, has = (sum(1 for s in streams if is_chapter_track(s)) for streams in (before, after))
-    if has != had:
+    had, has = _chapter_tracks(before), _chapter_tracks(after)
+    if has != had and (had, has) != (0, 1):
         return f"chapter track count changed from {had} to {has}"
+    if len(after) - has != len(before) - had:
+        if has == had:
+            return f"stream count changed from {len(before)} to {len(after)}"
+        return (f"stream count changed from {len(before) - had} to {len(after) - has}, "
+                f"not counting chapter tracks")
     audio = [s for s in after if s.type == "audio"]
     if len(audio) != len(plan.streams):
         return f"expected {len(plan.streams)} audio tracks, found {len(audio)}"

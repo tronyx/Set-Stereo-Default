@@ -2980,6 +2980,28 @@ def test_verify_remux_takes_a_new_chapter_track_in_place_of_the_old(fake_ffprobe
     assert ssd.verify_remux(plan).problem == problem
 
 
+@pytest.mark.parametrize("remuxed, problem", [
+    (NEW_CHAPTER_TRACK + [chapter_track(5)], None),
+    (NEW_CHAPTER_TRACK, None),
+    (NEW_CHAPTER_TRACK + [chapter_track(5), chapter_track(6)], "chapter track count changed from 0 to 2"),
+    (NEW_CHAPTER_TRACK + [stream(5, "data", 0, "bin_data"), chapter_track(6)],
+     "stream count changed from 5 to 6, not counting chapter tracks"),
+], ids=["chapter track gained", "none, as before", "two gained", "another stream gained too"])
+def test_verify_remux_accepts_a_chapter_track_for_an_original_without_one(fake_ffprobe, remuxed,
+                                                                         problem):
+    """Some web downloads list chapters but have lost their chapter track,
+    while their other tracks still point to it (ffprobe says "Referenced
+    QT chapter track not found"). ffmpeg writes a chapter track from the
+    list, so the remux has one stream more, and was rejected for it, so
+    the file couldn't be fixed. Gaining one chapter track loses nothing
+    and repairs the file; gaining two, or another stream, is still a
+    problem."""
+    layout = [ssd._stream_info(s) for s in MP4_LAYOUT if not ssd.is_chapter_track(ssd._stream_info(s))]
+    plan = ssd.Plan(Path("v.mp4"), [s for s in layout if s.type == "audio"], 3, layout=layout)
+    fake_ffprobe[str(plan.tmp_path)] = remuxed
+    assert ssd.verify_remux(plan).problem == problem
+
+
 def dry_run_flags(caplog):
     """The --default-track values from a logged mkvmerge dry-run command."""
     args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
