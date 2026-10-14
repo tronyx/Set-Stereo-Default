@@ -8,6 +8,12 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 Nothing yet.
 
+## 2026-10-14 · [#27](https://github.com/tronyx/Set-Stereo-Default/pull/27)
+
+### Project
+
+- The property test that makes a remux lose one thing at a time describes each kind of loss as one entry in a table, saying when it applies and how to make it, instead of two long chains of conditions, which CodeFactor flagged as too complex. It checks the same things and draws the same examples as before.
+
 ## 2026-10-12 · [#26](https://github.com/tronyx/Set-Stereo-Default/pull/26)
 
 ### Fixed
