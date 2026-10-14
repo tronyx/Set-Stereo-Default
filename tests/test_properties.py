@@ -236,6 +236,54 @@ def test_a_remux_that_kept_everything_passes_the_check(case):
     assert verified(plan, after, duration) == ssd.Verification()
 
 
+def with_stream(after, i, **fields):
+    """after, with stream i's fields changed."""
+    return [dataclasses.replace(s, **fields) if n == i else s for n, s in enumerate(after)]
+
+
+def known_language(s):
+    """Whether s has a real language tag, not none or "und"."""
+    return ssd.normalize_language(s.language) not in ("", "und")
+
+
+LOSSES = {
+    "remove": (lambda plan, s, duration: True,
+               lambda after, i, duration: (after[:i] + after[i + 1:], duration)),
+    "add": (lambda plan, s, duration: True,
+            lambda after, i, duration: (after + [dataclasses.replace(after[i], index=len(after))], duration)),
+    "type": (lambda plan, s, duration: True,
+             lambda after, i, duration: (
+                 with_stream(after, i, type="data" if after[i].type != "data" else "video"), duration)),
+    "codec": (lambda plan, s, duration: not ssd.is_chapter_track(s),
+              lambda after, i, duration: (with_stream(after, i, codec=after[i].codec + "2"), duration)),
+    "tag": (lambda plan, s, duration: s.type == "data",
+            lambda after, i, duration: (
+                with_stream(after, i, tag="tmcd" if ssd.is_chapter_track(after[i]) else "text"), duration)),
+    "channels": (lambda plan, s, duration: s.type == "audio",
+                 lambda after, i, duration: (
+                     with_stream(after, i, channels=(after[i].channels or 0) + 1), duration)),
+    "language": (lambda plan, s, duration: not ssd.is_chapter_track(s) and known_language(s),
+                 lambda after, i, duration: (with_stream(
+                     after, i, language="jpn" if ssd.normalize_language(after[i].language) != "jpn" else "spa"),
+                     duration)),
+    "name": (lambda plan, s, duration: not ssd.is_chapter_track(s) and bool(s.names),
+             lambda after, i, duration: (with_stream(after, i, names=()), duration)),
+    "flag": (lambda plan, s, duration: not ssd.is_chapter_track(s) and bool(s.flags),
+             lambda after, i, duration: (with_stream(after, i, flags=frozenset()), duration)),
+    "duration": (lambda plan, s, duration: duration is not None,
+                 lambda after, i, duration: (
+                     after, duration - max(duration * ssd.MAX_DURATION_LOSS, ssd.MIN_DURATION_LOSS) - 0.1)),
+    "default": (lambda plan, s, duration: not plan.reordered and s.type == "audio",
+                lambda after, i, duration: (with_stream(after, i, default=not after[i].default), duration)),
+}
+"""Every way test_a_remux_that_lost_anything_is_rejected() makes a remux
+lose something, by name: (applies, make). applies(plan, s, duration) says
+whether it can be made to stream s of the remux; make(after, i, duration)
+returns the remux's streams and duration with stream i changed. A chapter
+track's codec, name, language and flags are left alone, since ffmpeg
+writes the track afresh and they're its to choose."""
+
+
 @given(case=plans(), data=st.data())
 def test_a_remux_that_lost_anything_is_rejected(case, data):
     """Any one loss is caught: a stream gone or added, a stream's type,
@@ -249,51 +297,13 @@ def test_a_remux_that_lost_anything_is_rejected(case, data):
     ffmpeg's own chapter track used to cause), or no longer a chapter
     track; and a data stream that became one counts as a stream lost. Its
     codec, name, language and flags are ffmpeg's to choose, since it
-    writes the track afresh, so changing those isn't a loss."""
+    writes the track afresh, so changing those isn't a loss (see
+    LOSSES)."""
     plan, after, duration = case
     i = data.draw(st.integers(0, len(after) - 1), label="stream")
-    s = after[i]
-    chapters = ssd.is_chapter_track(s)
-    changes = ["remove", "add", "type"] + ([] if chapters else ["codec"])
-    if s.type == "data":
-        changes.append("tag")
-    if s.type == "audio":
-        changes.append("channels")
-    if not chapters and ssd.normalize_language(s.language) not in ("", "und"):
-        changes.append("language")
-    if not chapters and s.names:
-        changes.append("name")
-    if not chapters and s.flags:
-        changes.append("flag")
-    if duration is not None:
-        changes.append("duration")
-    if not plan.reordered and s.type == "audio":
-        changes.append("default")
-    change = data.draw(st.sampled_from(changes), label="change")
-
-    if change == "remove":
-        after = after[:i] + after[i + 1:]
-    elif change == "add":
-        after = after + [dataclasses.replace(s, index=len(after))]
-    elif change == "type":
-        after[i] = dataclasses.replace(s, type="data" if s.type != "data" else "video")
-    elif change == "tag":
-        after[i] = dataclasses.replace(s, tag="tmcd" if chapters else "text")
-    elif change == "codec":
-        after[i] = dataclasses.replace(s, codec=s.codec + "2")
-    elif change == "channels":
-        after[i] = dataclasses.replace(s, channels=(s.channels or 0) + 1)
-    elif change == "language":
-        after[i] = dataclasses.replace(s, language="jpn" if ssd.normalize_language(s.language) != "jpn"
-                                       else "spa")
-    elif change == "name":
-        after[i] = dataclasses.replace(s, names=())
-    elif change == "flag":
-        after[i] = dataclasses.replace(s, flags=frozenset())
-    elif change == "duration":
-        duration = duration - max(duration * ssd.MAX_DURATION_LOSS, ssd.MIN_DURATION_LOSS) - 0.1
-    else:
-        after[i] = dataclasses.replace(s, default=not s.default)
+    possible = [name for name, (applies, _) in LOSSES.items() if applies(plan, after[i], duration)]
+    change = data.draw(st.sampled_from(possible), label="change")
+    after, duration = LOSSES[change][1](after, i, duration)
 
     result = verified(plan, after, duration)
 
