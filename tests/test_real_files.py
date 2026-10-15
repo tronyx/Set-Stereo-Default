@@ -16,6 +16,7 @@ import random
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -1056,6 +1057,33 @@ def test_a_file_open_in_another_program_is_reported_and_left_alone(tmp_path, exc
                 "locked.mkv: couldn't swap the new file in (Access is denied), so it's left as it was"
                 " -- is it read-only, or open in another program?")
     assert expected in output, output
+    assert "unexpected error" not in output, output
+    assert digest(locked) == before
+    assert audio_defaults(other) == [(6, False), (2, True)]
+    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert sorted(p.name for p in tmp_path.glob("*.bak")) == (["other.mp4.bak"] if backup else [])
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows refuses to replace a read-only file")
+@pytest.mark.parametrize("backup", [False, True], ids=["no backup", "backup"])
+def test_a_read_only_file_is_reported_and_left_alone(tmp_path, backup):
+    """On Windows a file with the read-only attribute can't be replaced. It's
+    reported, with what to do about it, before its remux starts, and left
+    as it was with no temp file or backup next to it, while the rest of the
+    folder is still fixed."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    locked = make_video(tmp_path / "locked.mkv", [Track(6, default=True), Track(2)])
+    other = make_video(tmp_path / "other.mp4", [Track(6, default=True), Track(2)])
+    before = digest(locked)
+    locked.chmod(stat.S_IREAD)
+    try:
+        code, output = run_script(tmp_path, *(["--backup"] if backup else []))
+    finally:
+        locked.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+    assert code == 1, output
+    assert summary(output) == {"changed": 1, "unchanged": 0, "skipped": 0, "error": 1}, output
+    assert "locked.mkv: the file is read-only, so it's left as it was" in output, output
     assert "unexpected error" not in output, output
     assert digest(locked) == before
     assert audio_defaults(other) == [(6, False), (2, True)]

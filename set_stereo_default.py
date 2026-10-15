@@ -1521,6 +1521,41 @@ def _snapshot(path: Path) -> tuple[int, int] | None:
     return st.st_size, st.st_mtime_ns
 
 
+def _read_only(path: Path) -> bool:
+    """True if path has Windows' read-only attribute, which stops it being
+    replaced: renaming the remux over it fails with "Access is denied",
+    but only once the whole remux has run. Never true elsewhere: on Linux
+    and macOS, the folder's permissions decide whether a file can be
+    replaced, not the file's own, so a file without write permission is
+    fixed as usual and keeps its permissions (see copy_ownership()). Nor
+    for a file another program removed after it was probed: the remux
+    reports that in its own words."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return not os.stat(path).st_mode & stat.S_IWRITE
+    except FileNotFoundError:
+        return False
+
+
+def _remove_temp(path: Path) -> None:
+    """Delete the remux temp file at path, if there is one. Windows refuses
+    to delete a read-only file, and a remux becomes read-only when it's
+    given the permissions of an original made read-only during its remux
+    (see copy_ownership()); earlier versions also left such files behind.
+    So on Windows, a refusal clears the read-only attribute and tries once
+    more. Only for the remux: a backup and its staging file are hard links
+    to the original and share its attribute, so clearing it on them would
+    clear it on the original too."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        if sys.platform != "win32":
+            raise
+        os.chmod(path, stat.S_IWRITE)
+        path.unlink(missing_ok=True)
+
+
 @dataclass
 class Progress:
     """How to show a remux's progress: show its own bar (--jobs 1 only; see
@@ -1575,20 +1610,20 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: Note | None = No
                 log.warning(tool_warnings.line(path.name))
             log.error(f"    {path.name}: {tmp_path.name} isn't a regular file, "
                       f"keeping original untouched")
-            tmp_path.unlink(missing_ok=True)
+            _remove_temp(tmp_path)
             return False
         checked = verify_remux(plan)
         if checked.damaged:
             log.error(f"    {path.name}: {checked.problem}.")
             _note_failure(path, "damaged")
-            tmp_path.unlink(missing_ok=True)
+            _remove_temp(tmp_path)
             return False
         if tool_warnings:
             log.warning(tool_warnings.line(path.name))
         if checked.problem:
             log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
                       f"keeping original untouched")
-            tmp_path.unlink(missing_ok=True)
+            _remove_temp(tmp_path)
             return False
         try:
             swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
@@ -1599,16 +1634,16 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: Note | None = No
                 _note_failure(path, "in use")
             log.error(f"    {path.name}: couldn't swap the new file in ({exc.strerror or exc}), "
                       f"so it's left as it was{hint}")
-            tmp_path.unlink(missing_ok=True)
+            _remove_temp(tmp_path)
             return False
     except Superseded:
         log.error(f"    {path.name}: changed by another program during the remux, so it's "
                   f"left as it is now; run the script again to fix the new version")
         _note_failure(path, "changed")
-        tmp_path.unlink(missing_ok=True)
+        _remove_temp(tmp_path)
         return False
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        _remove_temp(tmp_path)
         raise
     for note in checked.notes:
         log.warning(note.line(path.name))
@@ -1749,14 +1784,25 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     swapping it in, check_and_swap_in() included, since a stop can land
     between any two lines: also after the remux has finished, before the
     check has started. Until check_and_swap_in() has checked it, the
-    original isn't touched."""
+    original isn't touched.
+
+    A file with Windows' read-only attribute (see _read_only()) is reported
+    as an error before anything else, in a dry run too, so the dry run
+    predicts the real one, rather than remuxed only to fail at the swap.
+    It's listed with the files open in another program, under a heading
+    that also says to make the file writable."""
     path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
+    if _read_only(path):
+        log.error(f"  {path.name}: the file is read-only, so it's left as it was -- clear its read-only "
+                  f"attribute (Properties in Explorer, or attrib -r), then run the script again")
+        _note_failure(path, "in use")
+        return False
     if opts.dry_run:
         _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
         return True
     _announce(plan.intro)
     try:
-        tmp_path.unlink(missing_ok=True)
+        _remove_temp(tmp_path)
     except OSError as exc:
         log.error(f"    {path.name}: can't use the temp name {tmp_path.name} ({exc.strerror or exc}); "
                   f"the name may be too long for this file system")
@@ -1769,7 +1815,7 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
             if _cancelled.is_set():
                 raise Cancelled
             log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
-            tmp_path.unlink(missing_ok=True)
+            _remove_temp(tmp_path)
             return False
 
         tool_warnings = None
@@ -1781,7 +1827,7 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
 
         return check_and_swap_in(plan, opts, tool_warnings)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        _remove_temp(tmp_path)
         raise
 
 

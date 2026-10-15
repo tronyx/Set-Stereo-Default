@@ -9,6 +9,7 @@ import logging
 import os
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -2437,6 +2438,45 @@ def test_a_remux_that_cant_be_written_to_disk_keeps_the_original(remux, monkeypa
     assert "unexpected error" not in caplog.text
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="elsewhere a read-only file can be deleted anyway")
+def test_a_read_only_leftover_temp_file_doesnt_block_the_remux(remux):
+    """Earlier versions could leave a read-only temp file behind, which
+    Windows refuses to delete. It's removed before the remux like any
+    leftover, rather than the file being reported as having a name too
+    long for its temp name."""
+    apply, video, _ = remux
+    leftover = video.with_name(video.name + ssd.TMP_MARKER + video.suffix)
+    leftover.write_bytes(b"leftover")
+    leftover.chmod(stat.S_IREAD)
+
+    assert apply() is True
+
+    assert video.read_bytes() == b"remuxed"
+    assert not leftover_temp_files(video)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows refuses to replace a read-only file")
+def test_a_file_made_read_only_during_its_remux_leaves_no_temp_file(remux, monkeypatch, caplog):
+    """A file can become read-only after it was checked, while its remux
+    runs. The swap then fails, and the remux, read-only by now too since
+    it was given the original's permissions, must still be removed."""
+    apply, video, _ = remux
+    remux_stand_in = ssd.run_with_progress
+
+    def remux_then_made_read_only(*args, **kwargs):
+        result = remux_stand_in(*args, **kwargs)
+        video.chmod(stat.S_IREAD)
+        return result
+    monkeypatch.setattr(ssd, "run_with_progress", remux_then_made_read_only)
+
+    assert apply() is False
+
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert "couldn't swap the new file in (Access is denied), so it's left as it was" in caplog.text
+    assert "unexpected error" not in caplog.text
+
+
 def stop_at(function, line):
     """A trace function that raises Stopped(SIGINT) the first time line of
     function is about to run, as a Ctrl+C landing there would: the stop
@@ -2783,6 +2823,72 @@ def test_a_file_with_no_track_to_pick_is_skipped_with_the_reason(tmp_path, monke
 
     assert ssd.process_file(tmp_path / "v.mkv", file_args()) == "skipped"
     assert "v.mkv: SKIP (no 2-channel audio track found)" in caplog.text
+
+
+def make_read_only(path, monkeypatch):
+    """Give path Windows' read-only attribute: the real one on Windows, and
+    elsewhere the nearest thing, no write permission, with the script told
+    it runs on Windows."""
+    path.chmod(stat.S_IREAD)
+    if sys.platform != "win32":
+        monkeypatch.setattr(ssd.sys, "platform", "win32")
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["run", "dry run"])
+def test_a_read_only_file_on_windows_is_reported_before_its_remux(tmp_path, monkeypatch, probed, caplog,
+                                                                 dry_run):
+    """Windows can't replace a read-only file, so its remux would only fail
+    at the very end, after all the work. The file is reported at once
+    instead, with what to do about it, and left as it is. A dry run says
+    the same, so it predicts what the real run will do."""
+    caplog.set_level("INFO")
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    make_read_only(video, monkeypatch)
+    monkeypatch.setattr(ssd, "run_with_progress", lambda *a, **k: pytest.fail("the remux started"))
+
+    assert ssd.process_file(video, file_args(dry_run=dry_run)) == "error"
+
+    assert video.read_bytes() == b"original"
+    assert ("v.mkv: the file is read-only, so it's left as it was -- clear its read-only attribute "
+            "(Properties in Explorer, or attrib -r), then run the script again") in caplog.text
+    assert "setting stream#" not in caplog.text
+    assert "[dry-run]" not in caplog.text
+    assert ssd._failed_files == {str(video): "in use"}
+
+
+def test_a_read_only_file_that_is_already_correct_is_just_unchanged(tmp_path, monkeypatch, caplog):
+    """The read-only attribute only matters for a file that needs changing."""
+    streams = [audio(1, 6, "eac3"), audio(2, 2, "aac", default=True)]
+    monkeypatch.setattr(ssd, "probe_streams", lambda path: (streams, 100.0))
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    make_read_only(video, monkeypatch)
+
+    assert ssd.process_file(video, file_args()) == "unchanged"
+    assert "read-only" not in caplog.text
+
+
+def test_a_file_gone_before_the_read_only_check_isnt_an_unexpected_error(tmp_path, monkeypatch, probed, caplog):
+    """Another program can remove a file after it was probed. That's not
+    for the read-only check to report: it says the file isn't read-only,
+    and the remux then reports the file as missing in its own words."""
+    monkeypatch.setattr(ssd.sys, "platform", "win32")
+
+    assert ssd.process_file(tmp_path / "gone.mkv", file_args()) == "changed"
+    assert "unexpected error" not in caplog.text
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows can't replace a read-only file")
+def test_a_file_without_write_permission_is_still_fixed_outside_windows(tmp_path, probed):
+    """On Linux and macOS, the folder's permissions decide whether a file
+    can be replaced, not the file's own, so such a file is fixed as usual
+    and keeps its permissions (see copy_ownership())."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    video.chmod(stat.S_IREAD)
+
+    assert ssd.process_file(video, file_args()) == "changed"
 
 
 def test_ffmpeg_progress_is_reported_without_a_per_file_bar(tmp_path, monkeypatch):

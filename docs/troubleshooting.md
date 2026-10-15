@@ -7,7 +7,7 @@ For each file that the script skips or cannot change, the script shows a line wi
 At the end of the run, before the summary, the script shows a list of the files that it was not able to fix. The list gives the full path of each file. So no file gets lost in the long output of a run. The script puts these files into groups by what you must do:
 
 - Damaged files.
-- Files that another program has open.
+- Files that another program has open, and read-only files.
 - Files that another program changed during the run.
 - All other files.
 
@@ -60,7 +60,32 @@ Another program replaced or edited the file while the script remuxed it. For exa
 
 On Windows, the script cannot replace a file that another program has open. Examples are a media player, or Plex, Jellyfin, or Emby while it scans the file. The script deleted its new file and did not change the original. It also did not make a backup. Close the other program, or wait until the scan is done. Then run the script again.
 
-A read-only file causes the same error. Before you run the script again, remove the read-only attribute. If another program has exclusive access to the file (it blocks all other programs), the script cannot even read the file. Then the script shows `ffprobe failed on <name>: ... Permission denied` instead.
+A file that became read-only while the script remuxed it causes the same error. Before you run the script again, remove the read-only attribute (see the next section). If another program has exclusive access to the file (it blocks all other programs), the script cannot even read the file. Then the script shows `ffprobe failed on <name>: ... Permission denied` instead.
+
+## `the file is read-only, so it's left as it was -- clear its read-only attribute (Properties in Explorer, or attrib -r), then run the script again`
+
+On Windows, the script cannot replace a read-only file (a file with a marker that blocks changes). This marker is the read-only attribute. So the script does not try to change the file. It does not make a new file or a backup, and the original stays as it was. A dry run shows the same message, so you can find these files before the real run.
+
+To remove the attribute in Explorer:
+
+1. Right-click the file.
+2. Select Properties.
+3. Clear the Read-only box.
+4. Select OK.
+
+You can also use this command in a terminal:
+
+```text
+attrib -r "D:\Videos\Movie (2024).mkv"
+```
+
+To remove the attribute from all files in a folder and its subfolders, use this command:
+
+```text
+attrib -r "D:\Videos\*" /s
+```
+
+Then run the script again. On Linux and macOS, the script changes a file without write permission (permission to change the file) as usual. There, the permissions of the folder decide if the script can replace a file.
 
 ## `can't use the temp name <name>.tmp_remux.<ext> (...); the name may be too long for this file system`
 
