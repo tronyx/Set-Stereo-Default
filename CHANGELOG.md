@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- A power failure or a crash soon after the script changed a file could leave that file empty or full of zeros. ffmpeg and mkvmerge leave the new file in the cache of the operating system (memory that holds data before it goes to the disk). The script then replaced the original with the new file at once. On some file systems, for example XFS, the replacement can reach the disk before the data of the new file does. Now the script writes the new file to the disk before it replaces the original. It does the same for a backup that is a full copy. If the disk cannot write the data, the script keeps the original, deletes the new file, and reports the file as an error. New tests check that each file is on the disk before the script renames it, and that a failed write leaves the original as it was.
 
 ## 2026-10-14 · [#27](https://github.com/tronyx/Set-Stereo-Default/pull/27)
 

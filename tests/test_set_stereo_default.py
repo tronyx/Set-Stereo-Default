@@ -2,6 +2,7 @@
 mkvmerge: anything that would call those tools is replaced with a stand-in,
 and subprocess behavior is exercised with small Python child processes."""
 
+import errno
 import io
 import json
 import logging
@@ -871,6 +872,46 @@ def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypat
     assert os.stat(bak).st_ino != os.stat(video).st_ino
 
 
+@pytest.fixture
+def renames(monkeypatch):
+    """Records every os.replace() as (source name, target name, flushed),
+    where flushed says whether os.fsync() had written all of the source to
+    the disk before the rename: data still in Python's own buffer when
+    fsync() ran wasn't, so the file must already have its full size then.
+    Both still do their real work."""
+    flushed, done = [], []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        flushed.append(os.fstat(fd))
+        real_fsync(fd)
+
+    def replace(src, dst):
+        source = os.stat(src)
+        whole = any(os.path.samestat(source, s) and s.st_size == source.st_size for s in flushed)
+        done.append((Path(src).name, Path(dst).name, whole))
+        real_replace(src, dst)
+    monkeypatch.setattr(ssd.os, "fsync", fsync)
+    monkeypatch.setattr(ssd.os, "replace", replace)
+    return done
+
+
+def test_a_backup_copy_is_written_to_disk_before_it_becomes_the_backup(tmp_path, monkeypatch, renames):
+    """A copy, unlike a hard link, is new data that the system may still
+    hold in its cache. Renamed to <name>.bak before it reaches the disk, a
+    power cut could leave an empty backup in place of the old one."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    def no_hard_links(*args):
+        raise OSError("hard links not supported")
+    monkeypatch.setattr(ssd.os, "link", no_hard_links)
+    ssd.make_backup(video)
+
+    assert renames == [("v.mkv.bak.tmp_remux.mkv", "v.mkv.bak", True)]
+    assert (tmp_path / "v.mkv.bak").read_bytes() == b"original"
+
+
 @pytest.mark.parametrize("replace", [True, False], ids=["replace", "number"])
 def test_a_backup_copy_that_fails_partway_leaves_no_partial_backup(tmp_path, monkeypatch,
                                                                    replace):
@@ -1685,6 +1726,22 @@ def test_a_backup_is_kept_when_a_stop_lands_right_after_the_swap(tmp_path, monke
     assert (tmp_path / "v.mkv.bak").read_bytes() == b"original"
 
 
+def test_swap_in_writes_the_remux_to_disk_before_the_swap(tmp_path, renames):
+    """ffmpeg and mkvmerge leave the remux in the system's cache, to be
+    written to the disk later. Renamed over the original before then, a
+    power cut can leave the video empty or full of zeros on file systems
+    such as XFS, with the original already gone."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+
+    ssd.swap_in(video, tmp, backup=None)
+
+    assert renames == [("v.mkv.tmp_remux.mkv", "v.mkv", True)]
+    assert video.read_bytes() == b"remuxed"
+
+
 OLD_TIMES_NS = (1_577_880_000_000_000_000, 1_577_890_000_123_456_000)
 
 
@@ -2358,6 +2415,26 @@ def test_a_file_that_cant_be_replaced_is_reported_and_left_alone(remux, monkeypa
             " -- is it read-only, or open in another program?") in caplog.text
     assert "unexpected error" not in caplog.text
     assert ssd._failed_files == {str(video): "in use"}
+
+
+def test_a_remux_that_cant_be_written_to_disk_keeps_the_original(remux, monkeypatch, caplog):
+    """A flush that fails (EIO: the disk couldn't write the data) means the
+    remux may not be whole on the disk, so it never replaces the original:
+    the file is reported as left as it was, with no temp file or backup
+    left next to it."""
+    apply, video, _ = remux
+
+    def disk_error(fd):
+        raise OSError(errno.EIO, "Input/output error")
+    monkeypatch.setattr(ssd.os, "fsync", disk_error)
+
+    assert apply() is False
+
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert not list(video.parent.glob("*.bak*"))
+    assert "couldn't swap the new file in (Input/output error), so it's left as it was" in caplog.text
+    assert "unexpected error" not in caplog.text
 
 
 def stop_at(function, line):

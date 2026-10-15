@@ -1152,7 +1152,9 @@ def make_backup(path: Path, replace: bool = False) -> Path:
     is instant and needs no room while the remux runs; once the new file
     replaces the original, the backup holds the original's data on its
     own, so it takes the original's full size until it's deleted. Where
-    hard links aren't supported, a full copy is made instead.
+    hard links aren't supported, a full copy is made instead, written to
+    the disk before it's renamed into place (see _copy_new()). A hard
+    link needs no such flush: it's the original's own data.
 
     The backup is made under a staging name, <name>.bak.tmp_remux.<ext>,
     and renamed into place in one step once it's complete. So a copy that
@@ -1186,9 +1188,14 @@ def make_backup(path: Path, replace: bool = False) -> Path:
 def _copy_new(src: Path, dst: Path) -> None:
     """Copy src to dst, with its permissions and dates, like shutil.copy2(),
     except that dst must not exist yet: copy2() opens whatever is there,
-    following a symlink to wherever it points, while this fails instead."""
+    following a symlink to wherever it points, while this fails instead.
+    The copy is written to the disk before it's closed (see _flush()), so
+    make_backup() never renames a copy into place that a power cut could
+    still empty."""
     with open(src, "rb") as source, open(dst, "xb") as target:
         shutil.copyfileobj(source, target, 1024 * 1024)
+        target.flush()
+        os.fsync(target.fileno())
     shutil.copystat(src, dst)
 
 
@@ -1398,12 +1405,29 @@ def _changed_since(path: Path, snapshot: tuple[int, int] | None) -> bool:
     return snapshot is not None and _snapshot(path) != snapshot
 
 
+def _flush(path: Path) -> None:
+    """Write path's data to the disk itself, not just to the system's cache.
+    ffmpeg and mkvmerge leave their output in the cache, to be written out
+    later, and a rename can reach the disk before the data does. A power
+    cut in between would then leave the video empty or full of zeros on
+    file systems such as XFS, with the original already gone. Opened for
+    writing, since Windows only flushes a file opened that way. Raises
+    OSError if the data couldn't be written (EIO)."""
+    with open(path, "r+b") as file:
+        os.fsync(file.fileno())
+
+
 def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
             keep_dates: bool = False, snapshot: tuple[int, int] | None = None) -> None:
-    """Replace path with the checked remux at tmp_path: keep the original as
-    a backup if backup is set, copy its permissions and owner (and with
-    keep_dates, its access and modification times) onto the new file, then
-    swap the new file in with a single atomic rename.
+    """Replace path with the checked remux at tmp_path: write the remux to
+    the disk (see _flush()), keep the original as a backup if backup is
+    set, copy its permissions and owner (and with keep_dates, its access
+    and modification times) onto the new file, then swap the new file in
+    with a single atomic rename. The flush comes first, while the remux is
+    still writable (copying the permissions can make it read-only on
+    Windows), and before the checks below, so the time it takes on a slow
+    disk doesn't widen the gap between the last check and the swap. If it
+    fails, the OSError is raised with nothing touched.
 
     backup is None for no backup, "replace" to overwrite an existing
     <name>.bak, or "number" to number the new one if <name>.bak exists
@@ -1428,6 +1452,7 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     keep_dates is off by default because tools that spot changed files by
     size and modification time (rsync's default, some backup software)
     could skip a remux that kept both, leaving a stale copy."""
+    _flush(tmp_path)
     if _changed_since(path, snapshot):
         raise Superseded
     bak_path = make_backup(path, replace=(backup == "replace")) if backup else None
