@@ -113,7 +113,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType, ModuleType
-from typing import Any, Literal, NoReturn
+from typing import Any, BinaryIO, Literal, NoReturn
 
 try:
     from tqdm import tqdm
@@ -515,9 +515,15 @@ def _stop_handler(signum: int, frame: FrameType | None) -> NoReturn:
     systemd) reaches only this process, not the remuxes it started.
 
     The request is recorded before the exception is raised, since the
-    exception can be lost (see _check_stop())."""
+    exception can be lost (see _check_stop()).
+
+    Later stops are ignored from here on (see _ignore_stops()): the run is
+    stopping already. Another Stopped would break into the cleanup, or
+    into process_all()'s wait for its --jobs workers, and the summary would
+    then be printed while they still change files."""
     _requested_stop[0] = signum
     _cancelled.set()
+    _ignore_stops()
     _terminate_active_procs()
     raise Stopped(signum)
 
@@ -544,6 +550,15 @@ def _check_stop() -> None:
     quiet."""
     if _cancelled.is_set():
         raise Stopped(_requested_stop[0])
+
+
+def _cancel_if_stopping() -> None:
+    """Raise Cancelled if a stop was requested. Python only interrupts the
+    main thread, so a --jobs worker never gets the Stopped a stop raises:
+    it sees the request in _cancelled, and asks here at the points where
+    giving up leaves the file as it was (see swap_in() and _copy_data())."""
+    if _cancelled.is_set():
+        raise Cancelled
 
 
 def _unraisable(unraisable: sys.UnraisableHookArgs,
@@ -1193,10 +1208,22 @@ def _copy_new(src: Path, dst: Path) -> None:
     make_backup() never renames a copy into place that a power cut could
     still empty."""
     with open(src, "rb") as source, open(dst, "xb") as target:
-        shutil.copyfileobj(source, target, 1024 * 1024)
+        _copy_data(source, target)
         target.flush()
         os.fsync(target.fileno())
     shutil.copystat(src, dst)
+
+
+def _copy_data(source: BinaryIO, target: BinaryIO) -> None:
+    """Copy what's left of source to target 1 MB at a time, like
+    shutil.copyfileobj(), but raise Cancelled after any chunk once a stop
+    was requested (see _cancel_if_stopping()). A backup copy of a large
+    file can take minutes, and with --jobs the stop doesn't interrupt the
+    worker thread making it, so without this, a stop would wait for the
+    whole copy, longer than docker stop waits before it kills the run."""
+    while chunk := source.read(1024 * 1024):
+        target.write(chunk)
+        _cancel_if_stopping()
 
 
 def _owner(path: Path) -> tuple[int, int]:
@@ -1449,9 +1476,16 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     a stop can land right after the rename, so the backup of a file that
     was replaced is never removed.
 
+    A stop requested meanwhile raises Cancelled (see _cancel_if_stopping())
+    before the flush, which can take minutes on a slow disk, and again just
+    before the rename, once the backup is made. With --jobs, the stop
+    doesn't interrupt the worker thread running this, so without these
+    the remux would still be swapped in after the stop.
+
     keep_dates is off by default because tools that spot changed files by
     size and modification time (rsync's default, some backup software)
     could skip a remux that kept both, leaving a stale copy."""
+    _cancel_if_stopping()
     _flush(tmp_path)
     if _changed_since(path, snapshot):
         raise Superseded
@@ -1463,6 +1497,7 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
         if keep_dates:
             st = os.stat(path)
             os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        _cancel_if_stopping()
         if bak_path is not None and bak_path.suffix != ".bak":
             log.info(f"    {path.name}: kept the original as {bak_path.name}")
         os.replace(tmp_path, path)
@@ -2463,7 +2498,13 @@ def process_all(files: list[Path], opts: Options, stats: Counter[Outcome]) -> No
       header, repeated if another file printed in between
       (_FileHeaderFilter).
     - Once a stop is requested, files still waiting their turn return
-      "cancelled" straight away instead of starting."""
+      "cancelled" straight away instead of starting.
+    - Each file is counted in stats by the thread that worked on it, as
+      soon as its outcome is known (count_one()), not by the main thread,
+      which a stop interrupts wherever it is. With --jobs > 1, leaving the
+      pool after a stop waits for the files being worked on, and one that
+      finishes during that wait is counted as what happened to it (see
+      swap_in() for why most give up instead)."""
     use_bar = _show_bars(opts)
     counter = opts.log_file and not use_bar and sys.stdout.isatty()
     bars, overall = [], None
@@ -2504,6 +2545,15 @@ def process_all(files: list[Path], opts: Options, stats: Counter[Outcome]) -> No
             advance_overall(1.0 - last_reported)
         return result
 
+    count_lock = threading.Lock()
+
+    def count_one(i: int, f: Path) -> None:
+        """Process file number i with run_one(), and count what happened to it
+        in stats as soon as that's known, in the thread that worked on it."""
+        result = run_one(i, f)
+        with count_lock:
+            stats[result] += 1
+
     def show_counter(n: int) -> None:
         """Show "Processing n/N..." in place, when it stands in for the bars."""
         if counter:
@@ -2513,15 +2563,13 @@ def process_all(files: list[Path], opts: Options, stats: Counter[Outcome]) -> No
         if opts.jobs == 1:
             for i, f in enumerate(files, 1):
                 show_counter(i)
-                result = run_one(i, f)
-                stats[result] += 1
+                count_one(i, f)
         else:
             with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
-                futures = [pool.submit(run_one, i, f) for i, f in enumerate(files, 1)]
+                futures = [pool.submit(count_one, i, f) for i, f in enumerate(files, 1)]
                 for done, fut in enumerate(as_completed(futures), 1):
                     show_counter(done)
-                    result = fut.result()
-                    stats[result] += 1
+                    fut.result()
     finally:
         for bar in reversed(bars):
             with contextlib.suppress(Exception):

@@ -2,6 +2,7 @@
 mkvmerge: anything that would call those tools is replaced with a stand-in,
 and subprocess behavior is exercised with small Python child processes."""
 
+import _thread
 import errno
 import io
 import json
@@ -913,6 +914,24 @@ def test_a_backup_copy_is_written_to_disk_before_it_becomes_the_backup(tmp_path,
     assert (tmp_path / "v.mkv.bak").read_bytes() == b"original"
 
 
+def test_a_backup_copy_stops_between_chunks_once_a_stop_was_requested():
+    """A backup copy of a large file can take minutes. With --jobs, a stop
+    reaches the worker thread making it only as a request (_cancelled),
+    which the copy heeds after each 1 MB chunk, so the run stops within
+    docker stop's 10 seconds."""
+    class StopAfterFirstRead(io.BytesIO):
+        def read(self, size=-1):
+            data = super().read(size)
+            ssd._cancelled.set()
+            return data
+    target = io.BytesIO()
+
+    with pytest.raises(ssd.Cancelled):
+        ssd._copy_data(StopAfterFirstRead(bytes(3 * 1024 * 1024)), target)
+
+    assert len(target.getvalue()) == 1024 * 1024
+
+
 @pytest.mark.parametrize("replace", [True, False], ids=["replace", "number"])
 def test_a_backup_copy_that_fails_partway_leaves_no_partial_backup(tmp_path, monkeypatch,
                                                                    replace):
@@ -926,11 +945,11 @@ def test_a_backup_copy_that_fails_partway_leaves_no_partial_backup(tmp_path, mon
     def no_hard_links(*args):
         raise OSError("hard links not supported")
 
-    def disk_fills_up(src, dst, length=None):
-        dst.write(b"orig")
+    def disk_fills_up(source, target):
+        target.write(b"orig")
         raise OSError(28, "No space left on device")
     monkeypatch.setattr(ssd.os, "link", no_hard_links)
-    monkeypatch.setattr(ssd.shutil, "copyfileobj", disk_fills_up)
+    monkeypatch.setattr(ssd, "_copy_data", disk_fills_up)
 
     with pytest.raises(OSError, match="No space left"):
         ssd.make_backup(video, replace=replace)
@@ -1743,6 +1762,23 @@ def test_swap_in_writes_the_remux_to_disk_before_the_swap(tmp_path, renames):
     assert video.read_bytes() == b"remuxed"
 
 
+def test_swap_in_does_nothing_once_a_stop_was_requested(tmp_path, monkeypatch):
+    """A flush can take minutes on a slow disk, so a --jobs worker that
+    reaches the swap after a stop gives up before the flush, not after."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+    monkeypatch.setattr(ssd.os, "fsync", lambda fd: pytest.fail("the remux was flushed"))
+    ssd._cancelled.set()
+
+    with pytest.raises(ssd.Cancelled):
+        ssd.swap_in(video, tmp, backup="number")
+
+    assert video.read_bytes() == b"original"
+    assert not list(tmp_path.glob("*.bak*"))
+
+
 OLD_TIMES_NS = (1_577_880_000_000_000_000, 1_577_890_000_123_456_000)
 
 
@@ -2436,6 +2472,28 @@ def test_a_remux_that_cant_be_written_to_disk_keeps_the_original(remux, monkeypa
     assert not list(video.parent.glob("*.bak*"))
     assert "couldn't swap the new file in (Input/output error), so it's left as it was" in caplog.text
     assert "unexpected error" not in caplog.text
+
+
+def test_a_stop_once_the_backup_is_made_leaves_the_file_as_it_was(remux, monkeypatch):
+    """With --jobs, a stop doesn't interrupt a worker thread, which only
+    sees it as a request (_cancelled). A worker with a checked remux and a
+    backup by then must still not swap the remux in: the file stays as it
+    was, with neither the backup nor the remux next to it."""
+    apply, video, _ = remux
+    real_make_backup = ssd.make_backup
+
+    def backup_then_stop(*args, **kwargs):
+        made = real_make_backup(*args, **kwargs)
+        ssd._cancelled.set()
+        return made
+    monkeypatch.setattr(ssd, "make_backup", backup_then_stop)
+
+    with pytest.raises(ssd.Cancelled):
+        apply()
+
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert not list(video.parent.glob("*.bak*"))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="elsewhere a read-only file can be deleted anyway")
@@ -3723,6 +3781,38 @@ def test_ctrl_c_with_jobs_skips_files_that_havent_started(tmp_path, monkeypatch)
     assert 1 <= len(started) <= 2
 
 
+def test_a_file_that_finishes_while_a_stop_waits_for_it_is_counted(tmp_path, monkeypatch, capsys):
+    """With --jobs, a stop waits for the files being worked on. One that
+    finishes during that wait, its remux already checked and swapped in,
+    is counted as what happened to it, not as cancelled. Here e00.mkv asks
+    for the stop once every file is queued and is changed after it;
+    e01.mkv finishes first, which is when the main thread sees the stop;
+    later files are cancelled."""
+    make_videos(tmp_path, 4)
+
+    def fake_process_file(path, args, on_progress=None):
+        if path.name == "e00.mkv":
+            time.sleep(0.05)
+            _thread.interrupt_main(signal.SIGINT)
+            time.sleep(0.5)
+            return "changed"
+        time.sleep(0.1)
+        return "cancelled" if ssd._cancelled.is_set() else "unchanged"
+
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(ssd, "process_file", fake_process_file)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--jobs", "2", "--no-progress"])
+
+    code = ssd.main()
+
+    out = capsys.readouterr().out
+    assert code == 130
+    assert "Summary (Partial -- interrupted)" in out
+    assert "Changed: 1" in out
+    assert "Unchanged: 1" in out
+    assert "Cancelled: 2" in out
+
+
 def test_partial_summary_counts_unfinished_files_as_cancelled(tmp_path, monkeypatch, capsys):
     make_videos(tmp_path, 5)
     calls = []
@@ -3786,6 +3876,23 @@ def test_stop_handler_cancels_and_stops_subprocesses(monkeypatch):
     assert exc_info.value.signum == signal.SIGTERM
     assert ssd._cancelled.is_set()
     assert stopped == [True]
+
+
+def test_a_stop_while_one_is_being_handled_is_ignored(monkeypatch):
+    """Once a stop has arrived, the run is already stopping. Another Ctrl+C
+    or SIGTERM must not interrupt that, e.g. the wait for --jobs workers,
+    which would print the summary while they still change files."""
+    monkeypatch.setattr(ssd, "_terminate_active_procs", lambda: None)
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, ssd._stop_handler)
+
+    with pytest.raises(ssd.Stopped):
+        signal.raise_signal(signal.SIGINT)
+    try:
+        signal.raise_signal(signal.SIGINT)
+        signal.raise_signal(signal.SIGTERM)
+    except ssd.Stopped:
+        pytest.fail("a second stop interrupted the first")
 
 
 @pytest.mark.parametrize("signum, code, message", [

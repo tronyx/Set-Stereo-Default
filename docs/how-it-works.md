@@ -124,7 +124,9 @@ With `--keep-dates`, each changed file gets the modification date and the access
 
 ## 🧹 Leftover temp files
 
-Ctrl+C and SIGTERM (the signal that `docker stop`, `kill`, and systemd send) stop the script safely. The script stops the running remuxes and deletes their temporary files. It does not touch the files that are finished. The partial summary counts each file that did not finish as `Cancelled`.
+Ctrl+C and SIGTERM (the signal that `docker stop`, `kill`, and systemd send) stop the script safely. The script stops the running remuxes and deletes their temporary files. It does not touch the files that are finished. With `--jobs`, a file can have a finished remux that did not replace the original yet. The script deletes that remux too, and the original stays as it was. The partial summary counts each file that did not finish as `Cancelled`.
+
+After the first Ctrl+C or SIGTERM, the script ignores the next ones until it stops. So a second Ctrl+C does not stop the script sooner. The script usually stops within a few seconds. If it writes a file to a slow disk at that moment, it waits until the write is complete. To stop the script at once, use `kill -9`, or end the process in Task Manager on Windows. Then temporary files can stay, as the next paragraph tells.
 
 Sometimes the script stops without time to clean up. Examples are `kill -9`, a power failure, or a container that does not stop in time. Then a `<name>.tmp_remux.<ext>` file can stay next to the original. If the script was making a backup, a `<name>.bak.tmp_remux.<ext>` file can stay instead. The next run skips these files and shows a warning.
 
