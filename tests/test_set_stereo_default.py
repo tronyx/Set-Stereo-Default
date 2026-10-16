@@ -632,6 +632,46 @@ def test_iter_files_warns_about_leftover_temp_files(library, caplog):
     assert "safe to delete" in caplog.text
 
 
+@pytest.mark.parametrize("recursive", [True, False], ids=["recursive", "--no-recursive"])
+def test_a_leftover_temp_folder_is_reported_and_never_searched(tmp_path, caplog, recursive):
+    """A run killed outright can leave its private temp folder behind, with
+    a partial remux in it that has the video's own name. The search reports
+    the folder, also without recursion, and never looks inside, and the
+    folder is listed again at the end of the run."""
+    (tmp_path / "a.mkv").write_bytes(b"")
+    leftover = tmp_path / "set_stereo_default.tmp.0a1b2c3d"
+    leftover.mkdir()
+    (leftover / "a.mkv").write_bytes(b"partial")
+
+    found = list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, recursive))
+
+    assert found == [tmp_path / "a.mkv"]
+    assert f"Skipping leftover temp folder from an interrupted run (safe to delete): {leftover}" in caplog.text
+    assert ssd._warned_files == [(str(leftover), "leftover", "")]
+
+
+def test_a_leftover_temp_folder_named_directly_is_never_searched(tmp_path, caplog):
+    """A temp folder given as a path to search is reported the same way."""
+    leftover = tmp_path / "set_stereo_default.tmp.0a1b2c3d"
+    leftover.mkdir()
+    (leftover / "a.mkv").write_bytes(b"partial")
+
+    assert list(ssd.iter_files([leftover], ssd.DEFAULT_EXTS, True)) == []
+    assert f"Skipping leftover temp folder from an interrupted run (safe to delete): {leftover}" in caplog.text
+
+
+def test_a_video_inside_a_leftover_temp_folder_is_never_processed(tmp_path, caplog):
+    """The partial remux in a leftover temp folder, named on its own, is a
+    leftover temp file, not a video to fix."""
+    leftover = tmp_path / "set_stereo_default.tmp.0a1b2c3d"
+    leftover.mkdir()
+    partial = leftover / "a.mkv"
+    partial.write_bytes(b"partial")
+
+    assert list(ssd.iter_files([partial], ssd.DEFAULT_EXTS, True)) == []
+    assert f"Skipping leftover temp file from an interrupted run (safe to delete): {partial}" in caplog.text
+
+
 @pytest.mark.parametrize("in_docker, mounted, hinted", [
     (True, False, True),
     (True, True, False),

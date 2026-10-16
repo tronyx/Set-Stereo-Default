@@ -167,6 +167,12 @@ searches when no path is given."""
 TMP_MARKER = ".tmp_remux"
 """Marks a file's temp copy while it's remuxed, e.g. "movie.mkv.tmp_remux.mkv"."""
 
+TMP_DIR_PREFIX = "set_stereo_default.tmp."
+"""Starts the name of a private temp folder, e.g.
+"set_stereo_default.tmp.0a1b2c3d", holding a remux with the video's own
+name. The search never looks inside one (see _skip_leftover_folder()): one
+it finds is left over from a run killed outright."""
+
 COMMENTARY_NAME_RE = re.compile(r"commentary|audio[ -]?description|descriptive|described|\bdvs\b",
                                 re.IGNORECASE)
 """Track names that mark commentary or audio description, as such tracks are
@@ -470,7 +476,8 @@ WARNING_GROUPS: dict[Warned, str] = {
     "flags": ("Fixed, but flags that ffmpeg can't write to MP4, M4V, MOV or AVI files were lost, so "
               "players can't tell, e.g., a commentary track by its flag any more:"),
     "tool": "Fixed, though mkvmerge finished with warnings:",
-    "leftover": "Leftover temp files from an interrupted run, which were skipped. They're safe to delete:",
+    "leftover": ("Leftover temp files and folders from an interrupted run, which were skipped. "
+                 "They're safe to delete:"),
 }
 """The heading report_warned_files() gives each kind of warning, saying
 what it means, in the order they're listed."""
@@ -2109,6 +2116,31 @@ def _process_file(path: Path, opts: Options,
     return "changed" if apply(plan, opts, progress) else "error"
 
 
+def _report_leftover(path: Path, kind: str) -> None:
+    """Warn that the leftover temp file or folder (kind) at path is skipped,
+    and record it for report_warned_files()."""
+    log.warning(f"Skipping leftover temp {kind} from an interrupted run (safe to delete): {path}")
+    _note_warnings(path, [Note("leftover", "")])
+
+
+def _is_leftover_file(path: Path) -> bool:
+    """True if the file at path was left by a run killed outright: a temp
+    file of an earlier version, e.g. "name.mkv.tmp_remux.mkv", or the
+    partial remux in a private temp folder (see TMP_DIR_PREFIX)."""
+    return path.stem.endswith(TMP_MARKER) or path.parent.name.startswith(TMP_DIR_PREFIX)
+
+
+def _skip_leftover_folder(path: Path | str) -> bool:
+    """True if path is a temp folder (see TMP_DIR_PREFIX), after reporting
+    it (see _report_leftover()). The search must not look inside one: it
+    holds a partial remux with a video's name, which would be taken for
+    that video."""
+    if not Path(path).name.startswith(TMP_DIR_PREFIX):
+        return False
+    _report_leftover(Path(path), "folder")
+    return True
+
+
 def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
           visited: set[str] | None = None) -> Iterator[tuple[Path, os.DirEntry[str], str]]:
     """Yield (path, entry, real path) for every entry in folder that isn't a
@@ -2127,7 +2159,8 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
 
     A folder that can't be opened (no permission, a network share that
     dropped) gets a warning, so its files aren't just silently missing
-    from the run."""
+    from the run. A leftover temp folder (see _skip_leftover_folder()) is
+    reported and never searched, also without recursive."""
     if visited is None:
         visited = set()
     real_folder = os.path.realpath(folder)
@@ -2141,7 +2174,8 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
         log.warning(f"Couldn't search {err.filename}: {err.strerror}")
         return
 
-    subfolders = [e for e in entries if e.is_dir()] if recursive else []
+    folders = [e for e in entries if e.is_dir() and not _skip_leftover_folder(e.path)]
+    subfolders = folders if recursive else []
     if not follow_symlinks:
         for entry in subfolders:
             if entry.is_symlink():
@@ -2173,7 +2207,10 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
 
     A run killed outright (kill -9, a reboot) can leave a temp file such as
     "name.mkv.tmp_remux.mkv", which still ends in .mkv. Those are skipped
-    with a warning instead of being treated as videos.
+    with a warning instead of being treated as videos. It can also leave a
+    private temp folder (see TMP_DIR_PREFIX), which is skipped with a
+    warning too, never searched, also when named on its own; a video
+    inside one is a leftover temp file.
 
     A path that doesn't exist (a typo, an unmounted share) is skipped with a
     warning, so a mistake in one of several paths doesn't go unnoticed. In
@@ -2193,6 +2230,8 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
         if p.is_file():
             candidates = [(p, None, None)]
         elif p.is_dir():
+            if _skip_leftover_folder(p):
+                continue
             candidates = _walk(p, recursive, follow_symlinks)
         elif not p.exists():
             hint = ""
@@ -2233,9 +2272,8 @@ def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, ex
         path, entry, real = target, None, None
     if not (entry.is_file() if entry else path.is_file()):
         return None
-    if path.stem.endswith(TMP_MARKER):
-        log.warning(f"Skipping leftover temp file from an interrupted run (safe to delete): {path}")
-        _note_warnings(path, [Note("leftover", "")])
+    if _is_leftover_file(path):
+        _report_leftover(path, "file")
         return None
     return path, real or os.path.realpath(path)
 

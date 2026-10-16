@@ -432,12 +432,14 @@ added by with_leftovers()."""
 
 
 def with_leftovers(paths):
-    """paths, plus the temp file an interrupted run would have left next to
-    the first video, and that file's backup."""
+    """paths, plus what an interrupted run could have left next to the first
+    video: a temp file of an earlier version, a backup, and a temp folder
+    holding a partial remux with the video's own name."""
     videos = [p for p in paths if Path(p).suffix.lower() in ssd.DEFAULT_EXTS]
     if videos:
         p = videos[0]
-        paths = paths + [p + ssd.TMP_MARKER + Path(p).suffix, p + ".bak"]
+        folder = str(Path(p).parent / "set_stereo_default.tmp.0a1b2c3d" / Path(p).name)
+        paths = paths + [p + ssd.TMP_MARKER + Path(p).suffix, p + ".bak", folder]
     return paths
 
 
@@ -447,8 +449,8 @@ def test_iter_files_finds_exactly_the_videos_once_each_in_order(paths, recursive
     """Searching a folder yields every file with a wanted extension (in any
     case), in its subfolders too when recursive, each as an absolute path,
     once, in sorted order; and nothing else: no other files, no leftover
-    temp file from an interrupted run, no backup. A video also named on its
-    own, or named twice, is still yielded once."""
+    temp file or temp folder from an interrupted run, no backup. A video
+    also named on its own, or named twice, is still yielded once."""
     with tempfile.TemporaryDirectory() as folder:
         root = Path(folder).resolve()
         for p in paths:
@@ -456,6 +458,7 @@ def test_iter_files_finds_exactly_the_videos_once_each_in_order(paths, recursive
             (root / p).write_bytes(b"")
         wanted = sorted(root / p for p in paths
                         if (root / p).suffix.lower() in exts and not (root / p).stem.endswith(ssd.TMP_MARKER)
+                        and not any(part.startswith("set_stereo_default.tmp.") for part in Path(p).parts)
                         and (recursive or (root / p).parent == root))
         extra = wanted[:1] * 2
 
