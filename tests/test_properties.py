@@ -71,6 +71,15 @@ def audio_tracks(min_size=1):
         lambda tracks: [dataclasses.replace(t, index=i) for i, t in enumerate(tracks, start=1)])
 
 
+def audio_tracks_with_one_default():
+    """audio_tracks() with exactly one of them flagged default, which one
+    drawn too. Built that way rather than filtered for, since most random
+    lists have none or several, and throwing those away trips Hypothesis's
+    health check now and then."""
+    return audio_tracks().flatmap(lambda tracks: st.integers(0, len(tracks) - 1).map(
+        lambda chosen: [dataclasses.replace(t, default=i == chosen) for i, t in enumerate(tracks)]))
+
+
 PREFERRED = st.one_of(st.none(), st.sampled_from([c for c in LANGUAGES if c not in ("", "und")]))
 """--prefer-lang: unset, or a real language tag."""
 
@@ -120,11 +129,11 @@ def test_choose_target_keeps_the_language_players_start_on(streams, prefer):
         assert allowed(target, current.language)
 
 
-@given(streams=audio_tracks(), prefer=PREFERRED, rnd=st.randoms(use_true_random=False))
+@given(streams=audio_tracks_with_one_default(), prefer=PREFERRED, rnd=st.randoms(use_true_random=False))
 def test_choose_target_doesnt_depend_on_track_order_when_one_track_is_default(streams, prefer, rnd):
     """With one track flagged default, the same track is picked whatever
     order the tracks come in: nothing about the choice is positional."""
-    assume(sum(s.default for s in streams) == 1)
+    assert sum(s.default for s in streams) == 1
     shuffled = list(streams)
     rnd.shuffle(shuffled)
 
