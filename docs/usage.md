@@ -62,6 +62,7 @@ To send the list through a pipe (the output of one command sent to another) inst
 | `--follow-symlinks` | Also search the subfolders that are symlinks. By default, the script skips them. It always searches the folders that you name on the command line |
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](how-it-works.md#-changing-the-file)) |
 | `--force` | Also remux (copy the tracks into a new file) the files that are already correct, for example to restore their thumbnails (see [Troubleshooting](troubleshooting.md)) |
+| `--delete-leftovers` | Delete the temporary files and folders that an interrupted run left behind, when nothing in them changed in the last hour. With `--dry-run`, only list them (see [Leftover temp files](how-it-works.md#-leftover-temp-files)) |
 | `--keep-dates` | Give each changed file the modification date of the original, so that the file does not look newly changed (see [File dates](how-it-works.md#-file-dates)) |
 | `--no-progress` | Hide the progress bars. The script already hides them when the output is not a terminal (cron, `docker run` without `-t`, or a pipe) |
 
@@ -143,7 +144,7 @@ Found 8 file(s) (dry run).
 
 [1/8] /path/to/videos/TV Shows/Awesome Show (2026)/Season 04/Awesome Show (2026) - S04E01 - Episode 25.mkv
   Awesome Show (2026) - S04E01 - Episode 25.mkv: setting stream#1 (eng, aac) as default audio
-    [dry-run] mkvmerge --gui-mode --output-charset UTF-8 -o '.../S04E01 - Episode 25.mkv.tmp_remux.mkv' --track-order 0:0,0:1,0:2,0:3,0:4 --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
+    [dry-run] mkvmerge --gui-mode --output-charset UTF-8 -o '.../set_stereo_default.tmp.XXXXXXXX/S04E01 - Episode 25.mkv' --track-order 0:0,0:1,0:2,0:3,0:4 --default-track 1:yes --default-track 4:no '.../S04E01 - Episode 25.mkv'
 
 ...
 
@@ -154,7 +155,7 @@ Skipped: 0
 Error: 0
 ```
 
-Each `[dry-run]` line shows the exact command that the script runs without `--dry-run`. The command has quotes, so you can paste it into a shell. On Windows, the quotes work in Command Prompt and in PowerShell. Two types of file names are exceptions. In PowerShell, a name with `$` or a backtick (`` ` ``) does not paste correctly. In Command Prompt, a name with a word between two `%` signs, for example `%NAME%`, does not paste correctly.
+Each `[dry-run]` line shows the command that the script runs without `--dry-run`. The real run writes the new file in a temporary folder with a random name. The command shows this name as `set_stereo_default.tmp.XXXXXXXX`. To run the command yourself, first make a folder with that name, or change the path after `-o`. The command has quotes, so you can paste it into a shell. On Windows, the quotes work in Command Prompt and in PowerShell. Two types of file names are exceptions. In PowerShell, a name with `$` or a backtick (`` ` ``) does not paste correctly. In Command Prompt, a name with a word between two `%` signs, for example `%NAME%`, does not paste correctly.
 
 </details>
 
@@ -165,6 +166,7 @@ Each `[dry-run]` line shows the exact command that the script runs without `--dr
 | `0` | The script finished with no errors, or you chose `q` at the [backup question](how-it-works.md#-backups) |
 | `1` | The script found no matching files, a required tool is missing, or at least one file ended as an `Error` |
 | `2` | The command-line options are not valid |
+| `75` | Another run already works on one of the folders, so the script did not change files (see [One run at a time](how-it-works.md#-one-run-at-a-time)) |
 | `130` | Ctrl+C stopped the script |
 | `143` | SIGTERM stopped the script |
 

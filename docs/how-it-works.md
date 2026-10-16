@@ -113,6 +113,11 @@ The name of the list has the date, the time, and the process ID of the script. S
 >
 > The warning shows the correct `sudo -u` for your files. In the Docker image, it shows the matching `docker run --user` instead (see [Docker](docker.md)). If some files already belong to `nobody`, run `chown` on the NFS server. On the server, root is not squashed.
 
+The script writes each new file in a private temporary folder next to the original (see [Leftover temp files](#-leftover-temp-files)). On Linux and macOS, only the user that runs the script can open this folder. So another user cannot put a symlink where the new file goes. But another user who can write to your media folder can still rename the private folder during a remux. That user can then put a symlink in its place. Then the script writes a file with the name of the video to the place that the symlink points to.
+
+> [!WARNING]
+> If other users can write to your media folders, do not run the script as root on the computer. Run it as the owner of the media, or in the Docker image. Otherwise, another user can make the script write a file with the name of a video to another place as root.
+
 ## 📅 File dates
 
 By default, a changed file gets the time of the run as its modification date, as each new file does. Some media servers and players use this date to sort their "recently added" or "recently modified" lists. So the fixed files can move to the top of these lists.
@@ -128,9 +133,27 @@ Ctrl+C and SIGTERM (the signal that `docker stop`, `kill`, and systemd send) sto
 
 After the first Ctrl+C or SIGTERM, the script ignores the next ones until it stops. So a second Ctrl+C does not stop the script sooner. The script usually stops within a few seconds. If it writes a file to a slow disk at that moment, it waits until the write is complete. To stop the script at once, use `kill -9`, or end the process in Task Manager on Windows. Then temporary files can stay, as the next paragraph tells.
 
-Sometimes the script stops without time to clean up. Examples are `kill -9`, a power failure, or a container that does not stop in time. Then a `<name>.tmp_remux.<ext>` file can stay next to the original. If the script was making a backup, a `<name>.bak.tmp_remux.<ext>` file can stay instead. The next run skips these files and shows a warning.
+Sometimes the script stops without time to clean up. Examples are `kill -9`, a power failure, or a container that does not stop in time. Then a temporary folder can stay next to the original. Its name is `set_stereo_default.tmp.` and 8 random characters, and it holds the unfinished new file. If the script was making a backup, a `<name>.bak.tmp_remux.<ext>` file can stay instead. Earlier versions of the script left a `<name>.tmp_remux.<ext>` file. Ctrl+C or SIGTERM at an exact moment can also leave an empty temporary folder.
 
-You can safely delete these files. Only a finished file that passed all the tests replaces the original. A backup gets its real name only when it is complete.
+The next run skips these leftovers and shows a warning. You can safely delete them. Only a finished file that passed all the tests replaces the original. A backup gets its real name only when it is complete.
+
+With `--delete-leftovers`, the script deletes the leftovers that it finds. With `--dry-run` too, it only lists them. The script deletes a leftover only if nothing in it changed in the last hour, because another run can still use a newer one. It also keeps a temporary folder that holds anything other than one file, and a leftover that is a symlink. For each leftover that it keeps, the script shows the reason.
+
+## 🔒 One run at a time
+
+Only one run at a time can work on a folder. Before the script searches a folder that you name, it locks the file `.set_stereo_default.lock` in that folder. For a file that you name, it locks the lock file in the folder of that file. If another run holds the lock, the script stops at once with exit code `75` and does not change files:
+
+```text
+Another run is already working on /videos; try again when it has finished.
+```
+
+So two runs never change the same files at the same time. For example, a nightly run from cron cannot start while the run of the previous night still works on a large library. The lock also works across Docker containers, and across computers that share the folder, if the share supports locks.
+
+The operating system releases the lock when a run ends, also after `kill -9` or a power failure. So a run that stopped suddenly never blocks the next run. The lock file stays in the folder after the run, and it is empty. Do not delete it while a run works on the folder.
+
+A dry run does not lock the folder, so it never blocks a real run. If another run works on the folder, the dry run shows a note. That run can change the files while the dry run shows them.
+
+The lock is for the folders that you name. Two runs on different folders do not block each other, also when one folder is inside the other, for example `/videos` and `/videos/TV`. If the script cannot lock a folder, it shows a warning and continues. Examples are an NFS share without its lock service, and a read-only folder.
 
 ## ⚠️ Limitations
 

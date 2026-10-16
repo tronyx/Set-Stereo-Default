@@ -36,7 +36,7 @@ The layouts and the moments come from a seed (a start value for the random numbe
 
 When the tests do not run as root, they also try a folder without write permission and a file without read permission. In the Docker image, GitHub runs the tests as `nobody`. There, the tests also try a disk of 2 MB that is too small for the remux. To try the full disk on a different system, set `SSD_FULL_DISK` to a folder on a small file system. In each of these cases, the script must report the problem, leave the file as it was, and leave no files behind.
 
-The tests also stop a run with `kill -9` during a remux. This acts like a reboot or the OOM killer (the Linux feature that stops programs when the memory is full). Sometimes the tests stop only the script, and sometimes they also stop the remux. The next run must report the leftover temporary file, remux the original again instead of using the leftover file, and leave no files behind.
+The tests also stop a run with `kill -9` during a remux. This acts like a reboot or the OOM killer (the Linux feature that stops programs when the memory is full). Sometimes the tests stop only the script, and sometimes they also stop the remux. The next run must report the leftover temporary folder, remux the original again instead of using the leftover file, and leave no new files behind.
 
 These tests need ffmpeg, ffprobe, and mkvmerge on your `PATH`. A few tests also need an ffmpeg that can write Opus audio and VP8 video, and most builds of ffmpeg can. If these tools are not installed, pytest skips the tests. To make the tests fail when a tool is missing, set `REQUIRE_MEDIA_TOOLS=1`. GitHub does this.
 

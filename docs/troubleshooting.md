@@ -16,7 +16,7 @@ Before this list, the script shows a list of the files that got a warning. Each 
 - Files in which ffmpeg gave the default flag to a subtitle or video track.
 - Files that lost flags that ffmpeg cannot write to MP4, M4V, MOV, or AVI files.
 - Files for which mkvmerge showed warnings.
-- Leftover temp files from an interrupted run, which the script skipped.
+- Leftover temp files and folders from an interrupted run, which the script skipped or kept.
 
 ## `SKIP (...)` on a file that you expected to change
 
@@ -87,9 +87,9 @@ attrib -r "D:\Videos\*" /s
 
 Then run the script again. On Linux and macOS, the script changes a file without write permission (permission to change the file) as usual. There, the permissions of the folder decide if the script can replace a file.
 
-## `can't use the temp name <name>.tmp_remux.<ext> (...); the name may be too long for this file system`
+## `can't create a temp folder in <folder> (...), so it's left as it was`
 
-The script writes the new file next to the original. The name of the new file is the original name plus `.tmp_remux.<ext>`. Most file systems allow names of 255 characters or fewer. So if the name of a file is already almost that long, the script cannot fix the file. Make the name shorter. Then run the script again.
+The script writes each new file in a temporary folder next to the original. It cannot make this folder when it cannot write to the folder of the original. Examples are a read-only network share, a folder that belongs to another user, and a full disk. The reason in the parentheses tells you which. If the disk is full, free some space. Otherwise, give the user that runs the script permission to write to the folder. Then run the script again.
 
 ## `mkvmerge sees N audio track(s), but ffprobe sees M`
 
@@ -99,9 +99,21 @@ The two tools do not agree about the file. The script does not guess which track
 
 The new files play correctly, but they belong to the wrong user. Then Sonarr, Radarr, and similar tools can fail to rename or replace them. On an NFS share, run the script as the user that owns your media. The warning shows the `sudo -u` command to use. In the Docker image, it shows the `docker run --user` option instead. See [Permissions and ownership](how-it-works.md#-permissions-and-ownership).
 
-## `Skipping leftover temp file`
+## `Skipping leftover temp file` or `Skipping leftover temp folder`
 
-An earlier run stopped suddenly while it processed a file. You can safely delete the temporary file. See [Leftover temp files](how-it-works.md#-leftover-temp-files).
+An earlier run stopped suddenly while it processed a file. You can safely delete the temporary file or folder. You can also run the script with `--delete-leftovers`, which deletes it for you. See [Leftover temp files](how-it-works.md#-leftover-temp-files).
+
+## `Kept leftover temp folder (...)` or `Kept leftover temp file (...)`
+
+With `--delete-leftovers`, the script keeps a leftover in three cases. Something in it changed in the last hour, so another run can still use it. Or the folder holds anything other than one file, which the script does not write. Or the leftover is a symlink, which the script never follows. The reason in the parentheses tells you which. For a leftover that changed recently, run the script again later. Examine the other leftovers yourself, and delete them if you do not need them.
+
+## `Another run is already working on <folder>; try again when it has finished.`
+
+Another run of the script holds the lock of this folder. The script stopped with exit code `75` and did not change files. Wait until the other run is complete. Then run the script again. See [One run at a time](how-it-works.md#-one-run-at-a-time).
+
+## `Couldn't lock <folder> (...), so a run working on it at the same time can't be detected`
+
+The script cannot use the lock file `.set_stereo_default.lock` in this folder. Examples are an NFS share without its lock service, a read-only folder, and a symlink with the name of the lock file. The script continues, but it cannot stop a second run on the same folder. Do not start two runs on this folder at the same time.
 
 ## No thumbnail in Windows Explorer
 
