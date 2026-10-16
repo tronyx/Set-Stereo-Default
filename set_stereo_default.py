@@ -1162,14 +1162,18 @@ def backup_path(path: Path, replace: bool) -> Path:
     return path.with_name(f"{path.name}.bak.{n}")
 
 
-def make_backup(path: Path, replace: bool = False) -> Path:
-    """Keep the original at backup_path() and return that path. A hard link
-    is instant and needs no room while the remux runs; once the new file
-    replaces the original, the backup holds the original's data on its
-    own, so it takes the original's full size until it's deleted. Where
-    hard links aren't supported, a full copy is made instead, written to
-    the disk before it's renamed into place (see _copy_new()). A hard
-    link needs no such flush: it's the original's own data.
+def make_backup(path: Path, bak_path: Path) -> Path:
+    """Keep the original at bak_path, as backup_path() chose it, and return
+    bak_path. The caller chooses it, so that swap_in() knows the name, and
+    what was there before, even if a stop lands before this returns.
+
+    A hard link is instant and needs no room while the remux runs; once
+    the new file replaces the original, the backup holds the original's
+    data on its own, so it takes the original's full size until it's
+    deleted. Where hard links aren't supported, a full copy is made
+    instead, written to the disk before it's renamed into place (see
+    _copy_new()). A hard link needs no such flush: it's the original's own
+    data.
 
     The backup is made under a staging name, <name>.bak.tmp_remux.<ext>,
     and renamed into place in one step once it's complete. So a copy that
@@ -1184,7 +1188,6 @@ def make_backup(path: Path, replace: bool = False) -> Path:
     Whatever already has the staging name is removed first, and the copy
     only ever writes a new file (see _copy_new()), so a symlink someone put
     at that name is never written through."""
-    bak_path = backup_path(path, replace)
     staging = bak_path.with_name(bak_path.name + TMP_MARKER + path.suffix)
     staging.unlink(missing_ok=True)
     try:
@@ -1474,7 +1477,11 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     would only suggest it had been changed. A backup it replaced is gone,
     though. Whether the swap happened is read from the file system, since
     a stop can land right after the rename, so the backup of a file that
-    was replaced is never removed.
+    was replaced is never removed. Whether the backup was made is read
+    from the file system too, by comparing what's at its name with its
+    _snapshot() from before make_backup(): a stop can land on that
+    function's last lines, after its rename, or before it, when an older
+    <name>.bak it was to replace is still there and must stay.
 
     A stop requested meanwhile raises Cancelled (see _cancel_if_stopping())
     before the flush, which can take minutes on a slow disk, and again just
@@ -1489,10 +1496,13 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     _flush(tmp_path)
     if _changed_since(path, snapshot):
         raise Superseded
-    bak_path = make_backup(path, replace=(backup == "replace")) if backup else None
+    bak_path = backup_path(path, replace=(backup == "replace")) if backup else None
+    was_there = _snapshot(bak_path) if bak_path is not None else None
     try:
-        if bak_path is not None and _changed_since(path, snapshot):
-            raise Superseded
+        if bak_path is not None:
+            make_backup(path, bak_path)
+            if _changed_since(path, snapshot):
+                raise Superseded
         copy_ownership(path, tmp_path)
         if keep_dates:
             st = os.stat(path)
@@ -1502,7 +1512,7 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
             log.info(f"    {path.name}: kept the original as {bak_path.name}")
         os.replace(tmp_path, path)
     except BaseException:
-        if bak_path is not None and tmp_path.exists():
+        if bak_path is not None and tmp_path.exists() and _snapshot(bak_path) != was_there:
             bak_path.unlink(missing_ok=True)
         raise
 

@@ -815,7 +815,7 @@ def test_make_backup_hard_links_and_replaces_a_stale_backup(tmp_path):
     bak = tmp_path / "v.mkv.bak"
     bak.write_bytes(b"stale")
 
-    assert ssd.make_backup(video, replace=True) == bak
+    assert ssd.make_backup(video, ssd.backup_path(video, replace=True)) == bak
 
     assert bak.read_bytes() == b"original"
     assert os.stat(bak).st_ino == os.stat(video).st_ino
@@ -827,7 +827,7 @@ def test_make_backup_numbers_the_new_backup_instead_of_replacing(tmp_path):
     for name, data in [("v.mkv.bak", b"first"), ("v.mkv.bak.1", b"second")]:
         (tmp_path / name).write_bytes(data)
 
-    assert ssd.make_backup(video) == tmp_path / "v.mkv.bak.2"
+    assert ssd.make_backup(video, ssd.backup_path(video, replace=False)) == tmp_path / "v.mkv.bak.2"
 
     assert (tmp_path / "v.mkv.bak").read_bytes() == b"first"
     assert (tmp_path / "v.mkv.bak.1").read_bytes() == b"second"
@@ -838,7 +838,7 @@ def test_make_backup_uses_plain_bak_when_its_free(tmp_path):
     video = tmp_path / "v.mkv"
     video.write_bytes(b"original")
 
-    assert ssd.make_backup(video) == tmp_path / "v.mkv.bak"
+    assert ssd.make_backup(video, ssd.backup_path(video, replace=False)) == tmp_path / "v.mkv.bak"
 
 
 def test_replacing_a_backup_that_is_already_a_link_to_the_file_leaves_nothing_behind(tmp_path):
@@ -854,7 +854,7 @@ def test_replacing_a_backup_that_is_already_a_link_to_the_file_leaves_nothing_be
     except OSError as exc:
         pytest.skip(f"can't create hard links here: {exc}")
 
-    assert ssd.make_backup(video, replace=True) == bak
+    assert ssd.make_backup(video, ssd.backup_path(video, replace=True)) == bak
 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["v.mkv", "v.mkv.bak"]
     assert bak.read_bytes() == b"original"
@@ -867,7 +867,7 @@ def test_make_backup_copies_where_hard_links_are_unsupported(tmp_path, monkeypat
     def no_hard_links(*args):
         raise OSError("hard links not supported")
     monkeypatch.setattr(ssd.os, "link", no_hard_links)
-    ssd.make_backup(video)
+    ssd.make_backup(video, ssd.backup_path(video, replace=False))
 
     bak = tmp_path / "v.mkv.bak"
     assert bak.read_bytes() == b"original"
@@ -908,7 +908,7 @@ def test_a_backup_copy_is_written_to_disk_before_it_becomes_the_backup(tmp_path,
     def no_hard_links(*args):
         raise OSError("hard links not supported")
     monkeypatch.setattr(ssd.os, "link", no_hard_links)
-    ssd.make_backup(video)
+    ssd.make_backup(video, ssd.backup_path(video, replace=False))
 
     assert renames == [("v.mkv.bak.tmp_remux.mkv", "v.mkv.bak", True)]
     assert (tmp_path / "v.mkv.bak").read_bytes() == b"original"
@@ -952,7 +952,7 @@ def test_a_backup_copy_that_fails_partway_leaves_no_partial_backup(tmp_path, mon
     monkeypatch.setattr(ssd, "_copy_data", disk_fills_up)
 
     with pytest.raises(OSError, match="No space left"):
-        ssd.make_backup(video, replace=replace)
+        ssd.make_backup(video, ssd.backup_path(video, replace=replace))
 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["v.mkv", "v.mkv.bak"]
     assert (tmp_path / "v.mkv.bak").read_bytes() == b"old backup"
@@ -979,7 +979,7 @@ def test_a_symlink_planted_at_the_backup_staging_name_is_never_written_through(t
     monkeypatch.setattr(ssd.os, "link", plant_a_symlink_then_fail)
 
     with pytest.raises(FileExistsError):
-        ssd.make_backup(video)
+        ssd.make_backup(video, ssd.backup_path(video, replace=False))
 
     assert elsewhere.read_bytes() == b"keep me"
     assert not staging.is_symlink() and not staging.exists()
@@ -1694,6 +1694,53 @@ def test_swap_in_keeps_the_original_permissions(tmp_path):
 
     assert video.read_bytes() == b"remuxed"
     assert video.stat().st_mode & 0o777 == 0o764
+
+
+@pytest.mark.parametrize("backup", ["replace", "number"])
+def test_a_stop_just_after_the_backup_is_made_removes_it(tmp_path, monkeypatch, backup):
+    """A stop can land once make_backup() has renamed the backup into place,
+    on its last lines or just after it returns. The original is untouched,
+    so the backup is removed, as for any swap that didn't happen. With an
+    old <name>.bak there: replaced, it's gone too, as swap_in() says."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    (tmp_path / "v.mkv.bak").write_bytes(b"old backup")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+    real_make_backup = ssd.make_backup
+
+    def backup_then_stop(*args, **kwargs):
+        real_make_backup(*args, **kwargs)
+        raise ssd.Stopped(signal.SIGINT)
+    monkeypatch.setattr(ssd, "make_backup", backup_then_stop)
+
+    with pytest.raises(KeyboardInterrupt):
+        ssd.swap_in(video, tmp, backup=backup)
+
+    assert video.read_bytes() == b"original"
+    left = {p.name: p.read_bytes() for p in tmp_path.glob("*.bak*")}
+    assert left == ({} if backup == "replace" else {"v.mkv.bak": b"old backup"})
+
+
+def test_a_stop_before_the_backup_replaces_the_old_one_keeps_it(tmp_path, monkeypatch):
+    """A stop inside make_backup() before its rename leaves an old
+    <name>.bak in place, still holding the earlier original: the cleanup
+    removes only a backup this run made."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    (tmp_path / "v.mkv.bak").write_bytes(b"old backup")
+    tmp = tmp_path / "v.mkv.tmp_remux.mkv"
+    tmp.write_bytes(b"remuxed")
+
+    def stop(*args):
+        raise ssd.Stopped(signal.SIGINT)
+    monkeypatch.setattr(ssd.os, "link", stop)
+
+    with pytest.raises(KeyboardInterrupt):
+        ssd.swap_in(video, tmp, backup="replace")
+
+    assert video.read_bytes() == b"original"
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.bak*")} == {"v.mkv.bak": b"old backup"}
 
 
 @pytest.mark.parametrize("backup", ["replace", "number"])
@@ -2553,14 +2600,15 @@ def stop_at(function, line):
     (remux_with_ffmpeg, "v.mp4", (0, "")),
 ], ids=["mkvmerge, with warnings", "ffmpeg"])
 @pytest.mark.parametrize("function", ["_remux_and_swap", "check_and_swap_in", "swap_in", "make_backup"])
-def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_temp_file(tmp_path, monkeypatch, apply, filename,
-                                                                          result, function):
+def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_stray_file(tmp_path, monkeypatch, apply, filename,
+                                                                           result, function):
     """Ctrl+C or SIGTERM can land between any two lines, once the remux has
     written its temp file as much as while it's being written. Wherever it
     lands, from writing the remux to swapping it in with a backup, the temp
     file and the backup's staging file must be gone afterwards, and the
-    original either untouched or replaced by the checked remux. Each line
-    of each function involved is tried in turn."""
+    original either untouched, with no backup suggesting otherwise, or
+    replaced by the checked remux, with its backup holding the original.
+    Each line of each function involved is tried in turn."""
     code = getattr(ssd, function).__code__
     lines = sorted({line for _, _, line in code.co_lines() if line is not None and line > code.co_firstlineno})
 
@@ -2585,7 +2633,12 @@ def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_temp_file(tmp_pa
         finally:
             sys.settrace(previous)
         assert not leftover_temp_files(video), f"{function} line {line}: {leftover_temp_files(video)}"
-        assert video.read_bytes() in (b"original", b"remuxed"), f"{function} line {line}"
+        backups = {p.name: p.read_bytes() for p in folder.glob("*.bak*")}
+        if video.read_bytes() == b"original":
+            assert backups == {}, f"{function} line {line}: backup of an unchanged file"
+        else:
+            assert video.read_bytes() == b"remuxed", f"{function} line {line}"
+            assert backups == {filename + ".bak": b"original"}, f"{function} line {line}"
     assert reached, f"no line of {function} was reached"
 
 
