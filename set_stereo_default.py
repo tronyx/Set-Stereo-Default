@@ -470,6 +470,18 @@ _failed_lock = threading.Lock()
 Warned = Literal["default", "flags", "tool", "leftover"]
 """What a file was warned about, as report_warned_files() groups them."""
 
+LeftoverAction = Literal["report", "delete", "preview"]
+"""What the search does with a leftover from an interrupted run (see
+_dispose_leftover()): report it (the default), delete it
+(--delete-leftovers), or say it would (--delete-leftovers with
+--dry-run)."""
+
+LEFTOVER_MIN_AGE = 3600.0
+"""How long, in seconds, nothing in a leftover must have changed before
+--delete-leftovers deletes it. Another run working on the same folder
+writes to its remux all the time, so its temp folder never looks this old;
+a rare one that does only costs that run one file's error, never data."""
+
 TROUBLESHOOTING_URL = "https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/troubleshooting.md"
 """The docs page that says what each warning and error means."""
 
@@ -482,7 +494,7 @@ WARNING_GROUPS: dict[Warned, str] = {
               "players can't tell, e.g., a commentary track by its flag any more:"),
     "tool": "Fixed, though mkvmerge finished with warnings:",
     "leftover": ("Leftover temp files and folders from an interrupted run, which were skipped. "
-                 "They're safe to delete:"),
+                 "--delete-leftovers deletes them once nothing in them changed for an hour:"),
 }
 """The heading report_warned_files() gives each kind of warning, saying
 what it means, in the order they're listed."""
@@ -2160,11 +2172,59 @@ def _process_file(path: Path, opts: Options,
     return "changed" if apply(plan, opts, progress) else "error"
 
 
-def _report_leftover(path: Path, kind: str) -> None:
-    """Warn that the leftover temp file or folder (kind) at path is skipped,
-    and record it for report_warned_files()."""
-    log.warning(f"Skipping leftover temp {kind} from an interrupted run (safe to delete): {path}")
-    _note_warnings(path, [Note("leftover", "")])
+def _dispose_leftover(path: Path, kind: str, action: LeftoverAction) -> None:
+    """Deal with the leftover temp file or folder (kind) at path as action
+    says (see LeftoverAction). Reported, it's warned about and recorded for
+    report_warned_files(). To be deleted, it's first checked (see
+    _leftover_kept_because()): one that must stay is warned about and
+    recorded with the reason. Otherwise it's deleted, or with "preview"
+    only said to be, and isn't listed at the end."""
+    if action == "report":
+        log.warning(f"Skipping leftover temp {kind} from an interrupted run (safe to delete): {path}")
+        _note_warnings(path, [Note("leftover", "")])
+        return
+    why = _leftover_kept_because(path)
+    if why is None and action == "delete":
+        try:
+            _delete_leftover(path)
+        except OSError as exc:
+            why = f"couldn't delete it: {exc.strerror or exc}"
+    if why is not None:
+        log.warning(f"Kept leftover temp {kind} ({why}): {path}")
+        _note_warnings(path, [Note("leftover", why)])
+    elif action == "delete":
+        log.info(f"Deleted leftover temp {kind}: {path}")
+    else:
+        log.info(f"Would delete leftover temp {kind}: {path}")
+
+
+def _leftover_kept_because(path: Path) -> str | None:
+    """Why --delete-leftovers must keep the leftover at path, or None if it
+    can go. A symlink is never followed. A temp folder must hold nothing,
+    or the single regular file the script writes there; anything else
+    wasn't written by it. And nothing in it may have changed for
+    LEFTOVER_MIN_AGE seconds, since another run may still be using it."""
+    if path.is_symlink():
+        return "it's a symlink, which is never followed"
+    inside = list(path.iterdir()) if path.is_dir() else []
+    if len(inside) > 1 or any(p.is_symlink() or not p.is_file() for p in inside):
+        return "it holds something the script didn't write"
+    newest = max(os.lstat(p).st_mtime for p in [path, *inside])
+    if time.time() - newest < LEFTOVER_MIN_AGE:
+        return "changed in the last hour, so another run may be using it"
+    return None
+
+
+def _delete_leftover(path: Path) -> None:
+    """Delete the leftover at path, a file or a temp folder with its file,
+    read-only ones on Windows included (see _remove_temp()). Raises OSError
+    if it can't."""
+    if path.is_dir():
+        for inside in path.iterdir():
+            _remove_temp(inside)
+        os.rmdir(path)
+    else:
+        _remove_temp(path)
 
 
 def _is_leftover_file(path: Path) -> bool:
@@ -2174,19 +2234,19 @@ def _is_leftover_file(path: Path) -> bool:
     return path.stem.endswith(TMP_MARKER) or path.parent.name.startswith(TMP_DIR_PREFIX)
 
 
-def _skip_leftover_folder(path: Path | str) -> bool:
-    """True if path is a temp folder (see TMP_DIR_PREFIX), after reporting
-    it (see _report_leftover()). The search must not look inside one: it
-    holds a partial remux with a video's name, which would be taken for
-    that video."""
+def _skip_leftover_folder(path: Path | str, action: LeftoverAction = "report") -> bool:
+    """True if path is a temp folder (see TMP_DIR_PREFIX), after dealing
+    with it as action says (see _dispose_leftover()). The search must not
+    look inside one: it holds a partial remux with a video's name, which
+    would be taken for that video."""
     if not Path(path).name.startswith(TMP_DIR_PREFIX):
         return False
-    _report_leftover(Path(path), "folder")
+    _dispose_leftover(Path(path), "folder", action)
     return True
 
 
-def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
-          visited: set[str] | None = None) -> Iterator[tuple[Path, os.DirEntry[str], str]]:
+def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool, visited: set[str] | None = None,
+          leftovers: LeftoverAction = "report") -> Iterator[tuple[Path, os.DirEntry[str], str]]:
     """Yield (path, entry, real path) for every entry in folder that isn't a
     folder, and with recursive, in its subfolders too. entry is the
     os.DirEntry, whose type checks (is_file(), is_symlink()) are answered
@@ -2204,7 +2264,8 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
     A folder that can't be opened (no permission, a network share that
     dropped) gets a warning, so its files aren't just silently missing
     from the run. A leftover temp folder (see _skip_leftover_folder()) is
-    reported and never searched, also without recursive."""
+    never searched, also without recursive, and dealt with as leftovers
+    says (see _dispose_leftover())."""
     if visited is None:
         visited = set()
     real_folder = os.path.realpath(folder)
@@ -2218,7 +2279,7 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
         log.warning(f"Couldn't search {err.filename}: {err.strerror}")
         return
 
-    folders = [e for e in entries if e.is_dir() and not _skip_leftover_folder(e.path)]
+    folders = [e for e in entries if e.is_dir() and not _skip_leftover_folder(e.path, leftovers)]
     subfolders = folders if recursive else []
     if not follow_symlinks:
         for entry in subfolders:
@@ -2229,11 +2290,12 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
         if not entry.is_dir():
             yield Path(entry.path), entry, os.path.join(real_folder, entry.name)
     for entry in subfolders:
-        yield from _walk(entry.path, recursive, follow_symlinks, visited)
+        yield from _walk(entry.path, recursive, follow_symlinks, visited, leftovers)
 
 
 def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
-               skip_symlinks: bool = False, follow_symlinks: bool = False) -> Iterator[Path]:
+               skip_symlinks: bool = False, follow_symlinks: bool = False,
+               leftovers: LeftoverAction = "report") -> Iterator[Path]:
     """Yield every file in paths with an extension in exts, path by path in
     the order given, each path's files sorted. Files are used as given;
     folders are searched (into subfolders if recursive). The extension is
@@ -2255,6 +2317,8 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
     temp file. Earlier versions could leave a temp file such as
     "name.mkv.tmp_remux.mkv" instead, which still ends in .mkv. Those are
     skipped with a warning too, instead of being treated as videos.
+    leftovers says what to do with such leftovers instead of the warning:
+    delete them, or say they would be (see LeftoverAction).
 
     A path that doesn't exist (a typo, an unmounted share) is skipped with a
     warning, so a mistake in one of several paths doesn't go unnoticed. In
@@ -2274,9 +2338,9 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
         if p.is_file():
             candidates = [(p, None, None)]
         elif p.is_dir():
-            if _skip_leftover_folder(p):
+            if _skip_leftover_folder(p, leftovers):
                 continue
-            candidates = _walk(p, recursive, follow_symlinks)
+            candidates = _walk(p, recursive, follow_symlinks, leftovers=leftovers)
         elif not p.exists():
             hint = ""
             if _in_docker() and (p == videos or videos in p.parents) and not videos.exists():
@@ -2289,7 +2353,7 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
             continue
         here = []
         for candidate in candidates:
-            found = _video_file(*candidate, exts, skip_symlinks)
+            found = _video_file(*candidate, exts, skip_symlinks, leftovers)
             if found and found[1] not in seen:
                 seen.add(found[1])
                 here.append(found[0])
@@ -2297,7 +2361,7 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
 
 
 def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, exts: set[str],
-                skip_symlinks: bool) -> tuple[Path, str] | None:
+                skip_symlinks: bool, leftovers: LeftoverAction = "report") -> tuple[Path, str] | None:
     """Decide about one candidate for iter_files(): return (the file to
     process, its real path), or None to leave it out, logging why where
     that's worth saying. entry and real come from _walk(), or are None for
@@ -2317,7 +2381,7 @@ def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, ex
     if not (entry.is_file() if entry else path.is_file()):
         return None
     if _is_leftover_file(path):
-        _report_leftover(path, "file")
+        _dispose_leftover(path, "file", leftovers)
         return None
     return path, real or os.path.realpath(path)
 
@@ -2432,6 +2496,7 @@ class Options:
     avi_reorder: bool = False
     keep_dates: bool = False
     force: bool = False
+    delete_leftovers: bool = False
     log_file: str | None = None
     no_progress: bool = False
     jobs: int = 1
@@ -2510,6 +2575,9 @@ def parse_args(argv: list[str] | None = None) -> Options:
     ap.add_argument("--force", action="store_true",
                     help="Remux even files that are already correct, e.g. to restore Windows "
                          "thumbnails after another tool edited a file in place")
+    ap.add_argument("--delete-leftovers", action="store_true",
+                    help="Delete the temp files and folders that an interrupted run left behind, once "
+                         "nothing in them changed for an hour (with --dry-run, only list them)")
     ap.add_argument("--log-file", default=None, metavar="PATH",
                     help="Write the details to this file instead of the console; warnings, "
                          "errors, the progress bar and the summary still show on the console")
@@ -2557,13 +2625,18 @@ def find_files(opts: Options) -> list[Path]:
     """Every file to process: the ones under opts.paths with an extension
     from --ext (or DEFAULT_EXTS), in the order the paths were given, each
     path's files sorted. So listing one show before another processes it
-    first. See iter_files()."""
+    first. See iter_files(). With --delete-leftovers, the leftovers the
+    search finds are deleted, or with --dry-run only listed (see
+    LeftoverAction)."""
     if opts.ext:
         exts = {("." + e.strip().lstrip(".")).lower() for e in opts.ext.split(",")}
     else:
         exts = DEFAULT_EXTS
+    leftovers: LeftoverAction = "report"
+    if opts.delete_leftovers:
+        leftovers = "preview" if opts.dry_run else "delete"
     return list(iter_files(opts.paths, exts, not opts.no_recursive,
-                           opts.skip_symlinks, opts.follow_symlinks))
+                           opts.skip_symlinks, opts.follow_symlinks, leftovers))
 
 
 def _files_with_backups(files: list[Path]) -> int:

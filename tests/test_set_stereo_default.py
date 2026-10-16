@@ -672,6 +672,131 @@ def test_a_video_inside_a_leftover_temp_folder_is_never_processed(tmp_path, capl
     assert f"Skipping leftover temp file from an interrupted run (safe to delete): {partial}" in caplog.text
 
 
+def make_leftover_folder(parent, age, files=("a.mkv",)):
+    """A leftover temp folder in parent holding files, with nothing in it
+    changed for age seconds."""
+    folder = parent / "set_stereo_default.tmp.0a1b2c3d"
+    folder.mkdir()
+    for name in files:
+        (folder / name).write_bytes(b"partial")
+    then = time.time() - age
+    for p in [*folder.iterdir(), folder]:
+        os.utime(p, (then, then))
+    return folder
+
+
+@pytest.mark.parametrize("action, gone, line", [
+    ("delete", True, "Deleted leftover temp folder: {}"),
+    ("preview", False, "Would delete leftover temp folder: {}"),
+], ids=["delete", "dry run"])
+def test_delete_leftovers_deletes_an_old_temp_folder(tmp_path, caplog, action, gone, line):
+    """With --delete-leftovers, a leftover temp folder in which nothing
+    changed for over an hour is deleted, or with --dry-run said to be,
+    and it's no longer listed as a warning at the end."""
+    caplog.set_level("INFO")
+    leftover = make_leftover_folder(tmp_path, 7200)
+
+    assert list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers=action)) == []
+
+    assert leftover.exists() is not gone
+    assert line.format(leftover) in caplog.text
+    assert ssd._warned_files == []
+
+
+def test_delete_leftovers_keeps_a_temp_folder_that_changed_in_the_last_hour(tmp_path, caplog):
+    """Another run may still be writing in a folder that changed recently, so
+    it's kept, and listed at the end with the reason."""
+    leftover = make_leftover_folder(tmp_path, 60)
+
+    list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    why = "changed in the last hour, so another run may be using it"
+    assert (leftover / "a.mkv").exists()
+    assert f"Kept leftover temp folder ({why}): {leftover}" in caplog.text
+    assert ssd._warned_files == [(str(leftover), "leftover", why)]
+
+
+@pytest.mark.parametrize("files", [("a.mkv", "b.mkv"), ("a.mkv", "sub")], ids=["two files", "a subfolder"])
+def test_delete_leftovers_keeps_a_temp_folder_holding_what_the_script_never_writes(tmp_path, caplog, files):
+    """The script writes one file in a temp folder. A folder with more, or a
+    subfolder, wasn't made by it the usual way, so it's kept."""
+    leftover = make_leftover_folder(tmp_path, 7200, files=files[:1])
+    extra = leftover / files[1]
+    if files[1] == "sub":
+        extra.mkdir()
+    else:
+        extra.write_bytes(b"mine")
+    then = time.time() - 7200
+    os.utime(extra, (then, then))
+    os.utime(leftover, (then, then))
+
+    list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    assert extra.exists()
+    assert f"Kept leftover temp folder (it holds something the script didn't write): {leftover}" in caplog.text
+
+
+def test_delete_leftovers_never_follows_a_symlink(tmp_path, caplog):
+    """A symlink with a temp folder's name is kept, and what it points to is
+    never touched."""
+    target = tmp_path / "keep"
+    target.mkdir()
+    (target / "a.mkv").write_bytes(b"mine")
+    link = tmp_path / "set_stereo_default.tmp.0a1b2c3d"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"can't create symlinks here: {exc}")
+
+    list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    assert (target / "a.mkv").read_bytes() == b"mine"
+    assert link.is_symlink()
+    assert f"Kept leftover temp folder (it's a symlink, which is never followed): {link}" in caplog.text
+
+
+def test_delete_leftovers_deletes_an_old_temp_file_of_an_earlier_version(tmp_path, caplog):
+    """Earlier versions wrote their temp file next to the original; an old one
+    is deleted too."""
+    caplog.set_level("INFO")
+    old = tmp_path / "a.mkv.tmp_remux.mkv"
+    old.write_bytes(b"partial")
+    then = time.time() - 7200
+    os.utime(old, (then, then))
+
+    list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    assert not old.exists()
+    assert f"Deleted leftover temp file: {old}" in caplog.text
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="elsewhere a read-only file can be deleted anyway")
+def test_delete_leftovers_deletes_a_read_only_leftover(tmp_path):
+    """Windows refuses to delete a read-only file; the leftover is deleted
+    anyway, as a temp file is (see _remove_temp())."""
+    leftover = make_leftover_folder(tmp_path, 7200)
+    (leftover / "a.mkv").chmod(stat.S_IREAD)
+
+    list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    assert not leftover.exists()
+
+
+@pytest.mark.parametrize("args, line", [
+    ([], "Skipping leftover temp folder from an interrupted run (safe to delete): {}"),
+    (["--delete-leftovers", "--dry-run"], "Would delete leftover temp folder: {}"),
+    (["--delete-leftovers"], "Deleted leftover temp folder: {}"),
+], ids=["default", "dry run", "delete"])
+def test_delete_leftovers_option(tmp_path, caplog, args, line):
+    """--delete-leftovers reaches the search; with --dry-run it only says."""
+    caplog.set_level("INFO")
+    leftover = make_leftover_folder(tmp_path, 7200)
+
+    ssd.find_files(ssd.parse_args([str(tmp_path), *args]))
+
+    assert line.format(leftover) in caplog.text
+
+
 @pytest.mark.parametrize("in_docker, mounted, hinted", [
     (True, False, True),
     (True, True, False),
