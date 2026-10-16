@@ -4296,6 +4296,63 @@ def test_escape_bytes_shows_a_byte_as_itself_and_anything_else_as_its_code_point
         b"\xe9".decode("ascii", "escapebytes")
 
 
+def test_control_characters_are_written_as_escapes(tmp_path, capsys):
+    """A track's name or language tag, or a Linux file name, can hold
+    control characters, such as ESC, which starts the sequences that clear
+    a terminal, move its cursor or change its title. They're written as
+    escapes on the console and in the log file, so they show rather than
+    act, while the script's own line breaks stay."""
+    log_file = tmp_path / "run.log"
+    ssd.setup_logging(str(log_file))
+
+    ssd.log.warning("v\x1b[2J\r\x9b.mkv: careful\nnext line")
+
+    shown = "v\\x1b[2J\\x0d\\x9b.mkv: careful\nnext line"
+    out = capsys.readouterr().out
+    written = log_file.read_text(encoding="utf-8")
+    assert shown in out
+    assert shown in written
+    assert not set("\x1b\r\x9b") & set(out + written)
+
+
+def test_a_track_tag_with_control_characters_is_shown_escaped(tmp_path, monkeypatch, capsys):
+    """Track metadata comes from the file, so a downloaded file can put
+    anything there. ffprobe's JSON escapes an ESC, but reading the JSON
+    turns it back into the character, so only the output can escape it.
+    Here the stereo track's odd language tag gets the file skipped, and
+    the skip note names the tag."""
+    (tmp_path / "v.mkv").write_bytes(b"original")
+    streams = [audio(1, 6, default=True), audio(2, 2, language="eng\x1b[2J")]
+    monkeypatch.setattr(ssd, "probe_streams", lambda path, report=True: (streams, 100.0))
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--dry-run", "--no-progress"])
+
+    ssd.main()
+
+    out = capsys.readouterr().out
+    assert "eng\\x1b[2J/aac" in out
+    assert "\x1b" not in out
+
+
+def test_the_progress_bar_shows_a_name_with_control_characters_escaped(monkeypatch):
+    """The per-file progress bar's label is the file's name, written by
+    tqdm itself rather than through the log, so it's escaped on its own."""
+    pytest.importorskip("tqdm")
+    labels = []
+
+    class RecordingTqdm(ssd.tqdm):
+        def __init__(self, *args, **kwargs):
+            labels.append(kwargs["desc"])
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(ssd, "HAVE_TQDM", True)
+    monkeypatch.setattr(ssd, "tqdm", RecordingTqdm)
+
+    ssd.run_with_progress(python_cmd("print('pct=100')"), "v\x1b[2J.mkv", parse_pct_line, ssd.Progress(show=True))
+
+    assert labels == ["  v\\x1b[2J.mkv"]
+
+
 def test_log_file_gets_everything_but_the_console_only_warnings_and_errors(tmp_path, capsys):
     log_file = tmp_path / "run.log"
     ssd.setup_logging(str(log_file))

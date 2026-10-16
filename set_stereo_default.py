@@ -262,6 +262,31 @@ def _escape_bytes(error: UnicodeError) -> tuple[str, int]:
 codecs.register_error("escapebytes", _escape_bytes)
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+"""Every control character but the line break: C0 (ESC among them), DEL,
+and C1, which includes the one-character form of an ESC sequence that
+some terminals accept."""
+
+
+def _escape_controls(text: str) -> str:
+    r"""text with each control character but the line break written as its
+    escape, e.g. "\x1b" for ESC, the way _escape_bytes() writes a byte that
+    isn't valid UTF-8. Track names and language tags come from the file,
+    and so does a Linux file name, so they can hold an ESC that starts a
+    sequence to clear the terminal, move its cursor or change its title.
+    Escaped, it shows rather than acts. The line break stays, since the
+    script's own messages use it."""
+    return _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
+class _EscapingFormatter(logging.Formatter):
+    """A Formatter whose lines have their control characters escaped (see
+    _escape_controls()), for the console and the log file alike."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _escape_controls(super().format(record))
+
+
 def setup_logging(log_file: str | None) -> None:
     r"""Send log messages to the console, or with --log-file to that file.
     With a log file, warnings and errors still reach the console too, so a
@@ -275,7 +300,9 @@ def setup_logging(log_file: str | None) -> None:
     name that isn't valid UTF-8 reaches the script as surrogate escapes,
     which a strict UTF-8 console, the default in most locales, would
     otherwise refuse, turning each of that file's lines into a logging
-    error and leaving them out of the log file."""
+    error and leaving them out of the log file. Both also write control
+    characters, such as an ESC in a track's language tag, as escapes (see
+    _escape_controls()), so they can't act on the terminal."""
     for old in log.handlers[:]:
         log.removeHandler(old)
         old.close()
@@ -285,10 +312,10 @@ def setup_logging(log_file: str | None) -> None:
     log.setLevel(logging.INFO)
     log.propagate = False
     console = TqdmLoggingHandler() if HAVE_TQDM else logging.StreamHandler(sys.stdout)
-    console.setFormatter(logging.Formatter("%(message)s"))
+    console.setFormatter(_EscapingFormatter("%(message)s"))
     if log_file:
         handler = logging.FileHandler(log_file, mode="a", encoding="utf-8", errors="escapebytes")
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        handler.setFormatter(_EscapingFormatter("%(asctime)s [%(levelname)s] %(message)s"))
         log.addHandler(handler)
         console.setLevel(logging.WARNING)
     log.addHandler(console)
@@ -621,7 +648,9 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
 
     parse_pct(line) returns 0-100 for a progress line and None for anything
     else. With progress.show, a tqdm bar titled label shows this file's
-    progress on the top row, above process_all()'s overall bar.
+    progress on the top row, above process_all()'s overall bar. tqdm
+    writes the title itself, not through the log, so its control
+    characters are escaped here (see _escape_controls()).
     progress.on_progress(pct), if set, is called on every increase and with
     100 on success; process_all() uses it to move the overall bar. Output
     is read as UTF-8, as in run().
@@ -646,7 +675,7 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
         if _cancelled.is_set():
             proc.kill()
         if progress.show and HAVE_TQDM:
-            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=0)
+            bar = tqdm(total=100, desc=f"  {_escape_controls(label)}"[:40], unit="%", leave=False, position=0)
         for line in stdout:
             pct = parse_pct(line)
             if pct is None:
