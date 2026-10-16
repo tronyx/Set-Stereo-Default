@@ -739,6 +739,30 @@ def test_delete_leftovers_keeps_a_temp_folder_holding_what_the_script_never_writ
     assert f"Kept leftover temp folder (it holds something the script didn't write): {leftover}" in caplog.text
 
 
+def test_delete_leftovers_keeps_a_temp_folder_it_cant_look_into(tmp_path, monkeypatch, caplog):
+    """A run as root, or as another user in Docker, that was killed leaves a
+    temp folder only that user can open. A later run as the media's owner
+    can't look into it: the folder is kept with the reason, and the search
+    carries on rather than ending the run."""
+    leftover = make_leftover_folder(tmp_path, 7200)
+    (tmp_path / "a.mkv").write_bytes(b"")
+    real_iterdir = Path.iterdir
+
+    def denied(self):
+        if self == leftover:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+    monkeypatch.setattr(Path, "iterdir", denied)
+
+    found = list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    why = "couldn't check it: Permission denied"
+    assert found == [tmp_path / "a.mkv"]
+    assert leftover.exists()
+    assert f"Kept leftover temp folder ({why}): {leftover}" in caplog.text
+    assert ssd._warned_files == [(str(leftover), "leftover", why)]
+
+
 def test_delete_leftovers_never_follows_a_symlink(tmp_path, caplog):
     """A symlink with a temp folder's name is kept, and what it points to is
     never touched."""

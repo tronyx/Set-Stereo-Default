@@ -2185,13 +2185,18 @@ def _dispose_leftover(path: Path, kind: str, action: LeftoverAction) -> None:
     says (see LeftoverAction). Reported, it's warned about and recorded for
     report_warned_files(). To be deleted, it's first checked (see
     _leftover_kept_because()): one that must stay is warned about and
-    recorded with the reason. Otherwise it's deleted, or with "preview"
-    only said to be, and isn't listed at the end."""
+    recorded with the reason. So is one that can't be checked or deleted,
+    such as a temp folder that only the user of a killed run can open, so
+    that it never ends the search. Otherwise it's deleted, or with
+    "preview" only said to be, and isn't listed at the end."""
     if action == "report":
         log.warning(f"Skipping leftover temp {kind} from an interrupted run (safe to delete): {path}")
         _note_warnings(path, [Note("leftover", "")])
         return
-    why = _leftover_kept_because(path)
+    try:
+        why = _leftover_kept_because(path)
+    except OSError as exc:
+        why = f"couldn't check it: {exc.strerror or exc}"
     if why is None and action == "delete":
         try:
             _delete_leftover(path)
