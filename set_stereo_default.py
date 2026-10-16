@@ -1733,6 +1733,19 @@ def _announce(intro: str | None, line: str | None = None) -> None:
         log.info(text)
 
 
+def _shell_line(cmd: list[str]) -> str:
+    """cmd as one line to paste into a shell, as --dry-run shows it. On
+    Linux and macOS it's quoted as a POSIX shell reads it (shlex.join()).
+    On Windows, POSIX quotes break in both shells there: cmd.exe splits a
+    path with a space, and PowerShell one with an apostrophe. So there it's
+    quoted as subprocess.list2cmdline() does, in double quotes, which
+    cmd.exe and PowerShell both read, apostrophes, & and brackets included.
+    Two rare names still don't come through: in PowerShell, one with $ or
+    a backtick, which it expands inside double quotes, and in cmd.exe, one
+    with a %NAME% in it."""
+    return subprocess.list2cmdline(cmd) if sys.platform == "win32" else shlex.join(cmd)
+
+
 _MKVMERGE_PCT_RE = re.compile(r"#GUI#progress\s+(\d+)%")
 """mkvmerge --gui-mode's progress lines, e.g. "#GUI#progress 42%"."""
 
@@ -1843,7 +1856,7 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
         _note_failure(path, "in use")
         return False
     if opts.dry_run:
-        _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
+        _announce(plan.intro, "    [dry-run] " + _shell_line(cmd))
         return True
     _announce(plan.intro)
     try:

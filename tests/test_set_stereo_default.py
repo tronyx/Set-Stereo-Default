@@ -3,6 +3,7 @@ mkvmerge: anything that would call those tools is replaced with a stand-in,
 and subprocess behavior is exercised with small Python child processes."""
 
 import _thread
+import ctypes
 import errno
 import io
 import json
@@ -2813,11 +2814,34 @@ def test_exit_code_1_after_ctrl_c_counts_as_cancelled(remux):
     assert not leftover_temp_files(video)
 
 
+def split_command(line):
+    """line split into the arguments that the program it starts gets: with
+    shlex on Linux and macOS, as a POSIX shell does, and on Windows with
+    CommandLineToArgvW(), as ffmpeg and mkvmerge split their own command
+    line there, whether cmd.exe or PowerShell started them."""
+    if sys.platform != "win32":
+        return shlex.split(line)
+    shell32 = ctypes.WinDLL("shell32")
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    shell32.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    count = ctypes.c_int()
+    argv = shell32.CommandLineToArgvW(line, ctypes.byref(count))
+    try:
+        return [argv[i] for i in range(count.value)]
+    finally:
+        kernel32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
+
+
 @pytest.mark.parametrize("apply, tool", [
     (lambda p: ssd.apply_mkv(ssd.Plan(p, ORIGINAL_AUDIO, 2), file_args()), "mkvmerge"),
     (lambda p: ssd.apply_remux(ssd.Plan(p, ORIGINAL_AUDIO, 2), file_args()), "ffmpeg"),
 ], ids=["mkvmerge", "ffmpeg"])
 def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, caplog, apply, tool):
+    """The [dry-run] line, pasted into a shell, must give the tool the same
+    arguments the real run does, spaces, brackets and apostrophes in the
+    name included (see split_command())."""
     caplog.set_level("INFO")
     video = tmp_path / "Show (2026) - S01E01 [WEBDL-1080p][AAC 2.0] Joey's.mkv"
     video.write_bytes(b"original")
@@ -2825,7 +2849,7 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
     assert apply(video) is True
 
     printed = caplog.text.split("[dry-run] ", 1)[1].strip()
-    args = shlex.split(printed)
+    args = split_command(printed)
     assert args[0] == tool
     assert str(video) in args
     assert str(video) + ssd.TMP_MARKER + ".mkv" in args

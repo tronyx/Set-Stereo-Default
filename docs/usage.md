@@ -154,7 +154,7 @@ Skipped: 0
 Error: 0
 ```
 
-Each `[dry-run]` line shows the exact command that the script runs without `--dry-run`. The command has quotes, so you can paste it into a shell.
+Each `[dry-run]` line shows the exact command that the script runs without `--dry-run`. The command has quotes, so you can paste it into a shell. On Windows, the quotes work in Command Prompt and in PowerShell. Two types of file names are exceptions. In PowerShell, a name with `$` or a backtick (`` ` ``) does not paste correctly. In Command Prompt, a name with a word between two `%` signs, for example `%NAME%`, does not paste correctly.
 
 </details>
 
