@@ -3,6 +3,7 @@ mkvmerge: anything that would call those tools is replaced with a stand-in,
 and subprocess behavior is exercised with small Python child processes."""
 
 import _thread
+import contextlib
 import ctypes
 import errno
 import io
@@ -2333,7 +2334,7 @@ def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, 
     assert lines[warning + 3:warning + 5] == ["", "----- Summary -----"]
     [listed] = run_from.glob("set_stereo_default-owners-*.log")
     assert sorted(listed.read_text(encoding="utf-8").splitlines()) == \
-        sorted(str(v) for v in videos.iterdir())
+        sorted(str(v) for v in videos.iterdir() if v.name != ssd.LOCK_NAME)
 
 
 def remux_with_mkvmerge(path):
@@ -4412,6 +4413,141 @@ def test_main_can_run_twice_in_one_process(tmp_path, monkeypatch, capsys):
     assert out.count("Found 1 file(s).") == 2
     assert out.count("Changed: 1") == 2
     assert "/earlier/run.mkv" not in out
+
+
+LOCK_HOLDER = ("import os, sys\n"
+               "fd = os.open(sys.argv[1], os.O_RDONLY | os.O_CREAT, 0o644)\n"
+               "if os.name == 'nt':\n"
+               "    import msvcrt\n"
+               "    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)\n"
+               "else:\n"
+               "    import fcntl\n"
+               "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+               "print('locked', flush=True)\n"
+               "sys.stdin.readline()\n")
+"""A child process standing in for another run: it locks the lock file named
+by its argument the way the script does, says so, and holds the lock until
+a line arrives on its input or it's killed."""
+
+
+@contextlib.contextmanager
+def lock_held_by_another_run(folder):
+    """Hold folder's run lock in another process for the block; yields it."""
+    proc = subprocess.Popen([*python_cmd(LOCK_HOLDER), str(folder / ssd.LOCK_NAME)],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "locked"
+        yield proc
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.fixture
+def quick_run(monkeypatch):
+    """main() with the tools present and every file processed as outcome."""
+    monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
+
+    def run(*argv, outcome="unchanged"):
+        monkeypatch.setattr(ssd, "process_file", lambda *a, **k: outcome)
+        return ssd.main([*map(str, argv), "--no-progress"])
+    return run
+
+
+def test_a_folder_another_run_is_working_on_is_left_alone(tmp_path, quick_run, capsys):
+    """A second run on the same folder, such as last night's cron run still
+    going, stops at once with exit code 75 and changes nothing."""
+    make_videos(tmp_path, 2)
+
+    with lock_held_by_another_run(tmp_path):
+        code = quick_run(tmp_path, outcome="error")
+
+    assert code == 75
+    out = capsys.readouterr().out
+    assert f"Another run is already working on {tmp_path}; try again when it has finished." in out
+    assert "Summary" not in out
+
+
+@pytest.mark.parametrize("how", ["finished", "killed"])
+def test_a_lock_from_a_run_that_ended_never_blocks_the_next(tmp_path, quick_run, how):
+    """The lock is released however the run that held it ended, kill -9
+    included, so a stale lock never blocks a later run."""
+    make_videos(tmp_path, 1)
+
+    with lock_held_by_another_run(tmp_path) as holder:
+        if how == "finished":
+            holder.stdin.write("\n")
+            holder.stdin.flush()
+        else:
+            holder.kill()
+        holder.wait()
+
+    assert quick_run(tmp_path) == 0
+
+
+def test_a_dry_run_notes_another_run_and_carries_on(tmp_path, quick_run, capsys):
+    """A dry run never takes the lock, so it can't block a real run, but says
+    when another run may change what it previews."""
+    make_videos(tmp_path, 1)
+
+    with lock_held_by_another_run(tmp_path):
+        code = quick_run(tmp_path, "--dry-run", outcome="changed")
+
+    assert code == 0
+    assert (f"Another run is working on {tmp_path}, so this preview can change while it runs."
+            in capsys.readouterr().out)
+
+
+def test_a_dry_run_never_creates_the_lock_file(tmp_path, quick_run):
+    make_videos(tmp_path, 1)
+
+    assert quick_run(tmp_path, "--dry-run", outcome="changed") == 0
+    assert not (tmp_path / ssd.LOCK_NAME).exists()
+
+
+def test_a_run_leaves_its_lock_file_unlocked_for_the_next(tmp_path, quick_run):
+    make_videos(tmp_path, 1)
+
+    assert quick_run(tmp_path) == 0
+    assert quick_run(tmp_path) == 0
+    assert (tmp_path / ssd.LOCK_NAME).exists()
+
+
+def test_a_folder_named_twice_or_through_a_file_is_locked_once(tmp_path, quick_run):
+    """The same folder, named twice or through one of its files, must not
+    count as another run."""
+    make_videos(tmp_path, 1)
+
+    assert quick_run(tmp_path, tmp_path, tmp_path / "e00.mkv") == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="only Linux and macOS have O_NOFOLLOW")
+def test_a_symlink_at_the_lock_file_is_never_followed(tmp_path, quick_run, capsys):
+    """A symlink planted at the lock file's name is refused, never followed,
+    so a run as root can't be made to create a file elsewhere."""
+    make_videos(tmp_path, 1)
+    target = tmp_path / "elsewhere.txt"
+    (tmp_path / ssd.LOCK_NAME).symlink_to(target)
+
+    assert quick_run(tmp_path) == 0
+
+    assert not target.exists()
+    assert f"Couldn't lock {tmp_path} (" in capsys.readouterr().out
+
+
+def test_a_folder_that_cant_be_locked_gets_a_warning_and_the_run_carries_on(tmp_path, quick_run,
+                                                                            monkeypatch, capsys):
+    """NFS without its lock daemon can't lock. The run carries on, saying it
+    can't detect another run on that folder."""
+    make_videos(tmp_path, 1)
+
+    def no_locks(fd):
+        raise OSError(errno.ENOLCK, "No locks available")
+    monkeypatch.setattr(ssd, "_try_lock", no_locks)
+
+    assert quick_run(tmp_path) == 0
+    assert (f"Couldn't lock {tmp_path} (No locks available), so a run working on it at the same time "
+            f"can't be detected") in capsys.readouterr().out
 
 
 @pytest.mark.filterwarnings("error")
