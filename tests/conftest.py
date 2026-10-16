@@ -31,10 +31,12 @@ def clean_module_state(monkeypatch):
     """Reset the script's state before and after every test, and put back
     the Ctrl+C and SIGTERM handlers a test may have installed. Tests run as if
     outside the Docker image, even when they run inside it, and each one
-    checks mkvmerge's options afresh. Whatever the test patched is put back
-    before the reset afterwards, since the reset uses the script's own
-    functions."""
+    checks mkvmerge's options afresh. Runs take no run lock, so no test
+    leaves a lock file next to the script; the tests of the lock give it a
+    place of their own. Whatever the test patched is put back before the
+    reset afterwards, since the reset uses the script's own functions."""
     monkeypatch.delenv(ssd.IN_DOCKER_VAR, raising=False)
+    monkeypatch.setattr(ssd, "_lock_path", lambda: None)
     original_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     _reset()
     yield

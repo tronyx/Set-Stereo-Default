@@ -80,7 +80,7 @@ This cron line runs the script every night at 3 AM, as the owner of the files an
 0 3 * * * docker run --rm --user 1000:100 -v "/path/to/videos:/videos" tronyx/set-stereo-default --log-file /videos/set_stereo_default.log
 ```
 
-If the run of the previous night still works on the folder, the new run stops at once with exit code `75`. See [One run at a time](how-it-works.md#-one-run-at-a-time).
+If the run of the previous night still works, the new run stops at once with exit code `75`. See [One run at a time](how-it-works.md#-one-run-at-a-time).
 
 ## 💡 Good to know
 

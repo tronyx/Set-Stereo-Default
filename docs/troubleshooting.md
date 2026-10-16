@@ -107,13 +107,13 @@ An earlier run stopped suddenly while it processed a file. You can safely delete
 
 With `--delete-leftovers`, the script keeps a leftover in three cases. Something in it changed in the last hour, so another run can still use it. Or the folder holds anything other than one file, which the script does not write. Or the leftover is a symlink, which the script never follows. The reason in the parentheses tells you which. For a leftover that changed recently, run the script again later. Examine the other leftovers yourself, and delete them if you do not need them.
 
-## `Another run is already working on <folder>; try again when it has finished.`
+## `Another run of the script is already working (it holds <lock file>); try again when it has finished.`
 
-Another run of the script holds the lock of this folder. The script stopped with exit code `75` and did not change files. Wait until the other run is complete. Then run the script again. See [One run at a time](how-it-works.md#-one-run-at-a-time).
+Another run of the script holds the run lock. The script stopped with exit code `75` and did not change files. Wait until the other run is complete. Then run the script again. See [One run at a time](how-it-works.md#-one-run-at-a-time).
 
-## `Couldn't lock <folder> (...), so a run working on it at the same time can't be detected`
+## `Couldn't lock <lock file> (...), so another run at the same time can't be detected`
 
-The script cannot use the lock file `.set_stereo_default.lock` in this folder. Examples are an NFS share without its lock service, a read-only folder, and a symlink with the name of the lock file. The script continues, but it cannot stop a second run on the same folder. Do not start two runs on this folder at the same time.
+The script cannot use its lock file, `.set_stereo_default.lock`. For example, the user who runs the script cannot make files in the folder of the script. Other examples are an NFS share without its lock service, and a symlink with the name of the lock file. The script continues, but it cannot stop a second run. If the user cannot make files in the folder of the script, give that user permission to write to the folder. Until then, do not start two runs at the same time.
 
 ## No thumbnail in Windows Explorer
 

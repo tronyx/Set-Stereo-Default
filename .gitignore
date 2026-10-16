@@ -12,9 +12,11 @@ htmlcov/
 venv/
 env/
 
-# This script's own remux artifacts, in case test files ever live in-repo
+# This script's own remux artifacts, in case test files ever live in-repo,
+# and the run lock it keeps next to itself (the real-file tests run it)
 *.tmp_remux.*
 set_stereo_default.tmp.*/
+.set_stereo_default.lock
 *.bak
 
 # Editors

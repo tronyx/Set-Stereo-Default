@@ -27,6 +27,8 @@ import set_stereo_default as ssd
 
 real_mkvmerge_tracks = ssd.mkvmerge_tracks
 
+real_lock_path = ssd._lock_path
+
 
 @pytest.fixture(autouse=True)
 def mkvmerge_ids(monkeypatch):
@@ -2334,7 +2336,7 @@ def test_owner_warning_comes_after_every_file_just_before_the_summary(tmp_path, 
     assert lines[warning + 3:warning + 5] == ["", "----- Summary -----"]
     [listed] = run_from.glob("set_stereo_default-owners-*.log")
     assert sorted(listed.read_text(encoding="utf-8").splitlines()) == \
-        sorted(str(v) for v in videos.iterdir() if v.name != ssd.LOCK_NAME)
+        sorted(str(v) for v in videos.iterdir())
 
 
 def remux_with_mkvmerge(path):
@@ -4431,9 +4433,9 @@ a line arrives on its input or it's killed."""
 
 
 @contextlib.contextmanager
-def lock_held_by_another_run(folder):
-    """Hold folder's run lock in another process for the block; yields it."""
-    proc = subprocess.Popen([*python_cmd(LOCK_HOLDER), str(folder / ssd.LOCK_NAME)],
+def lock_held_by_another_run(lock):
+    """Hold the run lock at lock in another process for the block; yields it."""
+    proc = subprocess.Popen([*python_cmd(LOCK_HOLDER), str(lock)],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         assert proc.stdout.readline().strip() == "locked"
@@ -4441,6 +4443,17 @@ def lock_held_by_another_run(folder):
     finally:
         proc.kill()
         proc.wait()
+
+
+@pytest.fixture
+def run_lock(tmp_path, monkeypatch):
+    """Put the run lock in a folder of its own, standing in for the script's
+    folder, and return the lock file's path."""
+    folder = tmp_path / "script"
+    folder.mkdir()
+    lock = folder / ssd.LOCK_NAME
+    monkeypatch.setattr(ssd, "_lock_path", lambda: lock)
+    return lock
 
 
 @pytest.fixture
@@ -4454,27 +4467,31 @@ def quick_run(monkeypatch):
     return run
 
 
-def test_a_folder_another_run_is_working_on_is_left_alone(tmp_path, quick_run, capsys):
-    """A second run on the same folder, such as last night's cron run still
-    going, stops at once with exit code 75 and changes nothing."""
-    make_videos(tmp_path, 2)
+def test_another_run_blocks_this_one_whatever_folders_they_work_on(tmp_path, run_lock, quick_run, capsys):
+    """Only one run of the script works at a time, whatever folders either
+    is given: a second one, such as tonight's cron run while last night's
+    is still going, stops at once with exit code 75 and changes nothing."""
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    make_videos(videos, 2)
 
-    with lock_held_by_another_run(tmp_path):
-        code = quick_run(tmp_path, outcome="error")
+    with lock_held_by_another_run(run_lock):
+        code = quick_run(videos, outcome="error")
 
     assert code == 75
     out = capsys.readouterr().out
-    assert f"Another run is already working on {tmp_path}; try again when it has finished." in out
+    assert (f"Another run of the script is already working (it holds {run_lock}); try again when it "
+            f"has finished.") in out
     assert "Summary" not in out
 
 
 @pytest.mark.parametrize("how", ["finished", "killed"])
-def test_a_lock_from_a_run_that_ended_never_blocks_the_next(tmp_path, quick_run, how):
+def test_a_lock_from_a_run_that_ended_never_blocks_the_next(tmp_path, run_lock, quick_run, how):
     """The lock is released however the run that held it ended, kill -9
     included, so a stale lock never blocks a later run."""
     make_videos(tmp_path, 1)
 
-    with lock_held_by_another_run(tmp_path) as holder:
+    with lock_held_by_another_run(run_lock) as holder:
         if how == "finished":
             holder.stdin.write("\n")
             holder.stdin.flush()
@@ -4485,60 +4502,72 @@ def test_a_lock_from_a_run_that_ended_never_blocks_the_next(tmp_path, quick_run,
     assert quick_run(tmp_path) == 0
 
 
-def test_a_dry_run_notes_another_run_and_carries_on(tmp_path, quick_run, capsys):
+def test_a_dry_run_notes_another_run_and_carries_on(tmp_path, run_lock, quick_run, capsys):
     """A dry run never takes the lock, so it can't block a real run, but says
     when another run may change what it previews."""
     make_videos(tmp_path, 1)
 
-    with lock_held_by_another_run(tmp_path):
+    with lock_held_by_another_run(run_lock):
         code = quick_run(tmp_path, "--dry-run", outcome="changed")
 
     assert code == 0
-    assert (f"Another run is working on {tmp_path}, so this preview can change while it runs."
+    assert ("Another run of the script is working, so this preview can change while it runs."
             in capsys.readouterr().out)
 
 
-def test_a_dry_run_never_creates_the_lock_file(tmp_path, quick_run):
+def test_a_dry_run_never_creates_the_lock_file(tmp_path, run_lock, quick_run):
     make_videos(tmp_path, 1)
 
     assert quick_run(tmp_path, "--dry-run", outcome="changed") == 0
-    assert not (tmp_path / ssd.LOCK_NAME).exists()
+    assert not run_lock.exists()
 
 
-def test_a_run_leaves_its_lock_file_unlocked_for_the_next(tmp_path, quick_run):
+def test_a_run_leaves_its_lock_file_unlocked_for_the_next(tmp_path, run_lock, quick_run):
     make_videos(tmp_path, 1)
 
     assert quick_run(tmp_path) == 0
     assert quick_run(tmp_path) == 0
-    assert (tmp_path / ssd.LOCK_NAME).exists()
+    assert run_lock.exists()
 
 
-def test_a_folder_named_twice_or_through_a_file_is_locked_once(tmp_path, quick_run):
-    """The same folder, named twice or through one of its files, must not
-    count as another run."""
-    make_videos(tmp_path, 1)
+def test_a_long_input_file_list_takes_one_lock_and_leaves_no_lock_files_in_its_folders(tmp_path, run_lock,
+                                                                                       quick_run):
+    """A list of hundreds of show folders, one per line, takes the one run
+    lock, rather than holding a file open for each folder, which runs out of
+    open files (256 by default on macOS) and leaves a lock file in each."""
+    shows = []
+    for i in range(300):
+        show = tmp_path / f"show{i:03}"
+        show.mkdir()
+        make_videos(show, 1)
+        shows.append(str(show))
+    listing = tmp_path / "shows.txt"
+    listing.write_text("\n".join(shows) + "\n", encoding="utf-8")
 
-    assert quick_run(tmp_path, tmp_path, tmp_path / "e00.mkv") == 0
+    assert quick_run("--input-file", listing) == 0
+
+    assert run_lock.exists()
+    assert not list(tmp_path.glob("show*/" + ssd.LOCK_NAME))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="only Linux and macOS have O_NOFOLLOW")
-def test_a_symlink_at_the_lock_file_is_never_followed(tmp_path, quick_run, capsys):
+def test_a_symlink_at_the_lock_file_is_never_followed(tmp_path, run_lock, quick_run, capsys):
     """A symlink planted at the lock file's name is refused, never followed,
     so a run as root can't be made to create a file elsewhere."""
     make_videos(tmp_path, 1)
     target = tmp_path / "elsewhere.txt"
-    (tmp_path / ssd.LOCK_NAME).symlink_to(target)
+    run_lock.symlink_to(target)
 
     assert quick_run(tmp_path) == 0
 
     assert not target.exists()
-    assert f"Couldn't lock {tmp_path} (" in capsys.readouterr().out
+    assert f"Couldn't lock {run_lock} (" in capsys.readouterr().out
 
 
-def test_a_folder_that_cant_be_locked_gets_a_warning_and_the_run_carries_on(tmp_path, quick_run,
-                                                                            monkeypatch, capsys):
-    """NFS without its lock daemon can't lock. The run carries on, saying it
-    can't detect another run on that folder."""
+def test_a_lock_that_cant_be_used_gets_a_warning_and_the_run_carries_on(tmp_path, run_lock, quick_run,
+                                                                        monkeypatch, capsys):
+    """NFS without its lock daemon can't lock, and a script's folder may not
+    be writable. The run carries on, saying it can't detect another run."""
     make_videos(tmp_path, 1)
 
     def no_locks(fd):
@@ -4546,8 +4575,26 @@ def test_a_folder_that_cant_be_locked_gets_a_warning_and_the_run_carries_on(tmp_
     monkeypatch.setattr(ssd, "_try_lock", no_locks)
 
     assert quick_run(tmp_path) == 0
-    assert (f"Couldn't lock {tmp_path} (No locks available), so a run working on it at the same time "
-            f"can't be detected") in capsys.readouterr().out
+    assert (f"Couldn't lock {run_lock} (No locks available), so another run at the same time can't be "
+            f"detected") in capsys.readouterr().out
+
+
+def test_the_run_lock_is_next_to_the_script():
+    assert real_lock_path() == Path(ssd.__file__).resolve().parent / ssd.LOCK_NAME
+
+
+@pytest.mark.parametrize("mounted", [True, False], ids=["videos mounted", "nothing mounted"])
+def test_in_the_docker_image_the_run_lock_is_in_the_mounted_videos(tmp_path, monkeypatch, mounted):
+    """Each docker run is a new container with its own copy of the script, so
+    the lock goes where every container sees it: the mounted videos. With
+    nothing mounted there's no lock; the search reports the missing mount."""
+    videos = tmp_path / "videos"
+    if mounted:
+        videos.mkdir()
+    monkeypatch.setenv(ssd.IN_DOCKER_VAR, "1")
+    monkeypatch.setattr(ssd, "DOCKER_VIDEOS", str(videos))
+
+    assert real_lock_path() == (videos / ssd.LOCK_NAME if mounted else None)
 
 
 @pytest.mark.filterwarnings("error")

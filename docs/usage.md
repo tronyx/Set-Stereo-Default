@@ -166,7 +166,7 @@ Each `[dry-run]` line shows the command that the script runs without `--dry-run`
 | `0` | The script finished with no errors, or you chose `q` at the [backup question](how-it-works.md#-backups) |
 | `1` | The script found no matching files, a required tool is missing, or at least one file ended as an `Error` |
 | `2` | The command-line options are not valid |
-| `75` | Another run already works on one of the folders, so the script did not change files (see [One run at a time](how-it-works.md#-one-run-at-a-time)) |
+| `75` | Another run of the script already works, so this run did not change files (see [One run at a time](how-it-works.md#-one-run-at-a-time)) |
 | `130` | Ctrl+C stopped the script |
 | `143` | SIGTERM stopped the script |
 

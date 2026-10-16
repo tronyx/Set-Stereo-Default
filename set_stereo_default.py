@@ -79,8 +79,8 @@ preview every change:
     docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default --dry-run
 
 Exit codes: 0 all done, 1 a file had an error, no files matched or a tool is
-missing, 2 invalid options, 75 another run is working on a folder, 130
-stopped by Ctrl+C, 143 stopped by SIGTERM.
+missing, 2 invalid options, 75 another run is working, 130 stopped by
+Ctrl+C, 143 stopped by SIGTERM.
 
 Full guide: https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/README.md
 """
@@ -2815,35 +2815,36 @@ def print_summary(stats: Counter[Outcome], opts: Options, partial: bool = False,
 
 
 LOCK_NAME = ".set_stereo_default.lock"
-"""The file in each folder a run works on whose lock keeps a second run off
-that folder (see _lock_run()). It stays, empty, after the run."""
+"""The file whose lock keeps a second run of the script from starting while
+one works (see _lock_run() and _lock_path()). It stays, empty, after the
+run."""
 
 BUSY_EXIT = 75
-"""The exit code when another run holds a folder's lock: EX_TEMPFAIL from
+"""The exit code when another run holds the run lock: EX_TEMPFAIL from
 BSD's sysexits.h, "try again later", so a cron wrapper can tell it from a
 file that couldn't be fixed."""
 
 
 class Busy(Exception):
-    """Raised by _lock_run() when another run holds the lock of folder."""
+    """Raised by _lock_run() when another run holds the run lock at path."""
 
-    def __init__(self, folder: Path) -> None:
-        super().__init__(str(folder))
-        self.folder = folder
+    def __init__(self, path: Path) -> None:
+        super().__init__(str(path))
+        self.path = path
 
 
-def _folders_to_lock(paths: Iterable[str]) -> list[Path]:
-    """The folders a run locks: each of paths that's a folder, and for a file
-    its folder, each once by its real path, so a folder named twice, or
-    through one of its files, isn't taken for another run. Paths that don't
-    exist are left out (the search warns about them), and so is a temp
-    folder (see TMP_DIR_PREFIX)."""
-    folders: dict[str, Path] = {}
-    for p in (Path(os.path.abspath(x)) for x in paths):
-        folder = p if p.is_dir() else p.parent if p.is_file() else None
-        if folder is not None and not folder.name.startswith(TMP_DIR_PREFIX):
-            folders.setdefault(os.path.realpath(folder), folder)
-    return list(folders.values())
+def _lock_path() -> Path | None:
+    """Where the run lock is (see _lock_run()): next to the script, so any
+    two runs of it on this computer see each other, whatever folders they
+    work on. In the Docker image (see _in_docker()), each docker run is a
+    new container with its own copy of the script, so the lock is in
+    DOCKER_VIDEOS instead, where every container that mounts the same
+    videos sees it. None there when nothing is mounted: the search reports
+    the missing mount."""
+    if _in_docker():
+        videos = Path(DOCKER_VIDEOS)
+        return videos / LOCK_NAME if videos.is_dir() else None
+    return Path(__file__).resolve().parent / LOCK_NAME
 
 
 def _open_lock(path: Path, create: bool) -> int | None:
@@ -2883,47 +2884,44 @@ def _try_lock(fd: int) -> bool:
     return True
 
 
-def _lock_run(opts: Options) -> list[int]:
-    """Take the lock of each folder the run works on (see _folders_to_lock())
-    and return the open lock files, which _unlock_run() closes, releasing
-    them. Raises Busy for the first folder another run holds, with every
-    lock taken so far released again. A dry run takes no lock and creates
-    no lock file: it only notes a folder another run holds, since that run
-    can change what it previews. A folder whose lock can't be used (a
-    read-only folder, NFS without its lock daemon, a symlink at the name)
-    gets a warning, and the run carries on without it."""
-    held: list[int] = []
+def _lock_run(opts: Options) -> int | None:
+    """Take the run lock (see _lock_path()) and return its open file, which
+    _unlock_run() closes, releasing it; None when there's no lock to hold.
+    Raises Busy if another run holds it. A dry run takes no lock and
+    creates no lock file: it only notes another run that holds it, since
+    that run can change what it previews. A lock that can't be used (a
+    script folder that isn't writable, NFS without its lock daemon, a
+    symlink at the name) gets a warning, and the run carries on without
+    it."""
+    path = _lock_path()
+    if path is None:
+        return None
+    fd = None
     try:
-        for folder in _folders_to_lock(opts.paths):
-            fd = None
-            try:
-                fd = _open_lock(folder / LOCK_NAME, create=not opts.dry_run)
-                locked = fd is None or _try_lock(fd)
-            except OSError as exc:
-                if fd is not None:
-                    os.close(fd)
-                log.warning(f"Couldn't lock {folder} ({exc.strerror or exc}), so a run working on it "
-                            f"at the same time can't be detected")
-                continue
-            if opts.dry_run:
-                if fd is not None:
-                    os.close(fd)
-                if not locked:
-                    log.warning(f"Another run is working on {folder}, so this preview can change while it runs.")
-                continue
-            assert fd is not None
-            held.append(fd)
-            if not locked:
-                raise Busy(folder)
+        fd = _open_lock(path, create=not opts.dry_run)
+        locked = fd is None or _try_lock(fd)
+    except OSError as exc:
+        _unlock_run(fd)
+        log.warning(f"Couldn't lock {path} ({exc.strerror or exc}), so another run at the same time "
+                    f"can't be detected")
+        return None
     except BaseException:
-        _unlock_run(held)
+        _unlock_run(fd)
         raise
-    return held
+    if opts.dry_run:
+        _unlock_run(fd)
+        if not locked:
+            log.warning("Another run of the script is working, so this preview can change while it runs.")
+        return None
+    if not locked:
+        _unlock_run(fd)
+        raise Busy(path)
+    return fd
 
 
-def _unlock_run(held: list[int]) -> None:
-    """Close the lock files _lock_run() returned, releasing their locks."""
-    for fd in held:
+def _unlock_run(fd: int | None) -> None:
+    """Close the run lock's file, if it's open, releasing the lock."""
+    if fd is not None:
         with contextlib.suppress(OSError):
             os.close(fd)
 
@@ -2931,8 +2929,8 @@ def _unlock_run(held: list[int]) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run the command line: find the files, process each one, and print a
     summary. Returns the exit code: 0 when done, 1 if no files were found,
-    a tool is missing or any file had an error, 75 if another run is working
-    on one of the folders (see _lock_run()), or 128 + the signal number
+    a tool is missing or any file had an error, 75 if another run of the
+    script is working (see _lock_run()), or 128 + the signal number
     when stopped (130 for Ctrl+C, 143 for SIGTERM). Invalid options exit
     with 2 straight from parse_args(), and a --log-file that can't be
     written (no permission, or a folder rather than a file) returns 2 too.
@@ -3004,11 +3002,11 @@ def _run(opts: Options) -> int:
     unhandled; stage says what it interrupted, which decides the message
     and whether there's a partial summary to print. After each phase,
     _check_stop() catches a stop whose exception was lost. Before the
-    search, each folder's lock is taken (see _lock_run()), so a busy
-    folder is reported at once, with BUSY_EXIT; the locks are released
+    search, the run lock is taken (see _lock_run()), so another run that
+    holds it is reported at once, with BUSY_EXIT; the lock is released
     when the run ends, however it ends."""
     files: list[Path] = []
-    held: list[int] = []
+    held: int | None = None
     stats: Counter[Outcome] = Counter()
     list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
     stage = "search"
@@ -3039,7 +3037,8 @@ def _run(opts: Options) -> int:
         _check_stop()
         _ignore_stops()
     except Busy as exc:
-        log.error(f"Another run is already working on {exc.folder}; try again when it has finished.")
+        log.error(f"Another run of the script is already working (it holds {exc.path}); try again when it "
+                  f"has finished.")
         return BUSY_EXIT
     except KeyboardInterrupt as exc:
         _ignore_stops()

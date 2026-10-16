@@ -141,19 +141,21 @@ With `--delete-leftovers`, the script deletes the leftovers that it finds. With 
 
 ## 🔒 One run at a time
 
-Only one run at a time can work on a folder. Before the script searches a folder that you name, it locks the file `.set_stereo_default.lock` in that folder. For a file that you name, it locks the lock file in the folder of that file. If another run holds the lock, the script stops at once with exit code `75` and does not change files:
+Only one run of the script at a time can work. Before the search, the script locks the file `.set_stereo_default.lock` in its own folder, next to `set_stereo_default.py`. If another run holds the lock, the script stops at once with exit code `75` and does not change files:
 
 ```text
-Another run is already working on /videos; try again when it has finished.
+Another run of the script is already working (it holds /home/tronyx/scripts/.set_stereo_default.lock); try again when it has finished.
 ```
 
-So two runs never change the same files at the same time. For example, a nightly run from cron cannot start while the run of the previous night still works on a large library. The lock also works across Docker containers, and across computers that share the folder, if the share supports locks.
+So two runs never change files at the same time, whatever folders they work on. For example, a nightly run from cron cannot start while the run of the previous night still works on a large library.
 
-The operating system releases the lock when a run ends, also after `kill -9` or a power failure. So a run that stopped suddenly never blocks the next run. The lock file stays in the folder after the run, and it is empty. Do not delete it while a run works on the folder.
+In the Docker image, each `docker run` starts a new container with its own copy of the script. So there, the lock file is in the mounted `/videos` folder, where each container sees it. Two containers that mount the same folder at `/videos` cannot work at the same time. If nothing is mounted at `/videos`, for example when you mount your videos at another path, the image takes no lock.
 
-A dry run does not lock the folder, so it never blocks a real run. If another run works on the folder, the dry run shows a note. That run can change the files while the dry run shows them.
+The operating system releases the lock when a run ends, also after `kill -9` or a power failure. So a run that stopped suddenly never blocks the next run. The lock file stays after the run, and it is empty. Do not delete it while a run works.
 
-The lock is for the folders that you name. Two runs on different folders do not block each other, also when one folder is inside the other, for example `/videos` and `/videos/TV`. If the script cannot lock a folder, it shows a warning and continues. Examples are an NFS share without its lock service, and a read-only folder.
+A dry run does not take the lock, so it never blocks a real run. If another run works, the dry run shows a note. That run can change the files while the dry run shows them.
+
+If the script cannot use the lock, it shows a warning and continues. Examples are a script folder in which the user cannot make files, and an NFS share without its lock service.
 
 ## ⚠️ Limitations
 
