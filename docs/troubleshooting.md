@@ -91,6 +91,14 @@ Then run the script again. On Linux and macOS, the script changes a file without
 
 The script writes each new file in a temporary folder next to the original. It cannot make this folder when it cannot write to the folder of the original. Examples are a read-only network share, a folder that belongs to another user, and a full disk. The reason in the parentheses tells you which. If the disk is full, free some space. Otherwise, give the user that runs the script permission to write to the folder. Then run the script again.
 
+On Windows, a long path can also cause this message, with the reason `The filename or extension is too long`. The path of the new file has 32 characters more than the path of the original. Windows allows paths of at most 260 characters, unless long paths are on. To turn on long paths, run this command in PowerShell as an administrator:
+
+```powershell
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+```
+
+Then restart the computer, and run the script again.
+
 ## `mkvmerge sees N audio track(s), but ffprobe sees M`
 
 The two tools do not agree about the file. The script does not guess which track is which, so it does not change the file. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues), and include the `mkvmerge -J` output for the file.
@@ -105,7 +113,14 @@ An earlier run stopped suddenly while it processed a file. You can safely delete
 
 ## `Kept leftover temp folder (...)` or `Kept leftover temp file (...)`
 
-With `--delete-leftovers`, the script keeps a leftover in three cases. Something in it changed in the last hour, so another run can still use it. Or the folder holds anything other than one file, which the script does not write. Or the leftover is a symlink, which the script never follows. The reason in the parentheses tells you which. For a leftover that changed recently, run the script again later. Examine the other leftovers yourself, and delete them if you do not need them.
+With `--delete-leftovers`, the script keeps a leftover in these cases:
+
+- Something in it changed in the last hour, so another run can still use it.
+- The folder holds anything other than one file, which the script does not write.
+- The leftover is a symlink, which the script never follows.
+- The script cannot look into the leftover or delete it. For example, only the user of the run that stopped can open the folder.
+
+The reason in the parentheses tells you which. For a leftover that changed recently, run the script again later. If only another user can open a leftover, delete it as that user. Examine the other leftovers yourself, and delete them if you do not need them.
 
 ## `Another run of the script is already working (it holds <lock file>); try again when it has finished.`
 

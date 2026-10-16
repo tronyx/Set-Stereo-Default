@@ -155,7 +155,7 @@ Skipped: 0
 Error: 0
 ```
 
-Each `[dry-run]` line shows the command that the script runs without `--dry-run`. The real run writes the new file in a temporary folder with a random name. The command shows this name as `set_stereo_default.tmp.XXXXXXXX`. To run the command yourself, first make a folder with that name, or change the path after `-o`. The command has quotes, so you can paste it into a shell. On Windows, the quotes work in Command Prompt and in PowerShell. Two types of file names are exceptions. In PowerShell, a name with `$` or a backtick (`` ` ``) does not paste correctly. In Command Prompt, a name with a word between two `%` signs, for example `%NAME%`, does not paste correctly.
+Each `[dry-run]` line shows the command that the script runs without `--dry-run`. The real run writes the new file in a temporary folder with a random name. The command shows this name as `set_stereo_default.tmp.XXXXXXXX`. To run the command yourself, change the path after `-o` to a new file. Do not make a folder with the name `set_stereo_default.tmp.XXXXXXXX` for it, because the next run treats that folder as a leftover. The command has quotes, so you can paste it into a shell. On Windows, the quotes work in Command Prompt and in PowerShell. Two types of file names are exceptions. In PowerShell, a name with `$` or a backtick (`` ` ``) does not paste correctly. In Command Prompt, a name with a word between two `%` signs, for example `%NAME%`, does not paste correctly.
 
 </details>
 

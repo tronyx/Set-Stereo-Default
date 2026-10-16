@@ -39,6 +39,8 @@ In MP4, M4V, and MOV files, ffmpeg also sets one flag by itself. If no subtitle 
 
 The script also does not use the new file if the original changed during the remux. For example, Sonarr or Radarr can import an upgrade (a better version of the video) over the original. The new file does not have this change. So the script leaves the file as it is and counts it as an `Error`. The next run fixes the new version.
 
+The script writes the new file in a temporary folder next to the original (see [Leftover temp files](#-leftover-temp-files)). So the path of the new file has 32 characters more than the path of the original. On Windows, a path can have at most 260 characters, unless long paths are on. So on Windows, turn on long paths if the paths of your videos have more than about 225 characters (see [Troubleshooting](troubleshooting.md)).
+
 > [!NOTE]
 > The script rejects a new file if it is more than 1% shorter than the original and at least 1 second shorter. The tools copy all the data that they can read. So a shorter file almost always means that the original is damaged, usually because the download is incomplete. The script does not change the file, so you can examine it. Each run reports the file as an `Error` until the file is replaced.
 
