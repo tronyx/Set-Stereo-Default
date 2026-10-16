@@ -32,6 +32,19 @@ SCRIPT = Path(__file__).resolve().parent.parent / "set_stereo_default.py"
 TMP_MARKER = ".tmp_remux"
 """What the script puts in a temp file's name: <name>.tmp_remux.<ext>."""
 
+TMP_DIR_PREFIX = "set_stereo_default.tmp."
+"""How the script's private temp folder's name starts."""
+
+
+def leftovers(folder, recursive=False, allow_empty_folder=False):
+    """Temp files and temp folders in folder (and below, with recursive).
+    With allow_empty_folder, an empty temp folder doesn't count: a stop
+    landing between a swap and the folder's removal leaves one, by design."""
+    glob = folder.rglob if recursive else folder.glob
+    found = [*glob("*" + TMP_MARKER + "*"), *glob(TMP_DIR_PREFIX + "*")]
+    return [p for p in found if not (allow_empty_folder and p.is_dir() and not any(p.iterdir()))]
+
+
 LAYOUTS = {1: "mono", 2: "stereo", 6: "5.1"}
 """ffmpeg's channel layout name for each channel count make_video() supports."""
 
@@ -311,7 +324,7 @@ def test_script_on_a_real_file(tmp_path, case):
 
     after_audio = audio_defaults(video)
     assert len(probe(video)) == len(before_streams), "a stream was lost"
-    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert not leftovers(tmp_path), "temp file left behind"
     if "--avi-reorder" in case.args:
         moved = before_audio[case.target][0]
         rest = [ch for i, (ch, _) in enumerate(before_audio) if i != case.target]
@@ -459,7 +472,7 @@ def test_a_remux_keeps_everything_but_the_audio_default(tmp_path, ext, font_type
         assert summary(output)["error"] == 1, output
         assert "lost its hearing_impaired flag" in output, output
         assert digest(video) == original
-        assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+        assert not leftovers(tmp_path), "temp file left behind"
         return
     assert code == 0, output
     assert summary(output)["changed"] == 1, output
@@ -505,7 +518,7 @@ def test_two_default_subtitle_tracks_both_keep_the_flag(tmp_path):
         assert summary(output)["error"] == 1, output
         assert "stream#4 lost its default flag" in output, output
         assert digest(video) == original
-        assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+        assert not leftovers(tmp_path), "temp file left behind"
         return
     assert code == 0, output
     assert summary(output)["changed"] == 1, output
@@ -849,7 +862,7 @@ def test_a_random_layout_is_fixed_or_left_alone(tmp_path, case):
 
     assert code == (1 if expected == "error" else 0), f"{layout}\n{output}"
     assert summary(output)[expected] == 1, f"expected {expected}\n{layout}\n{output}"
-    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert not leftovers(tmp_path), "temp file left behind"
     if expected != "changed":
         assert digest(video) == before_digest, f"the file changed\n{layout}\n{output}"
         return
@@ -952,7 +965,7 @@ def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files,
     report = f"{how}\n{output}"
 
     assert "Traceback" not in output, report
-    assert not list(folder.glob("*.tmp_remux*")), f"temp file left behind\n{report}"
+    assert not leftovers(folder, allow_empty_folder=True), f"temp file left behind\n{report}"
     if code == 0:
         assert counts == {"changed": 6, "unchanged": 0, "skipped": 0, "error": 0}, report
         assert "Partial" not in output, report
@@ -978,7 +991,7 @@ def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files,
     counts = summary(output)
     assert counts["changed"] + counts["unchanged"] == 6 and counts["changed"] + fixed == 6, report
     assert counts["error"] == 0 and counts["skipped"] == 0, report
-    assert not list(folder.glob("*.tmp_remux*")), f"temp file left behind\n{report}"
+    assert not leftovers(folder, allow_empty_folder=True), f"temp file left behind\n{report}"
     for name in stop_files.digests:
         assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{report}"
         assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{report}"
@@ -1060,7 +1073,7 @@ def test_a_file_open_in_another_program_is_reported_and_left_alone(tmp_path, exc
     assert "unexpected error" not in output, output
     assert digest(locked) == before
     assert audio_defaults(other) == [(6, False), (2, True)]
-    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert not leftovers(tmp_path), "temp file left behind"
     assert sorted(p.name for p in tmp_path.glob("*.bak")) == (["other.mp4.bak"] if backup else [])
 
 
@@ -1087,30 +1100,27 @@ def test_a_read_only_file_is_reported_and_left_alone(tmp_path, backup):
     assert "unexpected error" not in output, output
     assert digest(locked) == before
     assert audio_defaults(other) == [(6, False), (2, True)]
-    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert not leftovers(tmp_path), "temp file left behind"
     assert sorted(p.name for p in tmp_path.glob("*.bak")) == (["other.mp4.bak"] if backup else [])
 
 
 @pytest.mark.parametrize("ext", [".mkv", ".mp4"])
-def test_a_name_too_long_for_its_temp_name_is_reported(tmp_path, ext):
-    """A name at the file system's limit (255 characters) leaves no room for
-    the temp name's suffix. The file can't be fixed, so it's reported as
-    such, and left as it is with nothing else next to it."""
+def test_a_name_at_the_file_systems_limit_is_fixed(tmp_path, ext):
+    """The remux has the video's own name, in a temp folder with a short
+    name, so a name at the file system's limit (255 characters) is fixed
+    like any other, with nothing left next to it."""
     need("ffmpeg", "ffprobe", "mkvmerge")
     try:
         video = make_video(tmp_path / ("n" * (255 - len(ext)) + ext), [Track(6, default=True), Track(2)])
     except (OSError, subprocess.CalledProcessError):
         pytest.skip("can't make a 255-character name here")
-    before = digest(video)
 
     code, output = run_script(video)
 
-    assert code == 1, output
-    assert summary(output)["error"] == 1, output
-    assert f"can't use the temp name {video.name}.tmp_remux{ext}" in output, output
-    assert "unexpected error" not in output, output
-    assert digest(video) == before
-    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert not leftovers(tmp_path), "temp file left behind"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows ignores permissions set with chmod")
@@ -1118,9 +1128,9 @@ def test_a_name_too_long_for_its_temp_name_is_reported(tmp_path, ext):
 @pytest.mark.parametrize("what", ["folder not writable", "file not readable"])
 def test_a_file_without_the_needed_permissions_is_reported(tmp_path, what, ext):
     """Run as a user who can't write to the folder (a read-only share, or
-    files owned by someone else), the remux can't be written next to the
-    original; a file the user can't read can't even be probed. Either way
-    the file is reported with the tool's own error and left as it was, and
+    files owned by someone else), the temp folder can't be made next to
+    the original; a file the user can't read can't even be probed. Either
+    way the file is reported with the reason and left as it was, and
     nothing is left behind. --dry-run writes nothing, so it still works on
     the unwritable folder."""
     need("ffmpeg", "ffprobe", "mkvmerge")
@@ -1140,10 +1150,10 @@ def test_a_file_without_the_needed_permissions_is_reported(tmp_path, what, ext):
 
     assert code == 1, output
     assert summary(output)["error"] == 1, output
-    expected = "remux failed" if what == "folder not writable" else f"ffprobe failed on movie{ext}"
+    expected = "can't create a temp folder in" if what == "folder not writable" else f"ffprobe failed on movie{ext}"
     assert expected in output and "unexpected error" not in output, output
     assert digest(video) == before
-    assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+    assert not leftovers(folder), "temp file left behind"
     if what == "folder not writable":
         assert dry_code == 0 and summary(dry_output)["would change"] == 1, dry_output
     else:
@@ -1183,7 +1193,7 @@ def test_a_full_disk_is_reported_and_the_partial_remux_removed(tmp_path, ext):
         assert "remux failed" in output and "No space left" in output, output
         assert "unexpected error" not in output, output
         assert digest(video) == before
-        assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+        assert not leftovers(folder), "temp file left behind"
         assert shutil.disk_usage(folder).free >= free, "the space wasn't given back"
     finally:
         shutil.rmtree(folder, ignore_errors=True)
@@ -1243,20 +1253,19 @@ def kill_outright(proc, everything):
         sys.platform == "win32", reason="Windows has no instant way to kill a process tree")),
     False,
 ], ids=["everything killed", "only the script killed"])
-def test_a_run_killed_outright_leaves_a_temp_file_the_next_run_reports_and_replaces(tmp_path, stop_files,
-                                                                                    everything, backup):
+def test_a_run_killed_outright_leaves_a_temp_folder_the_next_run_reports(tmp_path, stop_files, everything, backup):
     """kill -9, a reboot or the OOM killer gives the script no chance to
-    clean up, so the temp file of the remux under way stays behind: a
-    partial one if the remux died too, maybe a complete one if it ran on
-    without the script. Either way the original must be untouched, and
-    the next run must report the leftover as such rather than treat it as
-    a video, remux the original afresh rather than trust it, and leave
-    nothing behind; the files done before the kill are just unchanged."""
+    clean up, so the temp folder of the remux under way stays behind, with
+    a partial remux in it if the remux died too, maybe a complete one if it
+    ran on without the script. Either way the original must be untouched,
+    and the next run must report the folder as a leftover rather than look
+    inside it, remux the original afresh, and leave nothing new behind;
+    the old folder stays for the user to delete, and the files done before
+    the kill are just unchanged."""
     folder = tmp_path / "videos"
     shutil.copytree(stop_files.folder, folder)
     names = sorted(stop_files.digests)
     killed, done, waiting = names[2], names[:2], names[3:]
-    leftover = folder / f"{killed}{TMP_MARKER}{Path(killed).suffix}"
     args = ["--backup"] if backup else []
     posix = {"start_new_session": True} if sys.platform != "win32" else {}
 
@@ -1264,14 +1273,15 @@ def test_a_run_killed_outright_leaves_a_temp_file_the_next_run_reports_and_repla
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **posix)
     try:
         deadline = time.monotonic() + 60
-        while not leftover.exists():
+        while not (found := list(folder.glob(TMP_DIR_PREFIX + "*/" + killed))):
             assert proc.poll() is None and time.monotonic() < deadline, "the remux never started"
             time.sleep(0.001)
         kill_outright(proc, everything)
     finally:
         proc.kill()
 
-    assert leftover.exists(), "no temp file left: the remux finished before the kill"
+    leftover = found[0].parent
+    assert leftover.exists(), "no temp folder left: the remux finished before the kill"
     for name in [killed, *waiting]:
         assert digest(folder / name) == stop_files.digests[name], f"{name} was touched"
     for name in done:
@@ -1280,9 +1290,9 @@ def test_a_run_killed_outright_leaves_a_temp_file_the_next_run_reports_and_repla
     code, output = run_script(folder, *args, *(["--existing-backups", "replace"] if backup else []))
 
     assert code == 0, output
-    assert f"Skipping leftover temp file from an interrupted run (safe to delete): {leftover}" in output, output
+    assert f"Skipping leftover temp folder from an interrupted run (safe to delete): {leftover}" in output, output
     assert summary(output) == {"changed": 4, "unchanged": 2, "skipped": 0, "error": 0}, output
-    assert not list(folder.glob("*.tmp_remux*")), "temp file left behind"
+    assert leftovers(folder) == [leftover], "temp file left behind"
     for name in names:
         assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{output}"
         assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{output}"
@@ -1486,7 +1496,7 @@ def test_a_truncated_file_is_an_error_and_left_alone(tmp_path, ext):
     assert "\n  Damaged or incomplete downloads. Replace each" in output, output
     assert f"then run the script again:\n    {video}\n" in output, output
     assert digest(video) == before
-    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert not leftovers(tmp_path), "temp file left behind"
 
 
 def test_an_mkv_whose_end_is_zeros_is_an_error_and_left_alone(tmp_path):
@@ -1516,7 +1526,7 @@ def test_an_mkv_whose_end_is_zeros_is_an_error_and_left_alone(tmp_path):
     assert "video could be read, so the file seems to be damaged or an incomplete download" in output, output
     assert "finished with warnings" not in output and "Matroska file structure" not in output, output
     assert digest(video) == before
-    assert not list(tmp_path.glob("*.tmp_remux*")), "temp file left behind"
+    assert not leftovers(tmp_path), "temp file left behind"
 
 
 def test_a_jobs_dry_run_shows_each_files_header_once(tmp_path):
@@ -1594,7 +1604,7 @@ def test_a_symlinked_file_is_fixed_through_its_link(tmp_path, skip):
 
     assert link.is_symlink(), "the link was replaced"
     assert link.resolve() == real.resolve()
-    assert not list(tmp_path.rglob("*.tmp_remux*")), "temp file left behind"
+    assert not leftovers(tmp_path, recursive=True), "temp file left behind"
     if skip:
         assert code == 1 and "No matching files found" in output, output
         assert digest(real) == before

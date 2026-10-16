@@ -98,6 +98,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -165,13 +166,17 @@ DOCKER_VIDEOS = "/videos"
 searches when no path is given."""
 
 TMP_MARKER = ".tmp_remux"
-"""Marks a file's temp copy while it's remuxed, e.g. "movie.mkv.tmp_remux.mkv"."""
+"""Marks a backup's staging file while it's made, e.g.
+"movie.mkv.bak.tmp_remux.mkv" (see make_backup()), and the temp files that
+earlier versions wrote next to the original, which the search still
+reports as leftovers."""
 
 TMP_DIR_PREFIX = "set_stereo_default.tmp."
-"""Starts the name of a private temp folder, e.g.
-"set_stereo_default.tmp.0a1b2c3d", holding a remux with the video's own
-name. The search never looks inside one (see _skip_leftover_folder()): one
-it finds is left over from a run killed outright."""
+"""Starts the name of the private temp folder each remux is written in,
+e.g. "set_stereo_default.tmp.0a1b2c3d" (see _make_tmp_dir()), holding a
+file with the video's own name. The search never looks inside one (see
+_skip_leftover_folder()): one it finds is left over from a run killed
+outright."""
 
 COMMENTARY_NAME_RE = re.compile(r"commentary|audio[ -]?description|descriptive|described|\bdvs\b",
                                 re.IGNORECASE)
@@ -1562,10 +1567,11 @@ class Plan:
     _announce()), layout, every stream in the file, which verify_remux()
     compares the remux against, snapshot, the file's _snapshot() from
     before it was probed, which swap_in() compares again before the swap
-    (None skips that), and reordered, True for an AVI reorder, where the
+    (None skips that), reordered, True for an AVI reorder, where the
     target is moved to the first audio track instead of flagged default
-    (see apply_remux()). The streams, duration and layout all come from one
-    probe_streams() call."""
+    (see apply_remux()), and tmp_dir, the private temp folder the remux is
+    written in (see _make_tmp_dir()), None until it's made. The streams,
+    duration and layout all come from one probe_streams() call."""
     path: Path
     streams: list[Stream]
     target_index: int
@@ -1574,6 +1580,7 @@ class Plan:
     layout: list[Stream] = field(default_factory=list)
     snapshot: tuple[int, int] | None = None
     reordered: bool = False
+    tmp_dir: Path | None = None
 
     @property
     def target(self) -> Stream:
@@ -1582,8 +1589,11 @@ class Plan:
 
     @property
     def tmp_path(self) -> Path:
-        """Where the remux is written before it replaces the original."""
-        return self.path.with_name(self.path.name + TMP_MARKER + self.path.suffix)
+        """Where the remux is written before it replaces the original: a file
+        with the video's own name in tmp_dir, or, before that's made (in a
+        dry run), in a placeholder folder whose random part is XXXXXXXX."""
+        folder = self.tmp_dir or self.path.parent / (TMP_DIR_PREFIX + "XXXXXXXX")
+        return folder / self.path.name
 
 
 def _snapshot(path: Path) -> tuple[int, int] | None:
@@ -1637,6 +1647,36 @@ def _remove_temp(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _make_tmp_dir(plan: Plan) -> None:
+    """Make the private temp folder plan's remux is written in, next to the
+    original, and store it in plan.tmp_dir. Its name ends in 8 random
+    characters, and os.mkdir() makes it atomically, failing if the name is
+    already taken, even by a symlink. On Linux and macOS only its owner can
+    enter it, so no other user can put a symlink where the tool writes, or
+    replace the remux before the swap. The name goes into plan.tmp_dir
+    before the folder is made, so _remove_tmp_dir() can always find it
+    wherever a stop lands. Raises OSError if it can't be made (a read-only
+    share, no permission, a full disk)."""
+    plan.tmp_dir = plan.path.parent / (TMP_DIR_PREFIX + secrets.token_hex(4))
+    try:
+        os.mkdir(plan.tmp_dir, 0o700)
+    except OSError:
+        plan.tmp_dir = None
+        raise
+
+
+def _remove_tmp_dir(plan: Plan) -> None:
+    """Remove plan's temp folder, if it has one, with the remux in it if it's
+    still there (see _remove_temp()). If it can't be removed (on Windows, a
+    virus scanner can still hold the remux), it stays for the next run to
+    report as a leftover (see _skip_leftover_folder())."""
+    if plan.tmp_dir is None:
+        return
+    with contextlib.suppress(OSError):
+        _remove_temp(plan.tmp_path)
+        os.rmdir(plan.tmp_dir)
+
+
 @dataclass
 class Progress:
     """How to show a remux's progress: show its own bar (--jobs 1 only; see
@@ -1676,9 +1716,9 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: Note | None = No
     media manager imported. The file is left as it is now, to be fixed on
     the next run.
 
-    Nor is it swapped in unless it's a regular file. _remux_and_swap()
-    removes whatever has the temp name before the remux, but a symlink
-    planted there after that would have been written through by the tool,
+    Nor is it swapped in unless it's a regular file. The remux is written in
+    a private folder (see _make_tmp_dir()), so this is a second line of
+    defence: a symlink there would have been written through by the tool,
     and renaming it over the original would turn the video into a link.
 
     The temp file is removed if the check fails or anything interrupts this
@@ -1689,8 +1729,7 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: Note | None = No
         if not stat.S_ISREG(os.lstat(tmp_path).st_mode):
             if tool_warnings:
                 log.warning(tool_warnings.line(path.name))
-            log.error(f"    {path.name}: {tmp_path.name} isn't a regular file, "
-                      f"keeping original untouched")
+            log.error(f"    {path.name}: the remux isn't a regular file, keeping original untouched")
             _remove_temp(tmp_path)
             return False
         checked = verify_remux(plan)
@@ -1841,15 +1880,16 @@ def _ffmpeg_pct(duration: float | None) -> Callable[[str], int | None]:
     return parse_pct
 
 
-def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int | None],
+def _remux_and_swap(plan: Plan, make_cmd: Callable[[Path], list[str]], parse_pct: Callable[[str], int | None],
                     opts: Options, progress: Progress, *,
                     warnings_exit: int | None = None) -> bool:
-    """Run a remux command written to plan.tmp_path, then check it and swap it
-    in. Returns True on success (or after a dry run, which only logs the
-    command), False on failure (already logged). Shared by apply_mkv() and
-    apply_remux(), which only build the command. parse_pct reads a
-    percentage from one line of the tool's output, or None for any other
-    line (see run_with_progress()).
+    """Run a remux, then check it and swap it in. Returns True on success
+    (or after a dry run, which only logs the command), False on failure
+    (already logged). Shared by apply_mkv() and apply_remux(), which only
+    know how to build the command: make_cmd(out) builds the tool's command
+    writing the remux to out. parse_pct reads a percentage from one line of
+    the tool's output, or None for any other line (see
+    run_with_progress()).
 
     plan.intro is logged with the dry-run command, or just before the remux
     starts (see _announce()). warnings_exit is an exit code that means the
@@ -1868,61 +1908,59 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     Stopped the stop raised (see _check_stop()) and the run carries on to
     here, as it always does in a --jobs worker thread.
 
-    Whatever already has the temp name is removed before the remux, so the
-    tool writes a new file rather than through a symlink someone left there
-    (see check_and_swap_in()). A temp name the file system refuses, because
-    the file's name is already near its length limit (255 characters on
-    most), is reported, and the file left alone. The temp file is removed
-    whatever stops the remux: a failure, a stop (Ctrl+C, SIGTERM) or an
-    unexpected error. One try covers everything from starting the remux to
-    swapping it in, check_and_swap_in() included, since a stop can land
-    between any two lines: also after the remux has finished, before the
-    check has started. Until check_and_swap_in() has checked it, the
-    original isn't touched.
+    In a dry run, make_cmd() gets plan.tmp_path with its placeholder folder
+    (see Plan.tmp_path). Otherwise the private temp folder is made first
+    (see _make_tmp_dir()), so no other user can make the tool write through
+    a symlink; one that can't be made is reported, and the file left
+    alone. One try covers everything from making the folder to swapping the
+    remux in, check_and_swap_in() included, and its finally removes the
+    folder whatever happens: a success, a failure, a stop (Ctrl+C,
+    SIGTERM) or an unexpected error. Only a stop landing between the swap
+    and that removal leaves the folder, empty, for the next run to report.
+    Until check_and_swap_in() has checked the remux, the original isn't
+    touched.
 
     A file with Windows' read-only attribute (see _read_only()) is reported
     as an error before anything else, in a dry run too, so the dry run
     predicts the real one, rather than remuxed only to fail at the swap.
     It's listed with the files open in another program, under a heading
     that also says to make the file writable."""
-    path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
+    path = plan.path
     if _read_only(path):
         log.error(f"  {path.name}: the file is read-only, so it's left as it was -- clear its read-only "
                   f"attribute (Properties in Explorer, or attrib -r), then run the script again")
         _note_failure(path, "in use")
         return False
     if opts.dry_run:
-        _announce(plan.intro, "    [dry-run] " + _shell_line(cmd))
+        _announce(plan.intro, "    [dry-run] " + _shell_line(make_cmd(plan.tmp_path)))
         return True
     _announce(plan.intro)
     try:
-        _remove_temp(tmp_path)
-    except OSError as exc:
-        log.error(f"    {path.name}: can't use the temp name {tmp_path.name} ({exc.strerror or exc}); "
-                  f"the name may be too long for this file system")
-        return False
-
-    try:
+        try:
+            _make_tmp_dir(plan)
+        except OSError as exc:
+            log.error(f"    {path.name}: can't create a temp folder in {path.parent} ({exc.strerror or exc}), "
+                      f"so it's left as it was")
+            return False
+        cmd = make_cmd(plan.tmp_path)
         returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)
         with_warnings = returncode == warnings_exit and not _cancelled.is_set()
-        if (returncode != 0 and not with_warnings) or not tmp_path.exists():
+        if (returncode != 0 and not with_warnings) or not plan.tmp_path.exists():
             if _cancelled.is_set():
                 raise Cancelled
-            log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
-            _remove_temp(tmp_path)
+            log.error(f"    {path.name}: {cmd[0]} remux failed: {output.strip()}")
             return False
 
         tool_warnings = None
         if with_warnings:
             warnings = _collapse_repeats([_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
                                           for line in output.splitlines() if "warning" in line.lower()])
-            tool_warnings = Note("tool", f"{tool} finished with warnings: "
+            tool_warnings = Note("tool", f"{cmd[0]} finished with warnings: "
                                  + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
         return check_and_swap_in(plan, opts, tool_warnings)
-    except BaseException:
-        _remove_temp(tmp_path)
-        raise
+    finally:
+        _remove_tmp_dir(plan)
 
 
 def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
@@ -1972,17 +2010,20 @@ def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bo
                   f"leaving the file alone")
         return False
 
-    cmd = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8"]
+    head = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8"]
     if (any(s.mimetype.lower() in LEGACY_FONT_MIME_TYPES for s in plan.layout)
             and mkvmerge_can_keep_legacy_font_types()):
-        cmd.append("--enable-legacy-font-mime-types")
-    cmd += ["-o", str(plan.tmp_path),
-            "--track-order", ",".join(f"0:{track_id}" for track_id, _ in tracks)]
+        head.append("--enable-legacy-font-mime-types")
+    order = ",".join(f"0:{track_id}" for track_id, _ in tracks)
+    defaults: list[str] = []
     for s, track_id in zip(plan.streams, ids, strict=True):
         flag = "yes" if s.index == plan.target_index else "no"
-        cmd += ["--default-track", f"{track_id}:{flag}"]
-    cmd.append(str(path))
-    return _remux_and_swap(plan, cmd, _mkvmerge_pct, opts, progress or Progress(),
+        defaults += ["--default-track", f"{track_id}:{flag}"]
+
+    def make_cmd(out: Path) -> list[str]:
+        """The mkvmerge command writing the remux to out."""
+        return [*head, "-o", str(out), "--track-order", order, *defaults, str(path)]
+    return _remux_and_swap(plan, make_cmd, _mkvmerge_pct, opts, progress or Progress(),
                            warnings_exit=1)
 
 
@@ -2023,10 +2064,13 @@ def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> 
             disp_args += [f"-disposition:a:{out_idx}", flag]
 
     faststart = ["-movflags", "+faststart"] if ext in MOV_FASTSTART_EXTS else []
-    cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
-           "-i", str(path), *map_args, "-c", "copy", "-map_metadata", "0",
-           *disp_args, *faststart, str(plan.tmp_path)]
-    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), opts, progress or Progress())
+
+    def make_cmd(out: Path) -> list[str]:
+        """The ffmpeg command writing the remux to out."""
+        return ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
+                "-i", str(path), *map_args, "-c", "copy", "-map_metadata", "0",
+                *disp_args, *faststart, str(out)]
+    return _remux_and_swap(plan, make_cmd, _ffmpeg_pct(plan.duration), opts, progress or Progress())
 
 
 Outcome = Literal["changed", "unchanged", "skipped", "error", "cancelled"]
@@ -2205,12 +2249,12 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
     reached by more than one path (through links, or given twice) is only
     yielded once, with the first path that reaches it.
 
-    A run killed outright (kill -9, a reboot) can leave a temp file such as
-    "name.mkv.tmp_remux.mkv", which still ends in .mkv. Those are skipped
-    with a warning instead of being treated as videos. It can also leave a
-    private temp folder (see TMP_DIR_PREFIX), which is skipped with a
-    warning too, never searched, also when named on its own; a video
-    inside one is a leftover temp file.
+    A run killed outright (kill -9, a reboot) can leave its private temp
+    folder (see TMP_DIR_PREFIX), which is skipped with a warning, never
+    searched, also when named on its own; a video inside one is a leftover
+    temp file. Earlier versions could leave a temp file such as
+    "name.mkv.tmp_remux.mkv" instead, which still ends in .mkv. Those are
+    skipped with a warning too, instead of being treated as videos.
 
     A path that doesn't exist (a typo, an unmounted share) is skipped with a
     warning, so a mistake in one of several paths doesn't go unnoticed. In
@@ -2703,7 +2747,7 @@ def main(argv: list[str] | None = None) -> int:
     MKV files to process.
 
     When stopped while files are being processed, the stop handler has
-    already killed every remux and each one has removed its temp file.
+    already killed every remux and each one has removed its temp folder.
     What's left is a partial summary that counts unfinished files as
     cancelled. A stop while looking for files, or at the backup question,
     ends the run with no summary, since nothing has changed. Once every

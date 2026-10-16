@@ -1235,9 +1235,9 @@ ORIGINAL_LAYOUT = [stream(0, "video", 1, "h264"), stream(1, "audio", 1, "eac3", 
 ORIGINAL_AUDIO = [audio(1, 6, "eac3", default=True), audio(2, 2, "aac")]
 
 
-REMUX = str(Path("v.mkv" + ssd.TMP_MARKER + ".mkv"))
+REMUX = str(Path("set_stereo_default.tmp.XXXXXXXX", "v.mkv"))
 
-AVI_REMUX = str(Path("v.avi" + ssd.TMP_MARKER + ".avi"))
+AVI_REMUX = str(Path("set_stereo_default.tmp.XXXXXXXX", "v.avi"))
 
 
 def plan_to_check(duration=None, reordered=False):
@@ -1469,6 +1469,7 @@ def test_a_lost_mp4_flag_is_only_warned_about_if_the_remux_is_kept(fake_ffprobe,
     monkeypatch.chdir(tmp_path)
     plan, remux = rich_plan("v.mp4")
     plan.path.write_bytes(b"original")
+    Path(remux).parent.mkdir()
     Path(remux).write_bytes(b"remuxed")
     fake_ffprobe[remux] = rich_layout(
         stream1=described(1, "audio", "eac3", int(default_on == 1), 6, title="Surround"),
@@ -1706,7 +1707,7 @@ def test_a_changed_file_is_probed_once_and_its_remux_once(tmp_path, monkeypatch)
     probed = []
 
     def fake_ffprobe(cmd, **kw):
-        probed.append(Path(cmd[-1]).name)
+        probed.append(cmd[-1])
         layout = ORIGINAL_LAYOUT if cmd[-1] == str(video) else REMUXED_LAYOUT
         data = {"streams": layout, "format": {"duration": "60.0"}}
         return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
@@ -1718,7 +1719,9 @@ def test_a_changed_file_is_probed_once_and_its_remux_once(tmp_path, monkeypatch)
     monkeypatch.setattr(ssd, "run_with_progress", fake_remux)
 
     assert ssd.process_file(video, file_args(dry_run=False)) == "changed"
-    assert probed == ["v.mp4", "v.mp4" + ssd.TMP_MARKER + ".mp4"]
+    assert len(probed) == 2 and probed[0] == str(video)
+    remuxed = Path(probed[1])
+    assert remuxed.name == "v.mp4" and remuxed.parent.name.startswith(ssd.TMP_DIR_PREFIX)
     assert video.read_bytes() == b"remuxed"
 
 
@@ -2239,7 +2242,7 @@ def remux(request, tmp_path, monkeypatch):
                "warn": (1, "#GUI#warning Warning: odd timestamps\n")}
 
     def fake_run_with_progress(cmd, *args, **kwargs):
-        tmp = next(Path(c) for c in cmd if ssd.TMP_MARKER in c)
+        tmp = remux_output(cmd)
         tmp.write_bytes(b"remuxed")
         if outcome["run"] == "interrupt":
             raise KeyboardInterrupt
@@ -2256,9 +2259,18 @@ def remux(request, tmp_path, monkeypatch):
     return lambda: apply(video), video, set_outcome
 
 
-def leftover_temp_files(video):
-    """Any temp remux files left next to video."""
-    return list(video.parent.glob("*" + ssd.TMP_MARKER + "*"))
+def leftover_temp_files(video, allow_empty_folder=False):
+    """Any temp files or temp folders left next to video. With
+    allow_empty_folder, an empty temp folder doesn't count: a stop landing
+    between the swap and the folder's removal leaves one, by design."""
+    found = [*video.parent.glob("*" + ssd.TMP_MARKER + "*"), *video.parent.glob(ssd.TMP_DIR_PREFIX + "*")]
+    return [p for p in found if not (allow_empty_folder and p.is_dir() and not any(p.iterdir()))]
+
+
+def remux_output(cmd):
+    """The path a remux command writes to: the file in the run's private
+    temp folder (see ssd.TMP_DIR_PREFIX)."""
+    return next(Path(c) for c in cmd if ssd.TMP_DIR_PREFIX in c)
 
 
 @pytest.mark.parametrize("apply, filename", [(ssd.apply_mkv, "v.mkv"), (ssd.apply_remux, "v.mp4")],
@@ -2280,7 +2292,7 @@ def test_a_file_changed_during_its_remux_is_left_as_it_is_now(tmp_path, monkeypa
 
     def remux_while_something_else_happens(cmd, *args, **kwargs):
         """Write the remux, and meanwhile change the original."""
-        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        remux_output(cmd).write_bytes(b"remuxed")
         if meanwhile == "replaced":
             upgrade = tmp_path / "upgrade.part"
             upgrade.write_bytes(b"new download")
@@ -2340,7 +2352,7 @@ def test_a_file_replaced_during_its_backup_is_left_as_it_is_now(tmp_path, monkey
         upgrade_arrives()
 
     def write_remux(cmd, *args, **kwargs):
-        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        remux_output(cmd).write_bytes(b"remuxed")
         return 0, ""
     if how == "hard link":
         monkeypatch.setattr(ssd.os, "link", link_then_upgrade)
@@ -2370,33 +2382,51 @@ def test_process_file_snapshots_the_file_before_probing_it(tmp_path, probed, mon
     assert plans[0].snapshot == (st.st_size, st.st_mtime_ns)
 
 
-def test_a_symlink_planted_at_the_temp_name_is_removed_before_the_remux(tmp_path, monkeypatch):
-    """A symlink at <name>.tmp_remux.<ext> would be written through by the
-    tool (mkvmerge -o and ffmpeg -y both follow one), and the swap would
-    then rename the link over the original. It must be removed first, so
-    the tool writes a new file and whatever the link pointed at is never
-    touched."""
-    video = tmp_path / "v.mkv"
-    video.write_bytes(b"original")
-    elsewhere = tmp_path / "elsewhere.txt"
-    elsewhere.write_bytes(b"keep me")
-    tmp = video.with_name(video.name + ssd.TMP_MARKER + ".mkv")
-    try:
-        tmp.symlink_to(elsewhere)
-    except OSError as exc:
-        pytest.skip(f"can't create symlinks here: {exc}")
+def test_the_remux_is_written_in_a_new_private_folder(remux, monkeypatch):
+    """The tool writes the remux into a folder the run creates for it next to
+    the original, empty, and on Linux and macOS open to its owner alone,
+    so no other user can put a symlink where the tool writes. The remux has
+    the video's own name. The folder is gone once the file is swapped in."""
+    apply, video, _ = remux
+    seen = {}
+    stand_in = ssd.run_with_progress
 
-    def write_remux(cmd, *args, **kwargs):
-        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
-        return 0, ""
-    monkeypatch.setattr(ssd, "run_with_progress", write_remux)
-    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
-
-    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is True
-
-    assert elsewhere.read_bytes() == b"keep me"
-    assert not video.is_symlink() and video.read_bytes() == b"remuxed"
+    def inspect_then_remux(cmd, *args, **kwargs):
+        out = remux_output(cmd)
+        seen.update(name=out.name, parent=out.parent.parent, contents=list(out.parent.iterdir()),
+                    mode=out.parent.stat().st_mode & 0o777)
+        return stand_in(cmd, *args, **kwargs)
+    monkeypatch.setattr(ssd, "run_with_progress", inspect_then_remux)
     assert not leftover_temp_files(video)
+
+    assert apply() is True
+
+    assert seen["name"] == video.name
+    assert seen["parent"] == video.parent
+    assert seen["contents"] == []
+    if sys.platform != "win32":
+        assert seen["mode"] == 0o700
+    assert video.read_bytes() == b"remuxed"
+    assert not leftover_temp_files(video)
+
+
+def test_a_temp_folder_that_cant_be_created_is_reported(remux, monkeypatch, caplog):
+    """On a read-only share, or without permission to write to the folder,
+    the temp folder can't be made. The file is reported with the reason
+    and left alone, and no tool runs."""
+    apply, video, _ = remux
+
+    def denied(path, mode=0o777):
+        raise PermissionError(13, "Permission denied", str(path))
+    monkeypatch.setattr(ssd.os, "mkdir", denied)
+    monkeypatch.setattr(ssd, "run_with_progress", lambda *a, **k: pytest.fail("the remux ran"))
+
+    assert apply() is False
+
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert (f"    {video.name}: can't create a temp folder in {video.parent} (Permission denied), "
+            f"so it's left as it was") in caplog.text
 
 
 def test_a_remux_that_isnt_a_regular_file_is_never_swapped_in(tmp_path, monkeypatch, caplog):
@@ -2410,7 +2440,7 @@ def test_a_remux_that_isnt_a_regular_file_is_never_swapped_in(tmp_path, monkeypa
     elsewhere.write_bytes(b"keep me")
 
     def remux_through_a_planted_symlink(cmd, *args, **kwargs):
-        tmp = next(Path(c) for c in cmd if ssd.TMP_MARKER in c)
+        tmp = remux_output(cmd)
         try:
             tmp.symlink_to(elsewhere)
         except OSError as exc:
@@ -2424,7 +2454,7 @@ def test_a_remux_that_isnt_a_regular_file_is_never_swapped_in(tmp_path, monkeypa
 
     messages = [r.getMessage() for r in caplog.records]
     assert messages[-2:] == ["    v.mkv: mkvmerge finished with warnings: odd timestamps",
-                             "    v.mkv: v.mkv.tmp_remux.mkv isn't a regular file, keeping original untouched"]
+                             "    v.mkv: the remux isn't a regular file, keeping original untouched"]
     assert not video.is_symlink() and video.read_bytes() == b"original"
     assert not leftover_temp_files(video)
 
@@ -2480,7 +2510,7 @@ def test_a_remux_killed_by_a_stop_whose_exception_was_lost_counts_as_cancelled(t
         return types.SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
 
     def stopped_remux(cmd, *args, **kwargs):
-        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"partial")
+        remux_output(cmd).write_bytes(b"partial")
         ssd._cancelled.set()
         return -15, ""
     monkeypatch.setattr(ssd, "run", fake_ffprobe)
@@ -2491,28 +2521,6 @@ def test_a_remux_killed_by_a_stop_whose_exception_was_lost_counts_as_cancelled(t
     assert not leftover_temp_files(video)
     assert caplog.records[-1].getMessage() == f"  {name}: cancelled"
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
-
-
-@pytest.mark.parametrize("apply, ext", [(remux_with_mkvmerge, ".mkv"), (remux_with_ffmpeg, ".mp4")],
-                         ids=["mkvmerge", "ffmpeg"])
-def test_a_name_too_long_for_its_temp_name_is_reported(tmp_path, monkeypatch, caplog, apply, ext):
-    """File systems allow names of 255 characters at most, and the temp
-    name adds 14 to the file's. A file whose name is at the limit can't be
-    fixed; it's reported as such rather than as an unexpected error, and
-    nothing happens to it."""
-    video = tmp_path / ("n" * (255 - len(ext)) + ext)
-    try:
-        video.write_bytes(b"original")
-    except OSError as exc:
-        pytest.skip(f"can't make a 255-character name here ({exc.strerror})")
-    monkeypatch.setattr(ssd, "run_with_progress", lambda *a, **k: pytest.fail("the remux ran"))
-
-    assert apply(video) is False
-
-    assert video.read_bytes() == b"original"
-    assert not leftover_temp_files(video)
-    assert f"can't use the temp name {video.name}.tmp_remux{ext}" in caplog.text
-    assert "the name may be too long for this file system" in caplog.text
 
 
 def test_a_file_that_cant_be_replaced_is_reported_and_left_alone(remux, monkeypatch, caplog):
@@ -2587,9 +2595,8 @@ def test_a_stop_once_the_backup_is_made_leaves_the_file_as_it_was(remux, monkeyp
 @pytest.mark.skipif(sys.platform != "win32", reason="elsewhere a read-only file can be deleted anyway")
 def test_a_read_only_leftover_temp_file_doesnt_block_the_remux(remux):
     """Earlier versions could leave a read-only temp file behind, which
-    Windows refuses to delete. It's removed before the remux like any
-    leftover, rather than the file being reported as having a name too
-    long for its temp name."""
+    Windows refuses to delete. A remux now writes elsewhere, so such a
+    file neither blocks it nor is touched; the search reports it."""
     apply, video, _ = remux
     leftover = video.with_name(video.name + ssd.TMP_MARKER + video.suffix)
     leftover.write_bytes(b"leftover")
@@ -2598,7 +2605,7 @@ def test_a_read_only_leftover_temp_file_doesnt_block_the_remux(remux):
     assert apply() is True
 
     assert video.read_bytes() == b"remuxed"
-    assert not leftover_temp_files(video)
+    assert leftover_temp_files(video) == [leftover]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="only Windows refuses to replace a read-only file")
@@ -2640,7 +2647,8 @@ def stop_at(function, line):
     (remux_with_mkvmerge, "v.mkv", (1, "#GUI#warning Warning: odd timestamps\n")),
     (remux_with_ffmpeg, "v.mp4", (0, "")),
 ], ids=["mkvmerge, with warnings", "ffmpeg"])
-@pytest.mark.parametrize("function", ["_remux_and_swap", "check_and_swap_in", "swap_in", "make_backup"])
+@pytest.mark.parametrize("function", ["_remux_and_swap", "check_and_swap_in", "swap_in", "make_backup",
+                                      "_make_tmp_dir", "_remove_tmp_dir"])
 def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_stray_file(tmp_path, monkeypatch, apply, filename,
                                                                            result, function):
     """Ctrl+C or SIGTERM can land between any two lines, once the remux has
@@ -2654,7 +2662,7 @@ def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_stray_file(tmp_p
     lines = sorted({line for _, _, line in code.co_lines() if line is not None and line > code.co_firstlineno})
 
     def remux(cmd, *args, **kwargs):
-        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        remux_output(cmd).write_bytes(b"remuxed")
         return result
 
     monkeypatch.setattr(ssd, "run_with_progress", remux)
@@ -2673,7 +2681,8 @@ def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_stray_file(tmp_p
             reached.append(line)
         finally:
             sys.settrace(previous)
-        assert not leftover_temp_files(video), f"{function} line {line}: {leftover_temp_files(video)}"
+        assert not leftover_temp_files(video, allow_empty_folder=video.read_bytes() == b"remuxed"), \
+            f"{function} line {line}: {leftover_temp_files(video)}"
         backups = {p.name: p.read_bytes() for p in folder.glob("*.bak*")}
         if video.read_bytes() == b"original":
             assert backups == {}, f"{function} line {line}: backup of an unchanged file"
@@ -2728,7 +2737,7 @@ def test_exit_code_1_is_warnings_for_mkvmerge_but_failure_for_ffmpeg(remux, capl
 ], ids=["gui mode", "plain"])
 def test_mkvmerge_warnings_are_logged_without_their_prefixes(tmp_path, monkeypatch, caplog, output):
     def fake_mkvmerge(cmd, *args, **kwargs):
-        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        remux_output(cmd).write_bytes(b"remuxed")
         return 1, output
     monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
     monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
@@ -2772,7 +2781,7 @@ def test_a_warning_that_repeats_comes_out_on_one_line(tmp_path, monkeypatch, cap
     thing at a dozen byte positions. The remux is used, so the warnings
     are shown, but each kind once."""
     def fake_mkvmerge(cmd, *args, **kwargs):
-        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        remux_output(cmd).write_bytes(b"remuxed")
         return 1, "".join(f"#GUI#warning Still resyncing at position {p}.\n" for p in range(100, 1300, 100))
     monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
     monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
@@ -2798,7 +2807,7 @@ def test_mkvmerge_warnings_are_logged_unless_the_original_is_damaged(tmp_path, m
     looked for readable data past the damage, which the plain message
     already covers."""
     def fake_mkvmerge(cmd, *args, **kwargs):
-        next(Path(c) for c in cmd if ssd.TMP_MARKER in c).write_bytes(b"remuxed")
+        remux_output(cmd).write_bytes(b"remuxed")
         return 1, ("#GUI#warning Error in the Matroska file structure at position 419932626.\n"
                    "#GUI#warning Still resyncing at position 511838020.\n")
     monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
@@ -2892,8 +2901,9 @@ def test_dry_run_prints_a_command_that_can_be_pasted_into_a_shell(tmp_path, capl
     args = split_command(printed)
     assert args[0] == tool
     assert str(video) in args
-    assert str(video) + ssd.TMP_MARKER + ".mkv" in args
+    assert str(video.parent / "set_stereo_default.tmp.XXXXXXXX" / video.name) in args
     assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
 
 
 @pytest.fixture
