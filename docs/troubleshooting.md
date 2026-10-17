@@ -7,7 +7,7 @@ For each file that the script skips or cannot change, the script shows a line wi
 At the end of the run, before the summary, the script shows a list of the files that it was not able to fix. The list gives the full path of each file. So no file gets lost in the long output of a run. The script puts these files into groups by what you must do:
 
 - Damaged files.
-- Files that another program has open.
+- Files that another program has open, and read-only files.
 - Files that another program changed during the run.
 - All other files.
 
@@ -16,7 +16,8 @@ Before this list, the script shows a list of the files that got a warning. Each 
 - Files in which ffmpeg gave the default flag to a subtitle or video track.
 - Files that lost flags that ffmpeg cannot write to MP4, M4V, MOV, or AVI files.
 - Files for which mkvmerge showed warnings.
-- Leftover temp files from an interrupted run, which the script skipped.
+- Leftover temp files and folders from an interrupted run, which the script skipped or kept.
+- Folders with a name that starts like a temporary folder of the script, but that the script did not make.
 
 ## `SKIP (...)` on a file that you expected to change
 
@@ -60,11 +61,44 @@ Another program replaced or edited the file while the script remuxed it. For exa
 
 On Windows, the script cannot replace a file that another program has open. Examples are a media player, or Plex, Jellyfin, or Emby while it scans the file. The script deleted its new file and did not change the original. It also did not make a backup. Close the other program, or wait until the scan is done. Then run the script again.
 
-A read-only file causes the same error. Before you run the script again, remove the read-only attribute. If another program has exclusive access to the file (it blocks all other programs), the script cannot even read the file. Then the script shows `ffprobe failed on <name>: ... Permission denied` instead.
+A file that became read-only while the script remuxed it causes the same error. Before you run the script again, remove the read-only attribute (see the next section). If another program has exclusive access to the file (it blocks all other programs), the script cannot even read the file. Then the script shows `ffprobe failed on <name>: ... Permission denied` instead.
 
-## `can't use the temp name <name>.tmp_remux.<ext> (...); the name may be too long for this file system`
+## `the file is read-only, so it's left as it was -- clear its read-only attribute (Properties in Explorer, or attrib -r), then run the script again`
 
-The script writes the new file next to the original. The name of the new file is the original name plus `.tmp_remux.<ext>`. Most file systems allow names of 255 characters or fewer. So if the name of a file is already almost that long, the script cannot fix the file. Make the name shorter. Then run the script again.
+On Windows, the script cannot replace a read-only file (a file with a marker that blocks changes). This marker is the read-only attribute. So the script does not try to change the file. It does not make a new file or a backup, and the original stays as it was. A dry run shows the same message, so you can find these files before the real run.
+
+To remove the attribute in Explorer:
+
+1. Right-click the file.
+2. Select Properties.
+3. Clear the Read-only box.
+4. Select OK.
+
+You can also use this command in a terminal:
+
+```text
+attrib -r "D:\Videos\Movie (2024).mkv"
+```
+
+To remove the attribute from all files in a folder and its subfolders, use this command:
+
+```text
+attrib -r "D:\Videos\*" /s
+```
+
+Then run the script again. On Linux and macOS, the script changes a file without write permission (permission to change the file) as usual. There, the permissions of the folder decide if the script can replace a file.
+
+## `can't create a temp folder in <folder> (...), so it's left as it was`
+
+The script writes each new file in a temporary folder next to the original. It cannot make this folder when it cannot write to the folder of the original. Examples are a read-only network share, a folder that belongs to another user, and a full disk. The reason in the parentheses tells you which. If the disk is full, free some space. Otherwise, give the user that runs the script permission to write to the folder. Then run the script again.
+
+On Windows, a long path can also cause this message, with the reason `The filename or extension is too long`. The path of the new file has 32 characters more than the path of the original. Windows allows paths of at most 260 characters, unless long paths are on. To turn on long paths, run this command in PowerShell as an administrator:
+
+```powershell
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+```
+
+Then restart the computer, and run the script again.
 
 ## `mkvmerge sees N audio track(s), but ffprobe sees M`
 
@@ -74,9 +108,34 @@ The two tools do not agree about the file. The script does not guess which track
 
 The new files play correctly, but they belong to the wrong user. Then Sonarr, Radarr, and similar tools can fail to rename or replace them. On an NFS share, run the script as the user that owns your media. The warning shows the `sudo -u` command to use. In the Docker image, it shows the `docker run --user` option instead. See [Permissions and ownership](how-it-works.md#-permissions-and-ownership).
 
-## `Skipping leftover temp file`
+## `Skipping leftover temp file` or `Skipping leftover temp folder`
 
-An earlier run stopped suddenly while it processed a file. You can safely delete the temporary file. See [Leftover temp files](how-it-works.md#-leftover-temp-files).
+An earlier run stopped suddenly while it processed a file. You can safely delete the temporary file or folder. You can also run the script with `--delete-leftovers`, which deletes it for you. See [Leftover temp files](how-it-works.md#-leftover-temp-files).
+
+## `Kept leftover temp folder (...)` or `Kept leftover temp file (...)`
+
+With `--delete-leftovers`, the script keeps a leftover in these cases:
+
+- Something in it changed in the last hour, so another run can still use it.
+- The folder holds anything other than one file, which the script does not write. Files that Finder or Explorer make, such as `.DS_Store` or `Thumbs.db`, do not count.
+- The leftover is a symlink, which the script never follows.
+- The script cannot look into the leftover or delete it. For example, only the user of the run that stopped can open the folder.
+
+The reason in the parentheses tells you which. For a leftover that changed recently, run the script again later. If only another user can open a leftover, delete it as that user. Examine the other leftovers yourself, and delete them if you do not need them.
+
+## `Searching a folder named like a temp folder of the script, which is not one`
+
+The name of the folder starts with `set_stereo_default.tmp.`, but the script did not make the folder. The script only makes names with 8 random characters from `0` to `9` and `a` to `f` after the prefix. So the script searched the folder like other folders.
+
+If you renamed a temporary folder of the script, its file is an unfinished copy of a video. The script processed this file as a video. You can delete the folder. Otherwise, give the folder a name that does not start with `set_stereo_default.tmp.`, and the warning stops.
+
+## `Another run of the script is already working (it holds <lock file>); try again when it has finished.`
+
+Another run of the script holds the run lock. The script stopped with exit code `75` and did not change files. Wait until the other run is complete. Then run the script again. See [One run at a time](how-it-works.md#-one-run-at-a-time).
+
+## `Couldn't lock <lock file> (...), so another run at the same time can't be detected`
+
+The script cannot use its lock file, `.set_stereo_default.lock`. For example, the user who runs the script cannot make files in the folder of the script. Other examples are an NFS share without its lock service, a symlink with the name of the lock file, and a lock file that only another user can read. The script continues, but it cannot stop a second run. If the user cannot make files in the folder of the script, give that user permission to write to the folder. If only another user can read the lock file, run the script once as that user. The script then lets all users read the file. Until then, do not start two runs at the same time.
 
 ## No thumbnail in Windows Explorer
 

@@ -463,8 +463,9 @@ jobs:
       # leave that file's original alone, and exit 143. On a runner's fast disk
       # a remux takes well under a second, too short to stop reliably, so the
       # container gets a tenth of a CPU, which stretches each one to several
-      # seconds. The stop waits until a temp file shows a remux has started,
-      # and that file is the one checked.
+      # seconds. The stop waits until a remux shows up in its private temp
+      # folder, and that video is the one checked. The folder is open only to
+      # the container's root, so the remux is looked up inside the container.
       - name: Stop the image partway through a remux
         run: |
           mkdir stop
@@ -477,13 +478,13 @@ jobs:
           docker run -d --name stop-test --cpus 0.1 -v "$PWD/stop:/videos" "$IMAGE" /videos
           temp=
           for _ in $(seq 300); do
-            temp=$(compgen -G "stop/*.tmp_remux*" | head -n 1 || true)
+            temp=$(docker exec stop-test sh -c 'ls -d /videos/set_stereo_default.tmp.*/* 2>/dev/null | head -n 1' || true)
             test -n "$temp" && break
             sleep 0.1
           done
           test -n "$temp" || { echo "::error::No remux started"; docker logs stop-test; exit 1; }
           docker stop -t 30 stop-test
-          original=$(basename "${temp%%.tmp_remux*}")
+          original=$(basename "$temp")
           before=$(grep -F "/videos/$original" <<< "$hashes")
           code=$(docker inspect stop-test --format '{{.State.ExitCode}}')
           docker logs stop-test 2>&1 | tee output.txt
@@ -491,7 +492,7 @@ jobs:
           echo "Stopped while remuxing $original"
           test "$code" -eq 143 || { echo "::error::Exit code $code, expected 143"; exit 1; }
           grep -qF "Stopped by SIGTERM" output.txt
-          ! compgen -G "stop/*.tmp_remux*" || { echo "::error::Temp file left behind"; exit 1; }
+          ! compgen -G "stop/set_stereo_default.tmp.*" || { echo "::error::Temp folder left behind"; exit 1; }
           after=$(docker run "${in_image[@]}" sha256sum "$IMAGE" "/videos/$original")
           test "$before" = "$after" || { echo "::error::$original changed"; exit 1; }
       # Known vulnerabilities in the image's packages that have a fix: all of

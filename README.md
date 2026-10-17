@@ -33,6 +33,7 @@ The script has these features:
 - ⚡ `--jobs N` processes several files at the same time.
 - 📝 `--log-file` writes the details to a file, so the console shows less.
 - 🛑 If you press Ctrl+C or run `docker stop`, the script stops and does not leave incomplete files.
+- 🔒 Only one run of the script at a time can work, so a nightly run cannot overlap the run of the previous night.
 - 🐳 A Docker image for amd64 and arm64 contains everything that the script needs. See [Docker](docs/docker.md).
 
 ## 🚀 Quick start
