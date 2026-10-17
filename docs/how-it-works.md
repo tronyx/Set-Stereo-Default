@@ -141,6 +141,8 @@ The next run skips these leftovers and shows a warning. You can safely delete th
 
 With `--delete-leftovers`, the script deletes the leftovers that it finds. With `--dry-run` too, it only lists them. The script deletes a leftover only if nothing in it changed in the last hour, because another run can still use a newer one. It also keeps a temporary folder that holds anything other than one file, and a leftover that is a symlink. For each leftover that it keeps, the script shows the reason.
 
+Files that Finder or Explorer make when you open a folder do not count. Examples are `.DS_Store`, `Thumbs.db`, `desktop.ini`, and files with a name that starts with `._`. The script deletes them with the folder.
+
 ## 🔒 One run at a time
 
 Only one run of the script at a time can work. Before the search, the script locks the file `.set_stereo_default.lock` in its own folder, next to `set_stereo_default.py`. If another run holds the lock, the script stops at once with exit code `75` and does not change files:

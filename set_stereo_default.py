@@ -490,6 +490,10 @@ LEFTOVER_MIN_AGE = 3600.0
 writes to its remux all the time, so its temp folder never looks this old;
 a rare one that does only costs that run one file's error, never data."""
 
+OS_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+"""Files that Finder (.DS_Store) and Explorer (Thumbs.db, desktop.ini) make
+in a folder someone opens, by their names in lowercase (see _os_file())."""
+
 TROUBLESHOOTING_URL = "https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/troubleshooting.md"
 """The docs page that says what each warning and error means."""
 
@@ -2219,18 +2223,31 @@ def _dispose_leftover(path: Path, kind: str, action: LeftoverAction) -> None:
 def _leftover_kept_because(path: Path) -> str | None:
     """Why --delete-leftovers must keep the leftover at path, or None if it
     can go. A symlink is never followed. A temp folder must hold nothing,
-    or the single regular file the script writes there; anything else
-    wasn't written by it. And nothing in it may have changed for
-    LEFTOVER_MIN_AGE seconds, since another run may still be using it."""
+    or the single regular file the script writes there, beside files an
+    operating system makes when someone opens the folder (see _os_file());
+    anything else wasn't written by it. And nothing in it may have changed
+    for LEFTOVER_MIN_AGE seconds, since another run may still be using
+    it."""
     if path.is_symlink():
         return "it's a symlink, which is never followed"
     inside = list(path.iterdir()) if path.is_dir() else []
-    if len(inside) > 1 or any(p.is_symlink() or not p.is_file() for p in inside):
+    if sum(not _os_file(p) for p in inside) > 1 or any(p.is_symlink() or not p.is_file() for p in inside):
         return "it holds something the script didn't write"
     newest = max(os.lstat(p).st_mtime for p in [path, *inside])
     if time.time() - newest < LEFTOVER_MIN_AGE:
         return "changed in the last hour, so another run may be using it"
     return None
+
+
+def _os_file(path: Path) -> bool:
+    """True for a file an operating system makes in a folder someone opens:
+    one of OS_FILES, or a "._" file, which macOS writes beside each file on
+    SMB shares and exFAT drives. --delete-leftovers disregards them when it
+    judges a temp folder's contents, and deletes them with the folder:
+    they only hold view settings, thumbnails and metadata the system makes
+    again, and browsing a leftover folder, as its warning invites, would
+    otherwise keep it for good."""
+    return path.name.lower() in OS_FILES or path.name.startswith("._")
 
 
 def _delete_leftover(path: Path) -> None:

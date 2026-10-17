@@ -740,6 +740,21 @@ def test_delete_leftovers_keeps_a_temp_folder_holding_what_the_script_never_writ
     assert f"Kept leftover temp folder (it holds something the script didn't write): {leftover}" in caplog.text
 
 
+@pytest.mark.parametrize("os_file", [".DS_Store", "Thumbs.db", "desktop.ini", "._a.mkv"])
+def test_delete_leftovers_disregards_files_the_os_makes_in_a_temp_folder(tmp_path, caplog, os_file):
+    """Opening a leftover folder in Finder or Explorer can add a file of the
+    system's own: view settings, thumbnails, or macOS metadata ("._" files
+    on SMB shares and exFAT drives). It doesn't count as something the
+    script didn't write, so the folder is still deleted, with that file."""
+    caplog.set_level("INFO")
+    leftover = make_leftover_folder(tmp_path, 7200, files=("a.mkv", os_file))
+
+    list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    assert not leftover.exists()
+    assert f"Deleted leftover temp folder: {leftover}" in caplog.text
+
+
 def test_delete_leftovers_keeps_a_temp_folder_it_cant_look_into(tmp_path, monkeypatch, caplog):
     """A run as root, or as another user in Docker, that was killed leaves a
     temp folder only that user can open. A later run as the media's owner
@@ -4497,6 +4512,23 @@ def lock_held_by_another_run(lock):
         proc.wait()
 
 
+def wait_until_lock_free(lock, timeout=1.0):
+    """Wait until no process holds the run lock at lock; fail after timeout
+    seconds. Windows frees the locks of a process a few milliseconds after
+    the process has ended, so a run started at once can still find it held."""
+    fd = os.open(lock, os.O_RDONLY)
+    try:
+        deadline = time.monotonic() + timeout
+        while not ssd._try_lock(fd):
+            assert time.monotonic() < deadline, f"{lock} was never released"
+            time.sleep(0.01)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(fd)
+
+
 @pytest.fixture
 def run_lock(tmp_path, monkeypatch):
     """Put the run lock in a folder of its own, standing in for the script's
@@ -4550,6 +4582,7 @@ def test_a_lock_from_a_run_that_ended_never_blocks_the_next(tmp_path, run_lock, 
         else:
             holder.kill()
         holder.wait()
+        wait_until_lock_free(run_lock)
 
     assert quick_run(tmp_path) == 0
 

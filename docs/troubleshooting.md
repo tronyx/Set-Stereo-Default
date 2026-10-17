@@ -116,7 +116,7 @@ An earlier run stopped suddenly while it processed a file. You can safely delete
 With `--delete-leftovers`, the script keeps a leftover in these cases:
 
 - Something in it changed in the last hour, so another run can still use it.
-- The folder holds anything other than one file, which the script does not write.
+- The folder holds anything other than one file, which the script does not write. Files that Finder or Explorer make, such as `.DS_Store` or `Thumbs.db`, do not count.
 - The leftover is a symlink, which the script never follows.
 - The script cannot look into the leftover or delete it. For example, only the user of the run that stopped can open the folder.
 
