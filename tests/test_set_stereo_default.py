@@ -3873,6 +3873,69 @@ def test_run_with_progress_kills_its_subprocess_if_the_bar_cant_be_created(monke
     assert not ssd._active_procs
 
 
+@pytest.fixture
+def stops_handled():
+    """Ctrl+C handled by _stop_handler(), as during a run, for the test."""
+    previous = signal.signal(signal.SIGINT, ssd._stop_handler)
+    yield
+    signal.signal(signal.SIGINT, previous)
+
+
+@pytest.mark.parametrize("event, recorded", [(0, True), (1, False), (2, False)],
+                         ids=["Ctrl+C", "Ctrl+Break", "console closed"])
+def test_a_console_ctrl_c_is_recorded_at_once(stops_handled, event, recorded):
+    """On Windows, Ctrl+C reaches the remuxes in the console as it reaches
+    the script, so it's recorded the moment it arrives, rather than when
+    the main thread next runs Python code, and Python's own handling goes
+    on (False)."""
+    assert ssd._console_ctrl(event) is False
+    assert ssd._cancelled.is_set() is recorded
+    assert ssd._requested_stop == [signal.SIGINT]
+
+
+def test_a_console_ctrl_c_the_script_ignores_isnt_recorded():
+    """Before the run and once its files are done, the script ignores stops,
+    and a console Ctrl+C then must not cancel anything either."""
+    ssd._ignore_stops()
+
+    assert ssd._console_ctrl(ssd.CTRL_C_EVENT) is False
+    assert not ssd._cancelled.is_set()
+
+
+def test_a_remux_a_console_ctrl_c_stopped_is_cancelled_not_failed(remux, monkeypatch, stops_handled):
+    """With --jobs, the console's Ctrl+C stops a worker's remux at once, and
+    the worker sees it fail before the main thread can handle the stop. The
+    file is cancelled and left as it was, not reported as a failed remux."""
+    apply, video, _ = remux
+
+    def stopped_by_the_console(cmd, *args, **kwargs):
+        remux_output(cmd).write_bytes(b"partial")
+        ssd._console_ctrl(ssd.CTRL_C_EVENT)
+        return 0xC000013A, "killed"  # STATUS_CONTROL_C_EXIT
+    monkeypatch.setattr(ssd, "run_with_progress", stopped_by_the_console)
+
+    with pytest.raises(ssd.Cancelled):
+        apply()
+    assert video.read_bytes() == b"original"
+    assert sorted(p.name for p in video.parent.iterdir()) == [video.name]
+
+
+def test_main_watches_the_console_only_while_it_runs(tmp_path, quick_run, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ssd, "_watch_console", calls.append)
+
+    def processed(*args, **kwargs):
+        calls.append("file")
+        return "unchanged"
+    make_videos(tmp_path, 1)
+    quick_run(tmp_path)
+    monkeypatch.setattr(ssd, "process_file", processed)
+    calls.clear()
+
+    assert ssd.main([str(tmp_path), "--no-progress"]) == 0
+    assert calls == [True, "file", False]
+
+
 def test_stop_handler_doesnt_hang_if_it_interrupts_the_lock_holder():
     """The handler runs in the main thread, which may already hold
     _active_procs_lock when the signal arrives. Simulated here in a worker

@@ -91,6 +91,7 @@ import argparse
 import codecs
 import contextlib
 import copy
+import ctypes
 import dataclasses
 import errno
 import functools
@@ -606,6 +607,45 @@ def _stop_handler(signum: int, frame: FrameType | None) -> NoReturn:
     _ignore_stops()
     _terminate_active_procs()
     raise Stopped(signum)
+
+
+CTRL_C_EVENT = 0
+"""What Windows passes a console control handler for Ctrl+C (see
+_console_ctrl())."""
+
+
+def _console_ctrl(event: int) -> bool:
+    """Record a stop the moment Ctrl+C reaches the console, as _stop_handler()
+    does, and return False, so that Python's own handling goes on to run
+    _stop_handler() in the main thread. Windows calls this in a thread of
+    its own (see _watch_console()), as it sends Ctrl+C to every program in
+    the console, the remuxes included, which stop at once. Python runs
+    _stop_handler() only when the main thread next runs Python code, and
+    with --jobs, waiting for the workers, it may not until one finishes
+    (Python 3.11 for one). A worker whose remux the Ctrl+C stopped would
+    then find no stop recorded and report a failed remux, and one copying
+    a backup would carry on to the end. Recorded only while _stop_handler()
+    handles Ctrl+C, so a stop the script ignores stays ignored."""
+    if event == CTRL_C_EVENT and signal.getsignal(signal.SIGINT) is _stop_handler:
+        _requested_stop[0] = signal.SIGINT
+        _cancelled.set()
+    return False
+
+
+_console_routine: list[Any] = []
+"""The ctypes callback for _console_ctrl() once made, kept so it lives as
+long as Windows may call it (see _watch_console())."""
+
+
+def _watch_console(on: bool) -> None:
+    """Have Windows call _console_ctrl() on each console event while on is
+    true. A failure, such as no console under pythonw, is ignored: Ctrl+C
+    then works as before. Other systems have no console events."""
+    if sys.platform != "win32":
+        return
+    if not _console_routine:
+        _console_routine.append(ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong)(_console_ctrl))
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_routine[0], on)
 
 
 def _stop_reason(exc: BaseException) -> tuple[int, str]:
@@ -3066,9 +3106,11 @@ def main(argv: list[str] | None = None) -> int:
     previous = {sig: signal.signal(sig, _stop_handler) for sig in (signal.SIGINT, signal.SIGTERM)}
     previous_hook = sys.unraisablehook
     sys.unraisablehook = lambda unraisable: _unraisable(unraisable, previous_hook)
+    _watch_console(True)
     try:
         return _run(opts)
     finally:
+        _watch_console(False)
         sys.unraisablehook = previous_hook
         for sig, handler in previous.items():
             signal.signal(sig, handler)
