@@ -272,6 +272,14 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+      # The console Ctrl+C test runs the script with the oldest Python
+      # supported: on Windows, 3.13 and older can't interrupt the main
+      # thread's wait for the --jobs workers, which that test needs. Set up
+      # first, so that 3.14 below stays the default python.
+      - uses: actions/setup-python@v7
+        id: oldest-python
+        with:
+          python-version: "3.10"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
@@ -309,7 +317,12 @@ jobs:
           ffmpeg -version | head -n 1
           mkvmerge --version
           python --version
+          "$SSD_CTRL_C_PYTHON" --version
+        env:
+          SSD_CTRL_C_PYTHON: ${{ steps.oldest-python.outputs.python-path }}
       - run: python -m pytest tests/test_real_files.py -v
+        env:
+          SSD_CTRL_C_PYTHON: ${{ steps.oldest-python.outputs.python-path }}
 
   # The real-file tests on macOS, with Homebrew's ffmpeg and MKVToolNix: the
   # newest releases, built the way most Mac users get them.
