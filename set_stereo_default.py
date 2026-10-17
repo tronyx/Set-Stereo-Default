@@ -502,6 +502,12 @@ OS_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 """Files that Finder (.DS_Store) and Explorer (Thumbs.db, desktop.ini) make
 in a folder someone opens, by their names in lowercase (see _os_file())."""
 
+APPLE_DOUBLE_PREFIX = "._"
+"""Starts the name of the file macOS writes beside each file on SMB shares
+and exFAT drives, e.g. "._Movie.mkv", holding Finder metadata, not the
+file's content. The search skips one (see _video_file()), and
+--delete-leftovers disregards one in a temp folder (see _os_file())."""
+
 TROUBLESHOOTING_URL = "https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/troubleshooting.md"
 """The docs page that says what each warning and error means."""
 
@@ -2307,7 +2313,7 @@ def _os_file(path: Path) -> bool:
     they only hold view settings, thumbnails and metadata the system makes
     again, and browsing a leftover folder, as its warning invites, would
     otherwise keep it for good."""
-    return path.name.lower() in OS_FILES or path.name.startswith("._")
+    return path.name.lower() in OS_FILES or path.name.startswith(APPLE_DOUBLE_PREFIX)
 
 
 def _delete_leftover(path: Path) -> None:
@@ -2468,6 +2474,20 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
         yield from sorted(here)
 
 
+def _ruled_out_by_name(path: Path, exts: set[str]) -> bool:
+    """True if the name of path rules it out for _video_file(): it has no
+    extension from exts, or it's a macOS metadata file (see
+    APPLE_DOUBLE_PREFIX). The metadata file is logged: it has a video's
+    extension, and taken for a video it would fail to probe and count as
+    an error, one for each video on a share a Mac has used."""
+    if path.suffix.lower() not in exts:
+        return True
+    if path.name.startswith(APPLE_DOUBLE_PREFIX):
+        log.info(f"Skipping macOS metadata file: {path}")
+        return True
+    return False
+
+
 def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, exts: set[str],
                 skip_symlinks: bool, leftovers: LeftoverAction = "report") -> tuple[Path, str] | None:
     """Decide about one candidate for iter_files(): return (the file to
@@ -2475,7 +2495,7 @@ def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, ex
     that's worth saying. entry and real come from _walk(), or are None for
     a file named on the command line. A symlink becomes the file it points
     to (or is left out with skip_symlinks)."""
-    if path.suffix.lower() not in exts:
+    if _ruled_out_by_name(path, exts):
         return None
     if entry.is_symlink() if entry else path.is_symlink():
         if skip_symlinks:

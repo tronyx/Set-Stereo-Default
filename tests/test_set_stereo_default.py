@@ -630,6 +630,31 @@ def test_iter_files_accepts_files_passed_directly(library):
     assert names(ssd.iter_files(paths, ssd.DEFAULT_EXTS, recursive=True), library) == ["a.mkv"]
 
 
+@pytest.mark.parametrize("named", [False, True], ids=["found", "named directly"])
+def test_a_macos_metadata_file_beside_a_video_is_skipped(tmp_path, caplog, named):
+    """macOS writes "._<name>" beside each file on SMB shares and exFAT
+    drives, holding Finder metadata, not video. Taken for a video, each
+    would fail to probe and count as an error, so the search skips them,
+    saying so in the details."""
+    caplog.set_level("INFO")
+    video, metadata = tmp_path / "Movie.mkv", tmp_path / "._Movie.mkv"
+    video.write_bytes(b"")
+    metadata.write_bytes(b"\x00\x05\x16\x07")
+
+    found = list(ssd.iter_files([video, metadata] if named else [tmp_path], ssd.DEFAULT_EXTS, True))
+
+    assert found == [video]
+    assert f"Skipping macOS metadata file: {metadata}" in caplog.text
+
+
+def test_a_macos_metadata_file_for_another_kind_of_file_isnt_mentioned(tmp_path, caplog):
+    caplog.set_level("INFO")
+    (tmp_path / "._notes.txt").write_bytes(b"\x00\x05\x16\x07")
+
+    assert list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True)) == []
+    assert "._notes.txt" not in caplog.text
+
+
 def test_iter_files_warns_about_leftover_temp_files(library, caplog):
     list(ssd.iter_files([library], ssd.DEFAULT_EXTS, recursive=True))
     assert "a.mkv.tmp_remux.mkv" in caplog.text

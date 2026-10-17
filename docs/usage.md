@@ -15,7 +15,7 @@ python3 set_stereo_default.py "/path/to/videos/Some Show" --backup
 python3 set_stereo_default.py "/path/to/videos"
 ```
 
-The script searches each folder and its subfolders. You can also give it individual files, or files and folders together. The script processes the paths in the order that you give them, and the files of each folder in alphabetical order. So you can put the shows that are most important to you first. If a path does not exist, for example because of a typing error, the script reports it (`Skipping /path/to/vidoes: no such file or directory`). Then the script continues with the other paths.
+The script searches each folder and its subfolders. You can also give it individual files, or files and folders together. The script processes the paths in the order that you give them, and the files of each folder in alphabetical order. So you can put the shows that are most important to you first. The script skips the files with a name that starts with `._`, for example `._Movie.mkv`. macOS writes these files next to each file on SMB shares and exFAT drives, and they hold no video. The script writes a line about each one that it skips. If a path does not exist, for example because of a typing error, the script reports it (`Skipping /path/to/vidoes: no such file or directory`). Then the script continues with the other paths.
 
 On Windows, type `py` instead of `python3`.
 
