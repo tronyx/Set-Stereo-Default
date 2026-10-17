@@ -905,6 +905,76 @@ def test_delete_leftovers_option(tmp_path, caplog, args, line):
     assert line.format(leftover) in caplog.text
 
 
+def make_two_old_leftovers_and_a_new_one(folder):
+    """Two leftover temp folders --delete-leftovers deletes, and one it keeps
+    since it changed in the last hour."""
+    make_leftover_folder(folder, 7200).rename(folder / "set_stereo_default.tmp.11111111")
+    make_leftover_folder(folder, 7200).rename(folder / "set_stereo_default.tmp.22222222")
+    make_leftover_folder(folder, 0)
+
+
+@pytest.mark.parametrize("args, line", [
+    (["--delete-leftovers"], "Leftovers deleted: 2"),
+    (["--delete-leftovers", "--dry-run"], "Leftovers: 2"),
+    (["--delete-leftovers", "--log-file", "{}/run.log"], "Leftovers deleted: 2"),
+], ids=["delete", "dry run", "--log-file"])
+def test_the_summary_counts_the_leftovers_deleted(tmp_path, quick_run, capsys, args, line):
+    """With --delete-leftovers, the summary says how many leftovers were
+    deleted, or with --dry-run would be, also on the console with
+    --log-file, whose Deleted lines only go to the file. One that's kept
+    isn't counted: it's warned about and listed instead."""
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    make_videos(videos, 1)
+    make_two_old_leftovers_and_a_new_one(videos)
+
+    assert quick_run(videos, *(a.format(tmp_path) for a in args)) == 0
+
+    out = capsys.readouterr().out
+    assert out.index("Error: 0") < out.index(f"{line}\n")
+
+
+def test_the_summary_has_no_leftover_line_without_delete_leftovers(tmp_path, quick_run, capsys):
+    make_videos(tmp_path, 1)
+    make_leftover_folder(tmp_path, 7200)
+
+    quick_run(tmp_path)
+
+    assert "Leftovers" not in capsys.readouterr().out
+
+
+def test_the_leftovers_deleted_are_counted_when_no_video_is_found(tmp_path, quick_run, capsys):
+    """A run that only finds leftovers ends without a summary, so the count
+    comes just before the message that no files were found."""
+    make_two_old_leftovers_and_a_new_one(tmp_path)
+
+    assert quick_run(tmp_path, "--delete-leftovers") == 1
+
+    out = capsys.readouterr().out
+    assert out.index("Leftovers deleted: 2\n") < out.index("No matching files found.")
+
+
+def test_the_leftovers_deleted_are_counted_when_a_stop_ends_the_search(tmp_path, quick_run, monkeypatch,
+                                                                      capsys):
+    """A stop during the search can come after leftovers were deleted, so
+    the message says no video files were changed, and the count follows."""
+    make_videos(tmp_path, 1)
+    make_two_old_leftovers_and_a_new_one(tmp_path)
+    search = ssd.iter_files
+
+    def search_then_stop(*args, **kwargs):
+        yield from search(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ssd, "iter_files", search_then_stop)
+
+    assert quick_run(tmp_path, "--delete-leftovers") == 130
+
+    out = capsys.readouterr().out
+    message = "Interrupted by user (Ctrl+C) while looking for files. No video files were changed.\n"
+    assert out.index(message) < out.index("Leftovers deleted: 2\n")
+
+
 @pytest.mark.parametrize("in_docker, mounted, hinted", [
     (True, False, True),
     (True, True, False),
@@ -1348,12 +1418,12 @@ def test_quitting_at_the_backup_question_changes_nothing(backed_up, capsys):
 
     assert code == 0
     assert seen == []
-    assert "Quit before changing any files." in capsys.readouterr().out
+    assert "Quit before changing any video files." in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("stop, code, message", [
-    (KeyboardInterrupt(), 130, "Interrupted by user (Ctrl+C). No files were changed."),
-    (ssd.Stopped(signal.SIGTERM), 143, "Stopped by SIGTERM. No files were changed."),
+    (KeyboardInterrupt(), 130, "Interrupted by user (Ctrl+C). No video files were changed."),
+    (ssd.Stopped(signal.SIGTERM), 143, "Stopped by SIGTERM. No video files were changed."),
 ], ids=["Ctrl+C", "SIGTERM"])
 def test_stopping_at_the_backup_question_changes_nothing(backed_up, capsys, stop, code, message):
     _, run = backed_up
@@ -1363,6 +1433,22 @@ def test_stopping_at_the_backup_question_changes_nothing(backed_up, capsys, stop
     assert len(questions) == 1
     assert seen == []
     assert message in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("answer, first, then", [
+    ("q", "Leftovers deleted: 1\n", "Quit before changing any video files.\n"),
+    (KeyboardInterrupt(), "Interrupted by user (Ctrl+C). No video files were changed.\n", "Leftovers deleted: 1\n"),
+], ids=["quit", "Ctrl+C"])
+def test_the_leftovers_deleted_are_counted_when_the_run_ends_at_the_backup_question(backed_up, capsys, answer,
+                                                                                    first, then):
+    """The search before the question can already have deleted leftovers."""
+    folder, run = backed_up
+    make_leftover_folder(folder, 7200)
+
+    run("--backup", "--delete-leftovers", answer=answer)
+
+    out = capsys.readouterr().out
+    assert out.index(first) < out.index(then)
 
 
 def test_existing_backups_are_numbered_when_no_one_can_answer(backed_up, capsys):
@@ -4335,7 +4421,7 @@ def test_a_stop_between_the_search_and_the_first_file_is_reported(tmp_path, monk
 
     out = capsys.readouterr().out
     assert exit_code == code
-    assert f"{message} while looking for files. No files were changed." in out
+    assert f"{message} while looking for files. No video files were changed." in out
     assert "Summary" not in out
 
 
@@ -4464,7 +4550,7 @@ def test_a_stop_lost_during_the_search_still_ends_the_run(tmp_path, monkeypatch,
 
     out, err = capsys.readouterr()
     assert exit_code == code
-    assert f"{message} while looking for files. No files were changed." in out
+    assert f"{message} while looking for files. No video files were changed." in out
     assert "Summary" not in out
     assert "Exception ignored" not in err
 
@@ -4524,7 +4610,7 @@ def test_signal_while_looking_for_files_exits_cleanly(tmp_path, monkeypatch, cap
     out = capsys.readouterr().out
     assert exit_code == code
     assert message in out
-    assert "No files were changed" in out
+    assert "No video files were changed" in out
     assert "Summary" not in out
     assert processed == []
 

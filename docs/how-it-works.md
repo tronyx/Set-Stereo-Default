@@ -143,6 +143,8 @@ The script treats a folder as a leftover only if the folder has the exact name t
 
 With `--delete-leftovers`, the script deletes the leftovers that it finds. With `--dry-run` too, it only lists them. The script deletes a leftover only if nothing in it changed in the last hour, because another run can still use a newer one. It also keeps a temporary folder that holds anything other than one file, and a leftover that is a symlink. For each leftover that it keeps, the script shows the reason.
 
+The last line of the summary shows how many leftovers the script deleted, for example `Leftovers deleted: 2`. In a dry run, the line is `Leftovers: 2`. If the run ends without a summary, for example because the folder holds no videos, the script shows this line too.
+
 Files that Finder or Explorer make when you open a folder do not count. Examples are `.DS_Store`, `Thumbs.db`, `desktop.ini`, and files with a name that starts with `._`. The script deletes them with the folder.
 
 ## 🔒 One run at a time

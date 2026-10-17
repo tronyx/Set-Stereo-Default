@@ -62,7 +62,7 @@ To send the list through a pipe (the output of one command sent to another) inst
 | `--follow-symlinks` | Also search the subfolders that are symlinks. By default, the script skips them. It always searches the folders that you name on the command line |
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](how-it-works.md#-changing-the-file)) |
 | `--force` | Also remux (copy the tracks into a new file) the files that are already correct, for example to restore their thumbnails (see [Troubleshooting](troubleshooting.md)) |
-| `--delete-leftovers` | Delete the temporary files and folders that an interrupted run left behind, when nothing in them changed in the last hour. With `--dry-run`, only list them (see [Leftover temp files](how-it-works.md#-leftover-temp-files)) |
+| `--delete-leftovers` | Delete the temporary files and folders that an interrupted run left behind, when nothing in them changed in the last hour. The summary shows how many. With `--dry-run`, only list them (see [Leftover temp files](how-it-works.md#-leftover-temp-files)) |
 | `--keep-dates` | Give each changed file the modification date of the original, so that the file does not look newly changed (see [File dates](how-it-works.md#-file-dates)) |
 | `--no-progress` | Hide the progress bars. The script already hides them when the output is not a terminal (cron, `docker run` without `-t`, or a pipe) |
 

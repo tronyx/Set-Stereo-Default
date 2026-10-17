@@ -529,13 +529,19 @@ report_warned_files()."""
 _warned_lock = threading.Lock()
 """Guards _warned_files, which several --jobs threads add to at once."""
 
+_leftovers_disposed: list[Path] = []
+"""Each leftover --delete-leftovers deleted this run, or with --dry-run would
+have (see _dispose_leftover()), counted by _tell_leftovers(). Only the
+search adds to it, and it runs in one thread, so it needs no lock."""
+
 
 def _reset_run_state() -> None:
     """Forget what an earlier run in this process left behind, so main() can
     run more than once, e.g. when called from other Python code: a stop
     request (which would cancel every file), files that couldn't keep their
     owner, files it warned about and files it couldn't fix (which would be
-    reported again), the headers printed last, and whether this mkvmerge
+    reported again), the leftovers it deleted (which would be counted
+    again), the headers printed last, and whether this mkvmerge
     can keep legacy font types. No remux outlives its run, so _active_procs
     is already empty."""
     _cancelled.clear()
@@ -545,6 +551,7 @@ def _reset_run_state() -> None:
         _failed_files.clear()
     with _warned_lock:
         _warned_files.clear()
+    _leftovers_disposed.clear()
     _last_header.clear()
     _file_context.header = None
     mkvmerge_can_keep_legacy_font_types.cache_clear()
@@ -2207,7 +2214,8 @@ def _dispose_leftover(path: Path, kind: str, action: LeftoverAction) -> None:
     recorded with the reason. So is one that can't be checked or deleted,
     such as a temp folder that only the user of a killed run can open, so
     that it never ends the search. Otherwise it's deleted, or with
-    "preview" only said to be, and isn't listed at the end."""
+    "preview" only said to be, and isn't listed at the end, but counted
+    (see _tell_leftovers())."""
     if action == "report":
         log.warning(f"Skipping leftover temp {kind} from an interrupted run (safe to delete): {path}")
         _note_warnings(path, [Note("leftover", "")])
@@ -2224,7 +2232,9 @@ def _dispose_leftover(path: Path, kind: str, action: LeftoverAction) -> None:
     if why is not None:
         log.warning(f"Kept leftover temp {kind} ({why}): {path}")
         _note_warnings(path, [Note("leftover", why)])
-    elif action == "delete":
+        return
+    _leftovers_disposed.append(path)
+    if action == "delete":
         log.info(f"Deleted leftover temp {kind}: {path}")
     else:
         log.info(f"Would delete leftover temp {kind}: {path}")
@@ -2679,6 +2689,18 @@ def _tell(opts: Options, line: str) -> None:
         print(line)
 
 
+def _tell_leftovers(opts: Options) -> None:
+    """With --delete-leftovers, tell how many leftovers the search deleted,
+    or with --dry-run would have (see _dispose_leftover()): with --log-file
+    each one's line only goes to the file, and without it, those lines have
+    long scrolled away by the end of the run. The summary ends with it, and
+    a run that ends before the summary tells it too, since its search can
+    already have deleted some."""
+    if opts.delete_leftovers:
+        name = "Leftovers" if opts.dry_run else "Leftovers deleted"
+        _tell(opts, f"{name}: {len(_leftovers_disposed)}")
+
+
 def find_files(opts: Options) -> list[Path]:
     """Every file to process: the ones under opts.paths with an extension
     from --ext (or DEFAULT_EXTS), in the order the paths were given, each
@@ -2848,8 +2870,9 @@ def print_summary(stats: Counter[Outcome], opts: Options, partial: bool = False,
     """Log the counts, printing them too with --log-file (see _tell()). In a
     dry run nothing was changed, so the heading says so and "Changed" reads
     "Would change". partial marks a run that was stopped, where cancelled
-    files didn't finish. Each line, and the heading's note, starts with a
-    capital letter."""
+    files didn't finish. With --delete-leftovers, the last line counts the
+    leftovers (see _tell_leftovers()). Each line, and the heading's note,
+    starts with a capital letter."""
     notes = (["partial -- interrupted"] if partial else []) + (
         ["dry run, nothing was changed"] if opts.dry_run else [])
     note = "; ".join(notes)
@@ -2862,6 +2885,7 @@ def print_summary(stats: Counter[Outcome], opts: Options, partial: bool = False,
         _tell(opts, f"{name.capitalize()}: {stats[k]}")
     if cancelled:
         _tell(opts, f"Cancelled: {cancelled}")
+    _tell_leftovers(opts)
 
 
 LOCK_NAME = ".set_stereo_default.lock"
@@ -3067,6 +3091,7 @@ def _run(opts: Options) -> int:
         files = find_files(opts)
         _check_stop()
         if not files:
+            _tell_leftovers(opts)
             log.error("No matching files found.")
             return 1
         if any(f.suffix.lower() in MKV_EXTS for f in files) and not check_tools(need_mkvmerge=True):
@@ -3078,7 +3103,8 @@ def _run(opts: Options) -> int:
             answer = choose_backup_mode(opts, files)
             _check_stop()
             if answer == "quit":
-                _tell(opts, "Quit before changing any files.")
+                _tell_leftovers(opts)
+                _tell(opts, "Quit before changing any video files.")
                 return 0
             opts = dataclasses.replace(opts, existing_backups=answer)
 
@@ -3094,11 +3120,13 @@ def _run(opts: Options) -> int:
         _ignore_stops()
         signum, reason = _stop_reason(exc)
         if stage == "search":
-            log.error(f"{reason} while looking for files. No files were changed.")
+            log.error(f"{reason} while looking for files. No video files were changed.")
+            _tell_leftovers(opts)
             return 128 + signum
         print()
         if stage == "question":
-            log.error(f"{reason}. No files were changed.")
+            log.error(f"{reason}. No video files were changed.")
+            _tell_leftovers(opts)
             return 128 + signum
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
