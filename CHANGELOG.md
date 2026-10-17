@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-17 · [#28](https://github.com/tronyx/Set-Stereo-Default/pull/28)
+
 ### Added
 
 - `--delete-leftovers` deletes the temporary files and folders that an interrupted run left behind. With `--dry-run`, it only lists them. The script deletes a leftover only if nothing in it changed in the last hour, because another run can still use a newer one. It keeps a temporary folder that holds anything other than one file, and a leftover that is a symlink, and shows the reason. Files that Finder or Explorer make in a folder do not count. A folder is a leftover only if it has the exact name that the script makes. The script searches a folder with a name that only starts the same way, for example a renamed temporary folder. It shows a warning for that folder and lists it at the end of the run. The summary shows how many leftovers the script deleted, also with `--log-file`, which writes the line for each leftover only to the file. If a stop or a quit comes before the script changes videos, the message now says that no video files were changed, because leftovers can already be gone. Before, you had to delete leftovers yourself. New tests make sure that the script does these things.
@@ -22,6 +26,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 - A user who can write to your media folder was able to make the script write a file to another place. The script wrote each new file next to the original, with a name that was easy to predict. A symlink with that name made ffmpeg or mkvmerge write through it, for example as root to a file of the system. Now the script writes each new file in a new private folder next to the original. On Linux and macOS, only the user that runs the script can open this folder. A weaker trick is still possible, and the docs tell you how to avoid it. The new file now also has the name of the original. So a file with a name of 255 characters, the limit of most file systems, can now be fixed. Before, the script reported that the name was too long. New tests make sure that the script does these things.
 - On Windows with `--jobs`, Ctrl+C counted the files in progress as `Error`. The list at the end also showed some of them as files that the script did not fix. Windows sends Ctrl+C to ffmpeg and mkvmerge too, so their remuxes stopped at once. With some versions of Python, for example 3.11, the script noticed the stop only after one of these files was done. So the script took each stopped remux for a failed one. The files stayed as they were, and no temporary files stayed. Now the script notes Ctrl+C the moment that it arrives, and it counts these files as `Cancelled`. New tests make sure that the script does this. A test with a real Ctrl+C on Windows found the problem with Python 3.11, and showed that the fix works with Python 3.11 and 3.15.
 - On a share or a drive that a Mac used, the script took the `._` file next to each video for a video, for example `._Movie.mkv`. macOS writes these files on SMB shares and exFAT drives, and they hold only data for Finder. ffprobe failed on each one. So each run counted one error for each video, listed these files as files that it did not fix, and ended with exit code `1`. Now the search skips these files and writes a line about each one. New tests make sure that the script does this.
+
+### Project
+
+- A property test sometimes failed the health check of Hypothesis, because it filtered out most of the track lists that it drew. Now it builds only lists with one default track, so it checks the same thing without the filter.
 
 ## 2026-10-14 · [#27](https://github.com/tronyx/Set-Stereo-Default/pull/27)
 
