@@ -676,6 +676,71 @@ def test_a_video_inside_a_leftover_temp_folder_is_never_processed(tmp_path, capl
     assert f"Skipping leftover temp file from an interrupted run (safe to delete): {partial}" in caplog.text
 
 
+LOOKALIKE_NAMES = ["set_stereo_default.tmp.old", "set_stereo_default.tmp.0A1B2C3D",
+                   "set_stereo_default.tmp.0a1b2c3", "set_stereo_default.tmp.0a1b2c3d4",
+                   "set_stereo_default.tmp.XXXXXXXX"]
+"""Names that start like a temp folder's but aren't one the script makes:
+it only makes 8 lowercase hex digits after the prefix."""
+
+
+def lookalike_line(folder):
+    return f"Searching a folder named like a temp folder of the script, which is not one: {folder}"
+
+
+@pytest.mark.parametrize("name", LOOKALIKE_NAMES)
+@pytest.mark.parametrize("named", [False, True], ids=["found", "named directly"])
+def test_a_folder_only_named_like_a_temp_folder_is_searched_and_listed(tmp_path, caplog, name, named):
+    """A folder the script didn't make, e.g. a temp folder someone renamed,
+    is searched like any other, found or given as a path, with a warning,
+    and listed at the end of the run so it isn't forgotten."""
+    folder = tmp_path / name
+    folder.mkdir()
+    (folder / "a.mkv").write_bytes(b"")
+
+    found = list(ssd.iter_files([folder if named else tmp_path], ssd.DEFAULT_EXTS, True))
+
+    assert found == [folder / "a.mkv"]
+    assert lookalike_line(folder) in caplog.text
+    assert ssd._warned_files == [(str(folder), "lookalike", "")]
+    caplog.clear()
+    ssd.report_warned_files()
+    assert f"  {ssd.WARNING_GROUPS['lookalike']}\n    {folder}\n" in caplog.text
+
+
+def test_a_folder_named_like_a_temp_folder_that_isnt_searched_isnt_warned_about(tmp_path, caplog):
+    """Without recursion, subfolders aren't searched, so there's nothing to
+    say about one named like a temp folder."""
+    folder = tmp_path / "set_stereo_default.tmp.old"
+    folder.mkdir()
+    (folder / "a.mkv").write_bytes(b"")
+
+    assert list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, False)) == []
+    assert "set_stereo_default.tmp.old" not in caplog.text
+    assert ssd._warned_files == []
+
+
+def test_a_video_in_a_folder_only_named_like_a_temp_folder_is_processed(tmp_path):
+    """Only a file in a folder the script makes is a leftover."""
+    folder = tmp_path / "set_stereo_default.tmp.old"
+    folder.mkdir()
+    (folder / "a.mkv").write_bytes(b"")
+
+    assert list(ssd.iter_files([folder / "a.mkv"], ssd.DEFAULT_EXTS, True)) == [folder / "a.mkv"]
+
+
+@pytest.mark.parametrize("name", LOOKALIKE_NAMES)
+def test_delete_leftovers_never_deletes_a_folder_only_named_like_a_temp_folder(tmp_path, caplog, name):
+    caplog.set_level("INFO")
+    leftover = make_leftover_folder(tmp_path, 7200)
+    folder = leftover.rename(tmp_path / name)
+
+    found = list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    assert found == [folder / "a.mkv"]
+    assert folder.exists()
+    assert "Deleted" not in caplog.text
+
+
 def make_leftover_folder(parent, age, files=("a.mkv",)):
     """A leftover temp folder in parent holding files, with nothing in it
     changed for age seconds."""

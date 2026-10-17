@@ -186,6 +186,13 @@ file with the video's own name. The search never looks inside one (see
 _skip_leftover_folder()): one it finds is left over from a run killed
 outright."""
 
+TMP_DIR_RE = re.compile(re.escape(TMP_DIR_PREFIX) + "[0-9a-f]{8}")
+"""The whole name of a temp folder the script makes (see TMP_DIR_PREFIX):
+8 lowercase hex digits follow the prefix. Only a folder named so is
+taken for a leftover, so one the script didn't make, such as a temp
+folder someone renamed, is never skipped or deleted (see
+_warn_if_named_like_tmp_dir())."""
+
 COMMENTARY_NAME_RE = re.compile(r"commentary|audio[ -]?description|descriptive|described|\bdvs\b",
                                 re.IGNORECASE)
 """Track names that mark commentary or audio description, as such tracks are
@@ -475,7 +482,7 @@ report_failed_files()."""
 _failed_lock = threading.Lock()
 """Guards _failed_files, which several --jobs threads add to at once."""
 
-Warned = Literal["default", "flags", "tool", "leftover"]
+Warned = Literal["default", "flags", "tool", "leftover", "lookalike"]
 """What a file was warned about, as report_warned_files() groups them."""
 
 LeftoverAction = Literal["report", "delete", "preview"]
@@ -507,6 +514,9 @@ WARNING_GROUPS: dict[Warned, str] = {
     "tool": "Fixed, though mkvmerge finished with warnings:",
     "leftover": ("Leftover temp files and folders from an interrupted run, which were skipped. "
                  "--delete-leftovers deletes them once nothing in them changed for an hour:"),
+    "lookalike": ("Folders with a name that starts like a temp folder of the script, but is not one that it "
+                  "makes. They were searched like other folders. If one is a temp folder that you renamed, "
+                  "its file is a partial copy of a video, and you can delete it:"),
 }
 """The heading report_warned_files() gives each kind of warning, saying
 what it means, in the order they're listed."""
@@ -2265,19 +2275,31 @@ def _delete_leftover(path: Path) -> None:
 def _is_leftover_file(path: Path) -> bool:
     """True if the file at path was left by a run killed outright: a temp
     file of an earlier version, e.g. "name.mkv.tmp_remux.mkv", or the
-    partial remux in a private temp folder (see TMP_DIR_PREFIX)."""
-    return path.stem.endswith(TMP_MARKER) or path.parent.name.startswith(TMP_DIR_PREFIX)
+    partial remux in a private temp folder (see TMP_DIR_RE)."""
+    return path.stem.endswith(TMP_MARKER) or TMP_DIR_RE.fullmatch(path.parent.name) is not None
 
 
 def _skip_leftover_folder(path: Path | str, action: LeftoverAction = "report") -> bool:
-    """True if path is a temp folder (see TMP_DIR_PREFIX), after dealing
-    with it as action says (see _dispose_leftover()). The search must not
-    look inside one: it holds a partial remux with a video's name, which
-    would be taken for that video."""
-    if not Path(path).name.startswith(TMP_DIR_PREFIX):
+    """True if path is a temp folder (see TMP_DIR_RE), after dealing with
+    it as action says (see _dispose_leftover()). The search must not look
+    inside one: it holds a partial remux with a video's name, which would
+    be taken for that video."""
+    if TMP_DIR_RE.fullmatch(Path(path).name) is None:
         return False
     _dispose_leftover(Path(path), "folder", action)
     return True
+
+
+def _warn_if_named_like_tmp_dir(folder: Path | str) -> None:
+    """Warn about folder, which is being searched, if its name starts like a
+    temp folder's (see TMP_DIR_PREFIX), and list it at the end of the run
+    (see report_warned_files()). Being searched, it isn't one the script
+    makes (see _skip_leftover_folder()), but it may be a temp folder
+    someone renamed and forgot, whose partial remux the search now takes
+    for a video."""
+    if Path(folder).name.startswith(TMP_DIR_PREFIX):
+        log.warning(f"Searching a folder named like a temp folder of the script, which is not one: {folder}")
+        _note_warnings(Path(folder), [Note("lookalike", "")])
 
 
 def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool, visited: set[str] | None = None,
@@ -2307,6 +2329,7 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool, visited: s
     if real_folder in visited:
         return
     visited.add(real_folder)
+    _warn_if_named_like_tmp_dir(folder)
     try:
         with os.scandir(folder) as listing:
             entries = list(listing)

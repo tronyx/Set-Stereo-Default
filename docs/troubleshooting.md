@@ -17,6 +17,7 @@ Before this list, the script shows a list of the files that got a warning. Each 
 - Files that lost flags that ffmpeg cannot write to MP4, M4V, MOV, or AVI files.
 - Files for which mkvmerge showed warnings.
 - Leftover temp files and folders from an interrupted run, which the script skipped or kept.
+- Folders with a name that starts like a temporary folder of the script, but that the script did not make.
 
 ## `SKIP (...)` on a file that you expected to change
 
@@ -121,6 +122,12 @@ With `--delete-leftovers`, the script keeps a leftover in these cases:
 - The script cannot look into the leftover or delete it. For example, only the user of the run that stopped can open the folder.
 
 The reason in the parentheses tells you which. For a leftover that changed recently, run the script again later. If only another user can open a leftover, delete it as that user. Examine the other leftovers yourself, and delete them if you do not need them.
+
+## `Searching a folder named like a temp folder of the script, which is not one`
+
+The name of the folder starts with `set_stereo_default.tmp.`, but the script did not make the folder. The script only makes names with 8 random characters from `0` to `9` and `a` to `f` after the prefix. So the script searched the folder like other folders.
+
+If you renamed a temporary folder of the script, its file is an unfinished copy of a video. The script processed this file as a video. You can delete the folder. Otherwise, give the folder a name that does not start with `set_stereo_default.tmp.`, and the warning stops.
 
 ## `Another run of the script is already working (it holds <lock file>); try again when it has finished.`
 

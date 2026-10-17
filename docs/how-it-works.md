@@ -139,6 +139,8 @@ Sometimes the script stops without time to clean up. Examples are `kill -9`, a p
 
 The next run skips these leftovers and shows a warning. You can safely delete them. Only a finished file that passed all the tests replaces the original. A backup gets its real name only when it is complete.
 
+The script treats a folder as a leftover only if the folder has the exact name that the script makes. Some folders have a different name that also starts with `set_stereo_default.tmp.`, for example after you rename a temporary folder. The script searches these folders like other folders. It shows a warning for each one and lists it at the end of the run.
+
 With `--delete-leftovers`, the script deletes the leftovers that it finds. With `--dry-run` too, it only lists them. The script deletes a leftover only if nothing in it changed in the last hour, because another run can still use a newer one. It also keeps a temporary folder that holds anything other than one file, and a leftover that is a symlink. For each leftover that it keeps, the script shows the reason.
 
 Files that Finder or Explorer make when you open a folder do not count. Examples are `.DS_Store`, `Thumbs.db`, `desktop.ini`, and files with a name that starts with `._`. The script deletes them with the folder.
