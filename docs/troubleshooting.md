@@ -135,7 +135,7 @@ Another run of the script holds the run lock. The script stopped with exit code 
 
 ## `Couldn't lock <lock file> (...), so another run at the same time can't be detected`
 
-The script cannot use its lock file, `.set_stereo_default.lock`. For example, the user who runs the script cannot make files in the folder of the script. Other examples are an NFS share without its lock service, and a symlink with the name of the lock file. The script continues, but it cannot stop a second run. If the user cannot make files in the folder of the script, give that user permission to write to the folder. Until then, do not start two runs at the same time.
+The script cannot use its lock file, `.set_stereo_default.lock`. For example, the user who runs the script cannot make files in the folder of the script. Other examples are an NFS share without its lock service, a symlink with the name of the lock file, and a lock file that only another user can read. The script continues, but it cannot stop a second run. If the user cannot make files in the folder of the script, give that user permission to write to the folder. If only another user can read the lock file, run the script once as that user. The script then lets all users read the file. Until then, do not start two runs at the same time.
 
 ## No thumbnail in Windows Explorer
 

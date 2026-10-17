@@ -4800,6 +4800,84 @@ def test_a_symlink_at_the_lock_file_is_never_followed(tmp_path, run_lock, quick_
     assert f"Couldn't lock {run_lock} (" in capsys.readouterr().out
 
 
+@pytest.fixture
+def strict_umask():
+    """Run the test with umask 077, as on hardened systems, where a new file
+    gets no permissions for the group or others."""
+    old = os.umask(0o077)
+    yield
+    os.umask(old)
+
+
+def lock_mode(lock):
+    return stat.S_IMODE(lock.stat().st_mode)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no umask or Unix permissions")
+def test_another_user_can_open_the_lock_file_whatever_the_umask(tmp_path, run_lock, quick_run, strict_umask):
+    """A later run as another user (root one night, the media's owner the
+    next) must be able to open the lock file, or it can't see this run."""
+    make_videos(tmp_path, 1)
+
+    assert quick_run(tmp_path) == 0
+
+    assert lock_mode(run_lock) == 0o644
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no umask or Unix permissions")
+@pytest.mark.parametrize("was, now", [(0o600, 0o644), (0o660, 0o664)])
+def test_its_owner_opens_up_a_lock_file_others_cant_read(tmp_path, run_lock, quick_run, was, now):
+    """A lock file an earlier run made under umask 077 gets read access for
+    the group and others the next time its owner runs, keeping the rest."""
+    make_videos(tmp_path, 1)
+    run_lock.touch()
+    run_lock.chmod(was)
+
+    assert quick_run(tmp_path) == 0
+
+    assert lock_mode(run_lock) == now
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no umask or Unix permissions")
+def test_the_lock_file_of_another_user_is_left_as_it_is(tmp_path, run_lock, quick_run, monkeypatch):
+    make_videos(tmp_path, 1)
+    run_lock.touch()
+    run_lock.chmod(0o600)
+    me = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: me + 1)
+
+    assert quick_run(tmp_path) == 0
+
+    assert lock_mode(run_lock) == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no umask or Unix permissions")
+def test_a_lock_file_whose_mode_cant_be_changed_still_locks(tmp_path, run_lock, quick_run, monkeypatch,
+                                                            capsys, strict_umask):
+    """Opening the lock file up only helps other users' runs, so a failure
+    to do so (e.g. a file system without Unix permissions) is ignored."""
+    make_videos(tmp_path, 1)
+
+    def not_permitted(fd, mode):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+    monkeypatch.setattr(os, "fchmod", not_permitted)
+
+    with lock_held_by_another_run(run_lock):
+        assert quick_run(tmp_path) == 75
+    assert "Couldn't lock" not in capsys.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no umask or Unix permissions")
+def test_a_dry_run_never_changes_the_lock_file(tmp_path, run_lock, quick_run):
+    make_videos(tmp_path, 1)
+    run_lock.touch()
+    run_lock.chmod(0o600)
+
+    assert quick_run(tmp_path, "--dry-run", outcome="changed") == 0
+
+    assert lock_mode(run_lock) == 0o600
+
+
 def test_a_lock_that_cant_be_used_gets_a_warning_and_the_run_carries_on(tmp_path, run_lock, quick_run,
                                                                         monkeypatch, capsys):
     """NFS without its lock daemon can't lock, and a script's folder may not

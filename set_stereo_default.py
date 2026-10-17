@@ -2924,18 +2924,37 @@ def _lock_path() -> Path | None:
 def _open_lock(path: Path, create: bool) -> int | None:
     """Open the lock file at path read-only, which is all a lock needs, and
     return its descriptor; None if it doesn't exist and create is false.
-    Created, it gets mode 0644, so a later run as another user (root one
-    night, the media's owner the next) can open and lock it too. On Linux
-    and macOS a symlink at path is refused (O_NOFOLLOW), so a run as root
-    can't be made to create a file elsewhere. Raises OSError if it can't
-    be opened."""
+    With create, others can read it (see _let_others_read()), so a later
+    run as another user (root one night, the media's owner the next) can
+    open and lock it too. On Linux and macOS a symlink at path is refused
+    (O_NOFOLLOW), so a run as root can't be made to create a file
+    elsewhere. Raises OSError if it can't be opened."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | (os.O_CREAT if create else 0)
     try:
-        return os.open(path, flags, 0o644)
+        fd = os.open(path, flags, 0o644)
     except FileNotFoundError:
         if create:
             raise
         return None
+    if create:
+        _let_others_read(fd)
+    return fd
+
+
+def _let_others_read(fd: int) -> None:
+    """Give the group and others read access to the lock file fd, if this
+    user owns it, keeping the rest of its mode. A umask such as 077, which
+    hardened systems use, leaves a new file 0600 whatever mode it's created
+    with, and a lock file an earlier run made that way is opened up the
+    next time its owner runs. The file is empty, so reading it shows
+    nothing. A failure is ignored: it only keeps other users' runs from
+    seeing this one, and they say so. Windows has no such permissions."""
+    if sys.platform == "win32":
+        return
+    with contextlib.suppress(OSError):
+        st = os.fstat(fd)
+        if st.st_uid == os.geteuid():
+            os.fchmod(fd, stat.S_IMODE(st.st_mode) | 0o044)
 
 
 def _try_lock(fd: int) -> bool:

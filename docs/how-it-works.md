@@ -159,7 +159,7 @@ So two runs never change files at the same time, whatever folders they work on. 
 
 In the Docker image, each `docker run` starts a new container with its own copy of the script. So there, the lock file is in the mounted `/videos` folder, where each container sees it. Two containers that mount the same folder at `/videos` cannot work at the same time. If nothing is mounted at `/videos`, for example when you mount your videos at another path, the image takes no lock.
 
-The operating system releases the lock when a run ends, also after `kill -9` or a power failure. So a run that stopped suddenly never blocks the next run. The lock file stays after the run, and it is empty. Do not delete it while a run works.
+The operating system releases the lock when a run ends, also after `kill -9` or a power failure. So a run that stopped suddenly never blocks the next run. The lock file stays after the run, and it is empty. All users can read it, so a run as another user can also lock it. The script gives this permission also if your umask (a setting that removes permissions from new files) is strict, for example `077`. Do not delete the lock file while a run works.
 
 A dry run does not take the lock, so it never blocks a real run. If another run works, the dry run shows a note. That run can change the files while the dry run shows them.
 
