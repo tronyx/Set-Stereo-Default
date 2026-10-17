@@ -79,7 +79,8 @@ preview every change:
     docker run --rm -it -v "/path/to/videos:/videos" tronyx/set-stereo-default --dry-run
 
 Exit codes: 0 all done, 1 a file had an error, no files matched or a tool is
-missing, 2 invalid options, 130 stopped by Ctrl+C, 143 stopped by SIGTERM.
+missing, 2 invalid options, 75 another run is working, 130 stopped by
+Ctrl+C, 143 stopped by SIGTERM.
 
 Full guide: https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/README.md
 """
@@ -90,7 +91,9 @@ import argparse
 import codecs
 import contextlib
 import copy
+import ctypes
 import dataclasses
+import errno
 import functools
 import importlib
 import io
@@ -98,6 +101,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -113,7 +117,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType, ModuleType
-from typing import Any, Literal, NoReturn
+from typing import Any, BinaryIO, Literal, NoReturn
 
 try:
     from tqdm import tqdm
@@ -143,6 +147,12 @@ grp = _optional_module("grp")
 pwd = _optional_module("pwd")
 """User names (Linux and macOS only; None on Windows)."""
 
+fcntl = _optional_module("fcntl")
+"""File locks on Linux and macOS (None on Windows; see _try_lock())."""
+
+msvcrt = _optional_module("msvcrt")
+"""File locks on Windows (None elsewhere; see _try_lock())."""
+
 DEFAULT_EXTS = {".mkv", ".webm", ".mp4", ".m4v", ".mov", ".avi"}
 """Extensions processed when --ext isn't given."""
 
@@ -165,7 +175,24 @@ DOCKER_VIDEOS = "/videos"
 searches when no path is given."""
 
 TMP_MARKER = ".tmp_remux"
-"""Marks a file's temp copy while it's remuxed, e.g. "movie.mkv.tmp_remux.mkv"."""
+"""Marks a backup's staging file while it's made, e.g.
+"movie.mkv.bak.tmp_remux.mkv" (see make_backup()), and the temp files that
+earlier versions wrote next to the original, which the search still
+reports as leftovers."""
+
+TMP_DIR_PREFIX = "set_stereo_default.tmp."
+"""Starts the name of the private temp folder each remux is written in,
+e.g. "set_stereo_default.tmp.0a1b2c3d" (see _make_tmp_dir()), holding a
+file with the video's own name. The search never looks inside one (see
+_skip_leftover_folder()): one it finds is left over from a run killed
+outright."""
+
+TMP_DIR_RE = re.compile(re.escape(TMP_DIR_PREFIX) + "[0-9a-f]{8}")
+"""The whole name of a temp folder the script makes (see TMP_DIR_PREFIX):
+8 lowercase hex digits follow the prefix. Only a folder named so is
+taken for a leftover, so one the script didn't make, such as a temp
+folder someone renamed, is never skipped or deleted (see
+_warn_if_named_like_tmp_dir())."""
 
 COMMENTARY_NAME_RE = re.compile(r"commentary|audio[ -]?description|descriptive|described|\bdvs\b",
                                 re.IGNORECASE)
@@ -262,6 +289,31 @@ def _escape_bytes(error: UnicodeError) -> tuple[str, int]:
 codecs.register_error("escapebytes", _escape_bytes)
 
 
+_CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+"""Every control character but the line break: C0 (ESC among them), DEL,
+and C1, which includes the one-character form of an ESC sequence that
+some terminals accept."""
+
+
+def _escape_controls(text: str) -> str:
+    r"""text with each control character but the line break written as its
+    escape, e.g. "\x1b" for ESC, the way _escape_bytes() writes a byte that
+    isn't valid UTF-8. Track names and language tags come from the file,
+    and so does a Linux file name, so they can hold an ESC that starts a
+    sequence to clear the terminal, move its cursor or change its title.
+    Escaped, it shows rather than acts. The line break stays, since the
+    script's own messages use it."""
+    return _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
+class _EscapingFormatter(logging.Formatter):
+    """A Formatter whose lines have their control characters escaped (see
+    _escape_controls()), for the console and the log file alike."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _escape_controls(super().format(record))
+
+
 def setup_logging(log_file: str | None) -> None:
     r"""Send log messages to the console, or with --log-file to that file.
     With a log file, warnings and errors still reach the console too, so a
@@ -275,7 +327,9 @@ def setup_logging(log_file: str | None) -> None:
     name that isn't valid UTF-8 reaches the script as surrogate escapes,
     which a strict UTF-8 console, the default in most locales, would
     otherwise refuse, turning each of that file's lines into a logging
-    error and leaving them out of the log file."""
+    error and leaving them out of the log file. Both also write control
+    characters, such as an ESC in a track's language tag, as escapes (see
+    _escape_controls()), so they can't act on the terminal."""
     for old in log.handlers[:]:
         log.removeHandler(old)
         old.close()
@@ -285,10 +339,10 @@ def setup_logging(log_file: str | None) -> None:
     log.setLevel(logging.INFO)
     log.propagate = False
     console = TqdmLoggingHandler() if HAVE_TQDM else logging.StreamHandler(sys.stdout)
-    console.setFormatter(logging.Formatter("%(message)s"))
+    console.setFormatter(_EscapingFormatter("%(message)s"))
     if log_file:
         handler = logging.FileHandler(log_file, mode="a", encoding="utf-8", errors="escapebytes")
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        handler.setFormatter(_EscapingFormatter("%(asctime)s [%(levelname)s] %(message)s"))
         log.addHandler(handler)
         console.setLevel(logging.WARNING)
     log.addHandler(console)
@@ -429,8 +483,30 @@ report_failed_files()."""
 _failed_lock = threading.Lock()
 """Guards _failed_files, which several --jobs threads add to at once."""
 
-Warned = Literal["default", "flags", "tool", "leftover"]
+Warned = Literal["default", "flags", "tool", "leftover", "lookalike"]
 """What a file was warned about, as report_warned_files() groups them."""
+
+LeftoverAction = Literal["report", "delete", "preview"]
+"""What the search does with a leftover from an interrupted run (see
+_dispose_leftover()): report it (the default), delete it
+(--delete-leftovers), or say it would (--delete-leftovers with
+--dry-run)."""
+
+LEFTOVER_MIN_AGE = 3600.0
+"""How long, in seconds, nothing in a leftover must have changed before
+--delete-leftovers deletes it. Another run working on the same folder
+writes to its remux all the time, so its temp folder never looks this old;
+a rare one that does only costs that run one file's error, never data."""
+
+OS_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+"""Files that Finder (.DS_Store) and Explorer (Thumbs.db, desktop.ini) make
+in a folder someone opens, by their names in lowercase (see _os_file())."""
+
+APPLE_DOUBLE_PREFIX = "._"
+"""Starts the name of the file macOS writes beside each file on SMB shares
+and exFAT drives, e.g. "._Movie.mkv", holding Finder metadata, not the
+file's content. The search skips one (see _video_file()), and
+--delete-leftovers disregards one in a temp folder (see _os_file())."""
 
 TROUBLESHOOTING_URL = "https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/troubleshooting.md"
 """The docs page that says what each warning and error means."""
@@ -443,7 +519,11 @@ WARNING_GROUPS: dict[Warned, str] = {
     "flags": ("Fixed, but flags that ffmpeg can't write to MP4, M4V, MOV or AVI files were lost, so "
               "players can't tell, e.g., a commentary track by its flag any more:"),
     "tool": "Fixed, though mkvmerge finished with warnings:",
-    "leftover": "Leftover temp files from an interrupted run, which were skipped. They're safe to delete:",
+    "leftover": ("Leftover temp files and folders from an interrupted run, which were skipped. "
+                 "--delete-leftovers deletes them once nothing in them changed for an hour:"),
+    "lookalike": ("Folders with a name that starts like a temp folder of the script, but is not one that it "
+                  "makes. They were searched like other folders. If one is a temp folder that you renamed, "
+                  "its file is a partial copy of a video, and you can delete it:"),
 }
 """The heading report_warned_files() gives each kind of warning, saying
 what it means, in the order they're listed."""
@@ -456,13 +536,19 @@ report_warned_files()."""
 _warned_lock = threading.Lock()
 """Guards _warned_files, which several --jobs threads add to at once."""
 
+_leftovers_disposed: list[Path] = []
+"""Each leftover --delete-leftovers deleted this run, or with --dry-run would
+have (see _dispose_leftover()), counted by _tell_leftovers(). Only the
+search adds to it, and it runs in one thread, so it needs no lock."""
+
 
 def _reset_run_state() -> None:
     """Forget what an earlier run in this process left behind, so main() can
     run more than once, e.g. when called from other Python code: a stop
     request (which would cancel every file), files that couldn't keep their
     owner, files it warned about and files it couldn't fix (which would be
-    reported again), the headers printed last, and whether this mkvmerge
+    reported again), the leftovers it deleted (which would be counted
+    again), the headers printed last, and whether this mkvmerge
     can keep legacy font types. No remux outlives its run, so _active_procs
     is already empty."""
     _cancelled.clear()
@@ -472,6 +558,7 @@ def _reset_run_state() -> None:
         _failed_files.clear()
     with _warned_lock:
         _warned_files.clear()
+    _leftovers_disposed.clear()
     _last_header.clear()
     _file_context.header = None
     mkvmerge_can_keep_legacy_font_types.cache_clear()
@@ -515,11 +602,56 @@ def _stop_handler(signum: int, frame: FrameType | None) -> NoReturn:
     systemd) reaches only this process, not the remuxes it started.
 
     The request is recorded before the exception is raised, since the
-    exception can be lost (see _check_stop())."""
+    exception can be lost (see _check_stop()).
+
+    Later stops are ignored from here on (see _ignore_stops()): the run is
+    stopping already. Another Stopped would break into the cleanup, or
+    into process_all()'s wait for its --jobs workers, and the summary would
+    then be printed while they still change files."""
     _requested_stop[0] = signum
     _cancelled.set()
+    _ignore_stops()
     _terminate_active_procs()
     raise Stopped(signum)
+
+
+CTRL_C_EVENT = 0
+"""What Windows passes a console control handler for Ctrl+C (see
+_console_ctrl())."""
+
+
+def _console_ctrl(event: int) -> bool:
+    """Record a stop the moment Ctrl+C reaches the console, as _stop_handler()
+    does, and return False, so that Python's own handling goes on to run
+    _stop_handler() in the main thread. Windows calls this in a thread of
+    its own (see _watch_console()), as it sends Ctrl+C to every program in
+    the console, the remuxes included, which stop at once. Python runs
+    _stop_handler() only when the main thread next runs Python code, and
+    with --jobs, waiting for the workers, it may not until one finishes
+    (Python 3.11 for one). A worker whose remux the Ctrl+C stopped would
+    then find no stop recorded and report a failed remux, and one copying
+    a backup would carry on to the end. Recorded only while _stop_handler()
+    handles Ctrl+C, so a stop the script ignores stays ignored."""
+    if event == CTRL_C_EVENT and signal.getsignal(signal.SIGINT) is _stop_handler:
+        _requested_stop[0] = signal.SIGINT
+        _cancelled.set()
+    return False
+
+
+_console_routine: list[Any] = []
+"""The ctypes callback for _console_ctrl() once made, kept so it lives as
+long as Windows may call it (see _watch_console())."""
+
+
+def _watch_console(on: bool) -> None:
+    """Have Windows call _console_ctrl() on each console event while on is
+    true. A failure, such as no console under pythonw, is ignored: Ctrl+C
+    then works as before. Other systems have no console events."""
+    if sys.platform != "win32":
+        return
+    if not _console_routine:
+        _console_routine.append(ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong)(_console_ctrl))
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(_console_routine[0], on)
 
 
 def _stop_reason(exc: BaseException) -> tuple[int, str]:
@@ -544,6 +676,15 @@ def _check_stop() -> None:
     quiet."""
     if _cancelled.is_set():
         raise Stopped(_requested_stop[0])
+
+
+def _cancel_if_stopping() -> None:
+    """Raise Cancelled if a stop was requested. Python only interrupts the
+    main thread, so a --jobs worker never gets the Stopped a stop raises:
+    it sees the request in _cancelled, and asks here at the points where
+    giving up leaves the file as it was (see swap_in() and _copy_data())."""
+    if _cancelled.is_set():
+        raise Cancelled
 
 
 def _unraisable(unraisable: sys.UnraisableHookArgs,
@@ -606,7 +747,9 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
 
     parse_pct(line) returns 0-100 for a progress line and None for anything
     else. With progress.show, a tqdm bar titled label shows this file's
-    progress on the top row, above process_all()'s overall bar.
+    progress on the top row, above process_all()'s overall bar. tqdm
+    writes the title itself, not through the log, so its control
+    characters are escaped here (see _escape_controls()).
     progress.on_progress(pct), if set, is called on every increase and with
     100 on success; process_all() uses it to move the overall bar. Output
     is read as UTF-8, as in run().
@@ -631,7 +774,7 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
         if _cancelled.is_set():
             proc.kill()
         if progress.show and HAVE_TQDM:
-            bar = tqdm(total=100, desc=f"  {label}"[:40], unit="%", leave=False, position=0)
+            bar = tqdm(total=100, desc=f"  {_escape_controls(label)}"[:40], unit="%", leave=False, position=0)
         for line in stdout:
             pct = parse_pct(line)
             if pct is None:
@@ -1147,12 +1290,18 @@ def backup_path(path: Path, replace: bool) -> Path:
     return path.with_name(f"{path.name}.bak.{n}")
 
 
-def make_backup(path: Path, replace: bool = False) -> Path:
-    """Keep the original at backup_path() and return that path. A hard link
-    is instant and needs no room while the remux runs; once the new file
-    replaces the original, the backup holds the original's data on its
-    own, so it takes the original's full size until it's deleted. Where
-    hard links aren't supported, a full copy is made instead.
+def make_backup(path: Path, bak_path: Path) -> Path:
+    """Keep the original at bak_path, as backup_path() chose it, and return
+    bak_path. The caller chooses it, so that swap_in() knows the name, and
+    what was there before, even if a stop lands before this returns.
+
+    A hard link is instant and needs no room while the remux runs; once
+    the new file replaces the original, the backup holds the original's
+    data on its own, so it takes the original's full size until it's
+    deleted. Where hard links aren't supported, a full copy is made
+    instead, written to the disk before it's renamed into place (see
+    _copy_new()). A hard link needs no such flush: it's the original's own
+    data.
 
     The backup is made under a staging name, <name>.bak.tmp_remux.<ext>,
     and renamed into place in one step once it's complete. So a copy that
@@ -1167,7 +1316,6 @@ def make_backup(path: Path, replace: bool = False) -> Path:
     Whatever already has the staging name is removed first, and the copy
     only ever writes a new file (see _copy_new()), so a symlink someone put
     at that name is never written through."""
-    bak_path = backup_path(path, replace)
     staging = bak_path.with_name(bak_path.name + TMP_MARKER + path.suffix)
     staging.unlink(missing_ok=True)
     try:
@@ -1186,10 +1334,27 @@ def make_backup(path: Path, replace: bool = False) -> Path:
 def _copy_new(src: Path, dst: Path) -> None:
     """Copy src to dst, with its permissions and dates, like shutil.copy2(),
     except that dst must not exist yet: copy2() opens whatever is there,
-    following a symlink to wherever it points, while this fails instead."""
+    following a symlink to wherever it points, while this fails instead.
+    The copy is written to the disk before it's closed (see _flush()), so
+    make_backup() never renames a copy into place that a power cut could
+    still empty."""
     with open(src, "rb") as source, open(dst, "xb") as target:
-        shutil.copyfileobj(source, target, 1024 * 1024)
+        _copy_data(source, target)
+        target.flush()
+        os.fsync(target.fileno())
     shutil.copystat(src, dst)
+
+
+def _copy_data(source: BinaryIO, target: BinaryIO) -> None:
+    """Copy what's left of source to target 1 MB at a time, like
+    shutil.copyfileobj(), but raise Cancelled after any chunk once a stop
+    was requested (see _cancel_if_stopping()). A backup copy of a large
+    file can take minutes, and with --jobs the stop doesn't interrupt the
+    worker thread making it, so without this, a stop would wait for the
+    whole copy, longer than docker stop waits before it kills the run."""
+    while chunk := source.read(1024 * 1024):
+        target.write(chunk)
+        _cancel_if_stopping()
 
 
 def _owner(path: Path) -> tuple[int, int]:
@@ -1398,12 +1563,29 @@ def _changed_since(path: Path, snapshot: tuple[int, int] | None) -> bool:
     return snapshot is not None and _snapshot(path) != snapshot
 
 
+def _flush(path: Path) -> None:
+    """Write path's data to the disk itself, not just to the system's cache.
+    ffmpeg and mkvmerge leave their output in the cache, to be written out
+    later, and a rename can reach the disk before the data does. A power
+    cut in between would then leave the video empty or full of zeros on
+    file systems such as XFS, with the original already gone. Opened for
+    writing, since Windows only flushes a file opened that way. Raises
+    OSError if the data couldn't be written (EIO)."""
+    with open(path, "r+b") as file:
+        os.fsync(file.fileno())
+
+
 def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
             keep_dates: bool = False, snapshot: tuple[int, int] | None = None) -> None:
-    """Replace path with the checked remux at tmp_path: keep the original as
-    a backup if backup is set, copy its permissions and owner (and with
-    keep_dates, its access and modification times) onto the new file, then
-    swap the new file in with a single atomic rename.
+    """Replace path with the checked remux at tmp_path: write the remux to
+    the disk (see _flush()), keep the original as a backup if backup is
+    set, copy its permissions and owner (and with keep_dates, its access
+    and modification times) onto the new file, then swap the new file in
+    with a single atomic rename. The flush comes first, while the remux is
+    still writable (copying the permissions can make it read-only on
+    Windows), and before the checks below, so the time it takes on a slow
+    disk doesn't widen the gap between the last check and the swap. If it
+    fails, the OSError is raised with nothing touched.
 
     backup is None for no backup, "replace" to overwrite an existing
     <name>.bak, or "number" to number the new one if <name>.bak exists
@@ -1423,26 +1605,42 @@ def swap_in(path: Path, tmp_path: Path, backup: BackupMode | None,
     would only suggest it had been changed. A backup it replaced is gone,
     though. Whether the swap happened is read from the file system, since
     a stop can land right after the rename, so the backup of a file that
-    was replaced is never removed.
+    was replaced is never removed. Whether the backup was made is read
+    from the file system too, by comparing what's at its name with its
+    _snapshot() from before make_backup(): a stop can land on that
+    function's last lines, after its rename, or before it, when an older
+    <name>.bak it was to replace is still there and must stay.
+
+    A stop requested meanwhile raises Cancelled (see _cancel_if_stopping())
+    before the flush, which can take minutes on a slow disk, and again just
+    before the rename, once the backup is made. With --jobs, the stop
+    doesn't interrupt the worker thread running this, so without these
+    the remux would still be swapped in after the stop.
 
     keep_dates is off by default because tools that spot changed files by
     size and modification time (rsync's default, some backup software)
     could skip a remux that kept both, leaving a stale copy."""
+    _cancel_if_stopping()
+    _flush(tmp_path)
     if _changed_since(path, snapshot):
         raise Superseded
-    bak_path = make_backup(path, replace=(backup == "replace")) if backup else None
+    bak_path = backup_path(path, replace=(backup == "replace")) if backup else None
+    was_there = _snapshot(bak_path) if bak_path is not None else None
     try:
-        if bak_path is not None and _changed_since(path, snapshot):
-            raise Superseded
+        if bak_path is not None:
+            make_backup(path, bak_path)
+            if _changed_since(path, snapshot):
+                raise Superseded
         copy_ownership(path, tmp_path)
         if keep_dates:
             st = os.stat(path)
             os.utime(tmp_path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        _cancel_if_stopping()
         if bak_path is not None and bak_path.suffix != ".bak":
             log.info(f"    {path.name}: kept the original as {bak_path.name}")
         os.replace(tmp_path, path)
     except BaseException:
-        if bak_path is not None and tmp_path.exists():
+        if bak_path is not None and tmp_path.exists() and _snapshot(bak_path) != was_there:
             bak_path.unlink(missing_ok=True)
         raise
 
@@ -1456,10 +1654,11 @@ class Plan:
     _announce()), layout, every stream in the file, which verify_remux()
     compares the remux against, snapshot, the file's _snapshot() from
     before it was probed, which swap_in() compares again before the swap
-    (None skips that), and reordered, True for an AVI reorder, where the
+    (None skips that), reordered, True for an AVI reorder, where the
     target is moved to the first audio track instead of flagged default
-    (see apply_remux()). The streams, duration and layout all come from one
-    probe_streams() call."""
+    (see apply_remux()), and tmp_dir, the private temp folder the remux is
+    written in (see _make_tmp_dir()), None until it's made. The streams,
+    duration and layout all come from one probe_streams() call."""
     path: Path
     streams: list[Stream]
     target_index: int
@@ -1468,6 +1667,7 @@ class Plan:
     layout: list[Stream] = field(default_factory=list)
     snapshot: tuple[int, int] | None = None
     reordered: bool = False
+    tmp_dir: Path | None = None
 
     @property
     def target(self) -> Stream:
@@ -1476,8 +1676,11 @@ class Plan:
 
     @property
     def tmp_path(self) -> Path:
-        """Where the remux is written before it replaces the original."""
-        return self.path.with_name(self.path.name + TMP_MARKER + self.path.suffix)
+        """Where the remux is written before it replaces the original: a file
+        with the video's own name in tmp_dir, or, before that's made (in a
+        dry run), in a placeholder folder whose random part is XXXXXXXX."""
+        folder = self.tmp_dir or self.path.parent / (TMP_DIR_PREFIX + "XXXXXXXX")
+        return folder / self.path.name
 
 
 def _snapshot(path: Path) -> tuple[int, int] | None:
@@ -1494,6 +1697,71 @@ def _snapshot(path: Path) -> tuple[int, int] | None:
     except FileNotFoundError:
         return None
     return st.st_size, st.st_mtime_ns
+
+
+def _read_only(path: Path) -> bool:
+    """True if path has Windows' read-only attribute, which stops it being
+    replaced: renaming the remux over it fails with "Access is denied",
+    but only once the whole remux has run. Never true elsewhere: on Linux
+    and macOS, the folder's permissions decide whether a file can be
+    replaced, not the file's own, so a file without write permission is
+    fixed as usual and keeps its permissions (see copy_ownership()). Nor
+    for a file another program removed after it was probed: the remux
+    reports that in its own words."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return not os.stat(path).st_mode & stat.S_IWRITE
+    except FileNotFoundError:
+        return False
+
+
+def _remove_temp(path: Path) -> None:
+    """Delete the remux temp file at path, if there is one. Windows refuses
+    to delete a read-only file, and a remux becomes read-only when it's
+    given the permissions of an original made read-only during its remux
+    (see copy_ownership()); earlier versions also left such files behind.
+    So on Windows, a refusal clears the read-only attribute and tries once
+    more. Only for the remux: a backup and its staging file are hard links
+    to the original and share its attribute, so clearing it on them would
+    clear it on the original too."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        if sys.platform != "win32":
+            raise
+        os.chmod(path, stat.S_IWRITE)
+        path.unlink(missing_ok=True)
+
+
+def _make_tmp_dir(plan: Plan) -> None:
+    """Make the private temp folder plan's remux is written in, next to the
+    original, and store it in plan.tmp_dir. Its name ends in 8 random
+    characters, and os.mkdir() makes it atomically, failing if the name is
+    already taken, even by a symlink. On Linux and macOS only its owner can
+    enter it, so no other user can put a symlink where the tool writes, or
+    replace the remux before the swap. The name goes into plan.tmp_dir
+    before the folder is made, so _remove_tmp_dir() can always find it
+    wherever a stop lands. Raises OSError if it can't be made (a read-only
+    share, no permission, a full disk)."""
+    plan.tmp_dir = plan.path.parent / (TMP_DIR_PREFIX + secrets.token_hex(4))
+    try:
+        os.mkdir(plan.tmp_dir, 0o700)
+    except OSError:
+        plan.tmp_dir = None
+        raise
+
+
+def _remove_tmp_dir(plan: Plan) -> None:
+    """Remove plan's temp folder, if it has one, with the remux in it if it's
+    still there (see _remove_temp()). If it can't be removed (on Windows, a
+    virus scanner can still hold the remux), it stays for the next run to
+    report as a leftover (see _skip_leftover_folder())."""
+    if plan.tmp_dir is None:
+        return
+    with contextlib.suppress(OSError):
+        _remove_temp(plan.tmp_path)
+        os.rmdir(plan.tmp_dir)
 
 
 @dataclass
@@ -1535,9 +1803,9 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: Note | None = No
     media manager imported. The file is left as it is now, to be fixed on
     the next run.
 
-    Nor is it swapped in unless it's a regular file. _remux_and_swap()
-    removes whatever has the temp name before the remux, but a symlink
-    planted there after that would have been written through by the tool,
+    Nor is it swapped in unless it's a regular file. The remux is written in
+    a private folder (see _make_tmp_dir()), so this is a second line of
+    defence: a symlink there would have been written through by the tool,
     and renaming it over the original would turn the video into a link.
 
     The temp file is removed if the check fails or anything interrupts this
@@ -1548,22 +1816,21 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: Note | None = No
         if not stat.S_ISREG(os.lstat(tmp_path).st_mode):
             if tool_warnings:
                 log.warning(tool_warnings.line(path.name))
-            log.error(f"    {path.name}: {tmp_path.name} isn't a regular file, "
-                      f"keeping original untouched")
-            tmp_path.unlink(missing_ok=True)
+            log.error(f"    {path.name}: the remux isn't a regular file, keeping original untouched")
+            _remove_temp(tmp_path)
             return False
         checked = verify_remux(plan)
         if checked.damaged:
             log.error(f"    {path.name}: {checked.problem}.")
             _note_failure(path, "damaged")
-            tmp_path.unlink(missing_ok=True)
+            _remove_temp(tmp_path)
             return False
         if tool_warnings:
             log.warning(tool_warnings.line(path.name))
         if checked.problem:
             log.error(f"    {path.name}: post-remux check failed ({checked.problem}), "
                       f"keeping original untouched")
-            tmp_path.unlink(missing_ok=True)
+            _remove_temp(tmp_path)
             return False
         try:
             swap_in(path, tmp_path, opts.backup_mode, opts.keep_dates, plan.snapshot)
@@ -1574,16 +1841,16 @@ def check_and_swap_in(plan: Plan, opts: Options, tool_warnings: Note | None = No
                 _note_failure(path, "in use")
             log.error(f"    {path.name}: couldn't swap the new file in ({exc.strerror or exc}), "
                       f"so it's left as it was{hint}")
-            tmp_path.unlink(missing_ok=True)
+            _remove_temp(tmp_path)
             return False
     except Superseded:
         log.error(f"    {path.name}: changed by another program during the remux, so it's "
                   f"left as it is now; run the script again to fix the new version")
         _note_failure(path, "changed")
-        tmp_path.unlink(missing_ok=True)
+        _remove_temp(tmp_path)
         return False
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        _remove_temp(tmp_path)
         raise
     for note in checked.notes:
         log.warning(note.line(path.name))
@@ -1626,6 +1893,19 @@ def _announce(intro: str | None, line: str | None = None) -> None:
     text = "\n".join(part for part in (intro, line) if part)
     if text:
         log.info(text)
+
+
+def _shell_line(cmd: list[str]) -> str:
+    """cmd as one line to paste into a shell, as --dry-run shows it. On
+    Linux and macOS it's quoted as a POSIX shell reads it (shlex.join()).
+    On Windows, POSIX quotes break in both shells there: cmd.exe splits a
+    path with a space, and PowerShell one with an apostrophe. So there it's
+    quoted as subprocess.list2cmdline() does, in double quotes, which
+    cmd.exe and PowerShell both read, apostrophes, & and brackets included.
+    Two rare names still don't come through: in PowerShell, one with $ or
+    a backtick, which it expands inside double quotes, and in cmd.exe, one
+    with a %NAME% in it."""
+    return subprocess.list2cmdline(cmd) if sys.platform == "win32" else shlex.join(cmd)
 
 
 _MKVMERGE_PCT_RE = re.compile(r"#GUI#progress\s+(\d+)%")
@@ -1687,15 +1967,16 @@ def _ffmpeg_pct(duration: float | None) -> Callable[[str], int | None]:
     return parse_pct
 
 
-def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int | None],
+def _remux_and_swap(plan: Plan, make_cmd: Callable[[Path], list[str]], parse_pct: Callable[[str], int | None],
                     opts: Options, progress: Progress, *,
                     warnings_exit: int | None = None) -> bool:
-    """Run a remux command written to plan.tmp_path, then check it and swap it
-    in. Returns True on success (or after a dry run, which only logs the
-    command), False on failure (already logged). Shared by apply_mkv() and
-    apply_remux(), which only build the command. parse_pct reads a
-    percentage from one line of the tool's output, or None for any other
-    line (see run_with_progress()).
+    """Run a remux, then check it and swap it in. Returns True on success
+    (or after a dry run, which only logs the command), False on failure
+    (already logged). Shared by apply_mkv() and apply_remux(), which only
+    know how to build the command: make_cmd(out) builds the tool's command
+    writing the remux to out. parse_pct reads a percentage from one line of
+    the tool's output, or None for any other line (see
+    run_with_progress()).
 
     plan.intro is logged with the dry-run command, or just before the remux
     starts (see _announce()). warnings_exit is an exit code that means the
@@ -1714,50 +1995,64 @@ def _remux_and_swap(plan: Plan, cmd: list[str], parse_pct: Callable[[str], int |
     Stopped the stop raised (see _check_stop()) and the run carries on to
     here, as it always does in a --jobs worker thread.
 
-    Whatever already has the temp name is removed before the remux, so the
-    tool writes a new file rather than through a symlink someone left there
-    (see check_and_swap_in()). A temp name the file system refuses, because
-    the file's name is already near its length limit (255 characters on
-    most), is reported, and the file left alone. The temp file is removed
-    whatever stops the remux: a failure, a stop (Ctrl+C, SIGTERM) or an
-    unexpected error. One try covers everything from starting the remux to
-    swapping it in, check_and_swap_in() included, since a stop can land
-    between any two lines: also after the remux has finished, before the
-    check has started. Until check_and_swap_in() has checked it, the
-    original isn't touched."""
-    path, tmp_path, tool = plan.path, plan.tmp_path, cmd[0]
+    In a dry run, make_cmd() gets plan.tmp_path with its placeholder folder
+    (see Plan.tmp_path). Otherwise the private temp folder is made first
+    (see _make_tmp_dir()), so no other user can make the tool write through
+    a symlink; one that can't be made is reported, and the file left
+    alone. One try covers everything from making the folder to swapping the
+    remux in, check_and_swap_in() included, and its finally removes the
+    folder whatever happens: a success, a failure, a stop (Ctrl+C,
+    SIGTERM) or an unexpected error. A stop that lands during that removal
+    can only be the run's first, since _stop_handler() ignores the ones
+    after it, so the removal is then done again, uninterrupted, before the
+    stop goes on: nothing is left behind. Until check_and_swap_in() has
+    checked the remux, the original isn't touched.
+
+    A file with Windows' read-only attribute (see _read_only()) is reported
+    as an error before anything else, in a dry run too, so the dry run
+    predicts the real one, rather than remuxed only to fail at the swap.
+    It's listed with the files open in another program, under a heading
+    that also says to make the file writable."""
+    path = plan.path
+    if _read_only(path):
+        log.error(f"  {path.name}: the file is read-only, so it's left as it was -- clear its read-only "
+                  f"attribute (Properties in Explorer, or attrib -r), then run the script again")
+        _note_failure(path, "in use")
+        return False
     if opts.dry_run:
-        _announce(plan.intro, "    [dry-run] " + shlex.join(cmd))
+        _announce(plan.intro, "    [dry-run] " + _shell_line(make_cmd(plan.tmp_path)))
         return True
     _announce(plan.intro)
     try:
-        tmp_path.unlink(missing_ok=True)
-    except OSError as exc:
-        log.error(f"    {path.name}: can't use the temp name {tmp_path.name} ({exc.strerror or exc}); "
-                  f"the name may be too long for this file system")
-        return False
-
-    try:
+        try:
+            _make_tmp_dir(plan)
+        except OSError as exc:
+            log.error(f"    {path.name}: can't create a temp folder in {path.parent} ({exc.strerror or exc}), "
+                      f"so it's left as it was")
+            return False
+        cmd = make_cmd(plan.tmp_path)
         returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)
         with_warnings = returncode == warnings_exit and not _cancelled.is_set()
-        if (returncode != 0 and not with_warnings) or not tmp_path.exists():
+        if (returncode != 0 and not with_warnings) or not plan.tmp_path.exists():
             if _cancelled.is_set():
                 raise Cancelled
-            log.error(f"    {path.name}: {tool} remux failed: {output.strip()}")
-            tmp_path.unlink(missing_ok=True)
+            log.error(f"    {path.name}: {cmd[0]} remux failed: {output.strip()}")
             return False
 
         tool_warnings = None
         if with_warnings:
             warnings = _collapse_repeats([_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
                                           for line in output.splitlines() if "warning" in line.lower()])
-            tool_warnings = Note("tool", f"{tool} finished with warnings: "
+            tool_warnings = Note("tool", f"{cmd[0]} finished with warnings: "
                                  + ("; ".join(warnings) or output.strip() or "(no details given)"))
 
         return check_and_swap_in(plan, opts, tool_warnings)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    finally:
+        try:
+            _remove_tmp_dir(plan)
+        except KeyboardInterrupt:
+            _remove_tmp_dir(plan)
+            raise
 
 
 def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
@@ -1807,17 +2102,20 @@ def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bo
                   f"leaving the file alone")
         return False
 
-    cmd = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8"]
+    head = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8"]
     if (any(s.mimetype.lower() in LEGACY_FONT_MIME_TYPES for s in plan.layout)
             and mkvmerge_can_keep_legacy_font_types()):
-        cmd.append("--enable-legacy-font-mime-types")
-    cmd += ["-o", str(plan.tmp_path),
-            "--track-order", ",".join(f"0:{track_id}" for track_id, _ in tracks)]
+        head.append("--enable-legacy-font-mime-types")
+    order = ",".join(f"0:{track_id}" for track_id, _ in tracks)
+    defaults: list[str] = []
     for s, track_id in zip(plan.streams, ids, strict=True):
         flag = "yes" if s.index == plan.target_index else "no"
-        cmd += ["--default-track", f"{track_id}:{flag}"]
-    cmd.append(str(path))
-    return _remux_and_swap(plan, cmd, _mkvmerge_pct, opts, progress or Progress(),
+        defaults += ["--default-track", f"{track_id}:{flag}"]
+
+    def make_cmd(out: Path) -> list[str]:
+        """The mkvmerge command writing the remux to out."""
+        return [*head, "-o", str(out), "--track-order", order, *defaults, str(path)]
+    return _remux_and_swap(plan, make_cmd, _mkvmerge_pct, opts, progress or Progress(),
                            warnings_exit=1)
 
 
@@ -1858,10 +2156,13 @@ def apply_remux(plan: Plan, opts: Options, progress: Progress | None = None) -> 
             disp_args += [f"-disposition:a:{out_idx}", flag]
 
     faststart = ["-movflags", "+faststart"] if ext in MOV_FASTSTART_EXTS else []
-    cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
-           "-i", str(path), *map_args, "-c", "copy", "-map_metadata", "0",
-           *disp_args, *faststart, str(plan.tmp_path)]
-    return _remux_and_swap(plan, cmd, _ffmpeg_pct(plan.duration), opts, progress or Progress())
+
+    def make_cmd(out: Path) -> list[str]:
+        """The ffmpeg command writing the remux to out."""
+        return ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
+                "-i", str(path), *map_args, "-c", "copy", "-map_metadata", "0",
+                *disp_args, *faststart, str(out)]
+    return _remux_and_swap(plan, make_cmd, _ffmpeg_pct(plan.duration), opts, progress or Progress())
 
 
 Outcome = Literal["changed", "unchanged", "skipped", "error", "cancelled"]
@@ -1951,8 +2252,114 @@ def _process_file(path: Path, opts: Options,
     return "changed" if apply(plan, opts, progress) else "error"
 
 
-def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
-          visited: set[str] | None = None) -> Iterator[tuple[Path, os.DirEntry[str], str]]:
+def _dispose_leftover(path: Path, kind: str, action: LeftoverAction) -> None:
+    """Deal with the leftover temp file or folder (kind) at path as action
+    says (see LeftoverAction). Reported, it's warned about and recorded for
+    report_warned_files(). To be deleted, it's first checked (see
+    _leftover_kept_because()): one that must stay is warned about and
+    recorded with the reason. So is one that can't be checked or deleted,
+    such as a temp folder that only the user of a killed run can open, so
+    that it never ends the search. Otherwise it's deleted, or with
+    "preview" only said to be, and isn't listed at the end, but counted
+    (see _tell_leftovers())."""
+    if action == "report":
+        log.warning(f"Skipping leftover temp {kind} from an interrupted run (safe to delete): {path}")
+        _note_warnings(path, [Note("leftover", "")])
+        return
+    try:
+        why = _leftover_kept_because(path)
+    except OSError as exc:
+        why = f"couldn't check it: {exc.strerror or exc}"
+    if why is None and action == "delete":
+        try:
+            _delete_leftover(path)
+        except OSError as exc:
+            why = f"couldn't delete it: {exc.strerror or exc}"
+    if why is not None:
+        log.warning(f"Kept leftover temp {kind} ({why}): {path}")
+        _note_warnings(path, [Note("leftover", why)])
+        return
+    _leftovers_disposed.append(path)
+    if action == "delete":
+        log.info(f"Deleted leftover temp {kind}: {path}")
+    else:
+        log.info(f"Would delete leftover temp {kind}: {path}")
+
+
+def _leftover_kept_because(path: Path) -> str | None:
+    """Why --delete-leftovers must keep the leftover at path, or None if it
+    can go. A symlink is never followed. A temp folder must hold nothing,
+    or the single regular file the script writes there, beside files an
+    operating system makes when someone opens the folder (see _os_file());
+    anything else wasn't written by it. And nothing in it may have changed
+    for LEFTOVER_MIN_AGE seconds, since another run may still be using
+    it."""
+    if path.is_symlink():
+        return "it's a symlink, which is never followed"
+    inside = list(path.iterdir()) if path.is_dir() else []
+    if sum(not _os_file(p) for p in inside) > 1 or any(p.is_symlink() or not p.is_file() for p in inside):
+        return "it holds something the script didn't write"
+    newest = max(os.lstat(p).st_mtime for p in [path, *inside])
+    if time.time() - newest < LEFTOVER_MIN_AGE:
+        return "changed in the last hour, so another run may be using it"
+    return None
+
+
+def _os_file(path: Path) -> bool:
+    """True for a file an operating system makes in a folder someone opens:
+    one of OS_FILES, or a "._" file, which macOS writes beside each file on
+    SMB shares and exFAT drives. --delete-leftovers disregards them when it
+    judges a temp folder's contents, and deletes them with the folder:
+    they only hold view settings, thumbnails and metadata the system makes
+    again, and browsing a leftover folder, as its warning invites, would
+    otherwise keep it for good."""
+    return path.name.lower() in OS_FILES or path.name.startswith(APPLE_DOUBLE_PREFIX)
+
+
+def _delete_leftover(path: Path) -> None:
+    """Delete the leftover at path, a file or a temp folder with its file,
+    read-only ones on Windows included (see _remove_temp()). Raises OSError
+    if it can't."""
+    if path.is_dir():
+        for inside in path.iterdir():
+            _remove_temp(inside)
+        os.rmdir(path)
+    else:
+        _remove_temp(path)
+
+
+def _is_leftover_file(path: Path) -> bool:
+    """True if the file at path was left by a run killed outright: a temp
+    file of an earlier version, e.g. "name.mkv.tmp_remux.mkv", or the
+    partial remux in a private temp folder (see TMP_DIR_RE)."""
+    return path.stem.endswith(TMP_MARKER) or TMP_DIR_RE.fullmatch(path.parent.name) is not None
+
+
+def _skip_leftover_folder(path: Path | str, action: LeftoverAction = "report") -> bool:
+    """True if path is a temp folder (see TMP_DIR_RE), after dealing with
+    it as action says (see _dispose_leftover()). The search must not look
+    inside one: it holds a partial remux with a video's name, which would
+    be taken for that video."""
+    if TMP_DIR_RE.fullmatch(Path(path).name) is None:
+        return False
+    _dispose_leftover(Path(path), "folder", action)
+    return True
+
+
+def _warn_if_named_like_tmp_dir(folder: Path | str) -> None:
+    """Warn about folder, which is being searched, if its name starts like a
+    temp folder's (see TMP_DIR_PREFIX), and list it at the end of the run
+    (see report_warned_files()). Being searched, it isn't one the script
+    makes (see _skip_leftover_folder()), but it may be a temp folder
+    someone renamed and forgot, whose partial remux the search now takes
+    for a video."""
+    if Path(folder).name.startswith(TMP_DIR_PREFIX):
+        log.warning(f"Searching a folder named like a temp folder of the script, which is not one: {folder}")
+        _note_warnings(Path(folder), [Note("lookalike", "")])
+
+
+def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool, visited: set[str] | None = None,
+          leftovers: LeftoverAction = "report") -> Iterator[tuple[Path, os.DirEntry[str], str]]:
     """Yield (path, entry, real path) for every entry in folder that isn't a
     folder, and with recursive, in its subfolders too. entry is the
     os.DirEntry, whose type checks (is_file(), is_symlink()) are answered
@@ -1969,13 +2376,16 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
 
     A folder that can't be opened (no permission, a network share that
     dropped) gets a warning, so its files aren't just silently missing
-    from the run."""
+    from the run. A leftover temp folder (see _skip_leftover_folder()) is
+    never searched, also without recursive, and dealt with as leftovers
+    says (see _dispose_leftover())."""
     if visited is None:
         visited = set()
     real_folder = os.path.realpath(folder)
     if real_folder in visited:
         return
     visited.add(real_folder)
+    _warn_if_named_like_tmp_dir(folder)
     try:
         with os.scandir(folder) as listing:
             entries = list(listing)
@@ -1983,7 +2393,8 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
         log.warning(f"Couldn't search {err.filename}: {err.strerror}")
         return
 
-    subfolders = [e for e in entries if e.is_dir()] if recursive else []
+    folders = [e for e in entries if e.is_dir() and not _skip_leftover_folder(e.path, leftovers)]
+    subfolders = folders if recursive else []
     if not follow_symlinks:
         for entry in subfolders:
             if entry.is_symlink():
@@ -1993,11 +2404,12 @@ def _walk(folder: Path | str, recursive: bool, follow_symlinks: bool,
         if not entry.is_dir():
             yield Path(entry.path), entry, os.path.join(real_folder, entry.name)
     for entry in subfolders:
-        yield from _walk(entry.path, recursive, follow_symlinks, visited)
+        yield from _walk(entry.path, recursive, follow_symlinks, visited, leftovers)
 
 
 def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
-               skip_symlinks: bool = False, follow_symlinks: bool = False) -> Iterator[Path]:
+               skip_symlinks: bool = False, follow_symlinks: bool = False,
+               leftovers: LeftoverAction = "report") -> Iterator[Path]:
     """Yield every file in paths with an extension in exts, path by path in
     the order given, each path's files sorted. Files are used as given;
     folders are searched (into subfolders if recursive). The extension is
@@ -2013,9 +2425,14 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
     reached by more than one path (through links, or given twice) is only
     yielded once, with the first path that reaches it.
 
-    A run killed outright (kill -9, a reboot) can leave a temp file such as
-    "name.mkv.tmp_remux.mkv", which still ends in .mkv. Those are skipped
-    with a warning instead of being treated as videos.
+    A run killed outright (kill -9, a reboot) can leave its private temp
+    folder (see TMP_DIR_PREFIX), which is skipped with a warning, never
+    searched, also when named on its own; a video inside one is a leftover
+    temp file. Earlier versions could leave a temp file such as
+    "name.mkv.tmp_remux.mkv" instead, which still ends in .mkv. Those are
+    skipped with a warning too, instead of being treated as videos.
+    leftovers says what to do with such leftovers instead of the warning:
+    delete them, or say they would be (see LeftoverAction).
 
     A path that doesn't exist (a typo, an unmounted share) is skipped with a
     warning, so a mistake in one of several paths doesn't go unnoticed. In
@@ -2035,7 +2452,9 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
         if p.is_file():
             candidates = [(p, None, None)]
         elif p.is_dir():
-            candidates = _walk(p, recursive, follow_symlinks)
+            if _skip_leftover_folder(p, leftovers):
+                continue
+            candidates = _walk(p, recursive, follow_symlinks, leftovers=leftovers)
         elif not p.exists():
             hint = ""
             if _in_docker() and (p == videos or videos in p.parents) and not videos.exists():
@@ -2048,21 +2467,35 @@ def iter_files(paths: Iterable[Path | str], exts: set[str], recursive: bool,
             continue
         here = []
         for candidate in candidates:
-            found = _video_file(*candidate, exts, skip_symlinks)
+            found = _video_file(*candidate, exts, skip_symlinks, leftovers)
             if found and found[1] not in seen:
                 seen.add(found[1])
                 here.append(found[0])
         yield from sorted(here)
 
 
+def _ruled_out_by_name(path: Path, exts: set[str]) -> bool:
+    """True if the name of path rules it out for _video_file(): it has no
+    extension from exts, or it's a macOS metadata file (see
+    APPLE_DOUBLE_PREFIX). The metadata file is logged: it has a video's
+    extension, and taken for a video it would fail to probe and count as
+    an error, one for each video on a share a Mac has used."""
+    if path.suffix.lower() not in exts:
+        return True
+    if path.name.startswith(APPLE_DOUBLE_PREFIX):
+        log.info(f"Skipping macOS metadata file: {path}")
+        return True
+    return False
+
+
 def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, exts: set[str],
-                skip_symlinks: bool) -> tuple[Path, str] | None:
+                skip_symlinks: bool, leftovers: LeftoverAction = "report") -> tuple[Path, str] | None:
     """Decide about one candidate for iter_files(): return (the file to
     process, its real path), or None to leave it out, logging why where
     that's worth saying. entry and real come from _walk(), or are None for
     a file named on the command line. A symlink becomes the file it points
     to (or is left out with skip_symlinks)."""
-    if path.suffix.lower() not in exts:
+    if _ruled_out_by_name(path, exts):
         return None
     if entry.is_symlink() if entry else path.is_symlink():
         if skip_symlinks:
@@ -2075,9 +2508,8 @@ def _video_file(path: Path, entry: os.DirEntry[str] | None, real: str | None, ex
         path, entry, real = target, None, None
     if not (entry.is_file() if entry else path.is_file()):
         return None
-    if path.stem.endswith(TMP_MARKER):
-        log.warning(f"Skipping leftover temp file from an interrupted run (safe to delete): {path}")
-        _note_warnings(path, [Note("leftover", "")])
+    if _is_leftover_file(path):
+        _dispose_leftover(path, "file", leftovers)
         return None
     return path, real or os.path.realpath(path)
 
@@ -2192,6 +2624,7 @@ class Options:
     avi_reorder: bool = False
     keep_dates: bool = False
     force: bool = False
+    delete_leftovers: bool = False
     log_file: str | None = None
     no_progress: bool = False
     jobs: int = 1
@@ -2270,6 +2703,9 @@ def parse_args(argv: list[str] | None = None) -> Options:
     ap.add_argument("--force", action="store_true",
                     help="Remux even files that are already correct, e.g. to restore Windows "
                          "thumbnails after another tool edited a file in place")
+    ap.add_argument("--delete-leftovers", action="store_true",
+                    help="Delete the temp files and folders that an interrupted run left behind, once "
+                         "nothing in them changed for an hour (with --dry-run, only list them)")
     ap.add_argument("--log-file", default=None, metavar="PATH",
                     help="Write the details to this file instead of the console; warnings, "
                          "errors, the progress bar and the summary still show on the console")
@@ -2313,17 +2749,34 @@ def _tell(opts: Options, line: str) -> None:
         print(line)
 
 
+def _tell_leftovers(opts: Options) -> None:
+    """With --delete-leftovers, tell how many leftovers the search deleted,
+    or with --dry-run would have (see _dispose_leftover()): with --log-file
+    each one's line only goes to the file, and without it, those lines have
+    long scrolled away by the end of the run. The summary ends with it, and
+    a run that ends before the summary tells it too, since its search can
+    already have deleted some."""
+    if opts.delete_leftovers:
+        name = "Leftovers" if opts.dry_run else "Leftovers deleted"
+        _tell(opts, f"{name}: {len(_leftovers_disposed)}")
+
+
 def find_files(opts: Options) -> list[Path]:
     """Every file to process: the ones under opts.paths with an extension
     from --ext (or DEFAULT_EXTS), in the order the paths were given, each
     path's files sorted. So listing one show before another processes it
-    first. See iter_files()."""
+    first. See iter_files(). With --delete-leftovers, the leftovers the
+    search finds are deleted, or with --dry-run only listed (see
+    LeftoverAction)."""
     if opts.ext:
         exts = {("." + e.strip().lstrip(".")).lower() for e in opts.ext.split(",")}
     else:
         exts = DEFAULT_EXTS
+    leftovers: LeftoverAction = "report"
+    if opts.delete_leftovers:
+        leftovers = "preview" if opts.dry_run else "delete"
     return list(iter_files(opts.paths, exts, not opts.no_recursive,
-                           opts.skip_symlinks, opts.follow_symlinks))
+                           opts.skip_symlinks, opts.follow_symlinks, leftovers))
 
 
 def _files_with_backups(files: list[Path]) -> int:
@@ -2392,7 +2845,13 @@ def process_all(files: list[Path], opts: Options, stats: Counter[Outcome]) -> No
       header, repeated if another file printed in between
       (_FileHeaderFilter).
     - Once a stop is requested, files still waiting their turn return
-      "cancelled" straight away instead of starting."""
+      "cancelled" straight away instead of starting.
+    - Each file is counted in stats by the thread that worked on it, as
+      soon as its outcome is known (count_one()), not by the main thread,
+      which a stop interrupts wherever it is. With --jobs > 1, leaving the
+      pool after a stop waits for the files being worked on, and one that
+      finishes during that wait is counted as what happened to it (see
+      swap_in() for why most give up instead)."""
     use_bar = _show_bars(opts)
     counter = opts.log_file and not use_bar and sys.stdout.isatty()
     bars, overall = [], None
@@ -2433,6 +2892,15 @@ def process_all(files: list[Path], opts: Options, stats: Counter[Outcome]) -> No
             advance_overall(1.0 - last_reported)
         return result
 
+    count_lock = threading.Lock()
+
+    def count_one(i: int, f: Path) -> None:
+        """Process file number i with run_one(), and count what happened to it
+        in stats as soon as that's known, in the thread that worked on it."""
+        result = run_one(i, f)
+        with count_lock:
+            stats[result] += 1
+
     def show_counter(n: int) -> None:
         """Show "Processing n/N..." in place, when it stands in for the bars."""
         if counter:
@@ -2442,15 +2910,13 @@ def process_all(files: list[Path], opts: Options, stats: Counter[Outcome]) -> No
         if opts.jobs == 1:
             for i, f in enumerate(files, 1):
                 show_counter(i)
-                result = run_one(i, f)
-                stats[result] += 1
+                count_one(i, f)
         else:
             with ThreadPoolExecutor(max_workers=opts.jobs) as pool:
-                futures = [pool.submit(run_one, i, f) for i, f in enumerate(files, 1)]
+                futures = [pool.submit(count_one, i, f) for i, f in enumerate(files, 1)]
                 for done, fut in enumerate(as_completed(futures), 1):
                     show_counter(done)
-                    result = fut.result()
-                    stats[result] += 1
+                    fut.result()
     finally:
         for bar in reversed(bars):
             with contextlib.suppress(Exception):
@@ -2464,8 +2930,9 @@ def print_summary(stats: Counter[Outcome], opts: Options, partial: bool = False,
     """Log the counts, printing them too with --log-file (see _tell()). In a
     dry run nothing was changed, so the heading says so and "Changed" reads
     "Would change". partial marks a run that was stopped, where cancelled
-    files didn't finish. Each line, and the heading's note, starts with a
-    capital letter."""
+    files didn't finish. With --delete-leftovers, the last line counts the
+    leftovers (see _tell_leftovers()). Each line, and the heading's note,
+    starts with a capital letter."""
     notes = (["partial -- interrupted"] if partial else []) + (
         ["dry run, nothing was changed"] if opts.dry_run else [])
     note = "; ".join(notes)
@@ -2478,12 +2945,145 @@ def print_summary(stats: Counter[Outcome], opts: Options, partial: bool = False,
         _tell(opts, f"{name.capitalize()}: {stats[k]}")
     if cancelled:
         _tell(opts, f"Cancelled: {cancelled}")
+    _tell_leftovers(opts)
+
+
+LOCK_NAME = ".set_stereo_default.lock"
+"""The file whose lock keeps a second run of the script from starting while
+one works (see _lock_run() and _lock_path()). It stays, empty, after the
+run."""
+
+BUSY_EXIT = 75
+"""The exit code when another run holds the run lock: EX_TEMPFAIL from
+BSD's sysexits.h, "try again later", so a cron wrapper can tell it from a
+file that couldn't be fixed."""
+
+
+class Busy(Exception):
+    """Raised by _lock_run() when another run holds the run lock at path."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(str(path))
+        self.path = path
+
+
+def _lock_path() -> Path | None:
+    """Where the run lock is (see _lock_run()): next to the script, so any
+    two runs of it on this computer see each other, whatever folders they
+    work on. In the Docker image (see _in_docker()), each docker run is a
+    new container with its own copy of the script, so the lock is in
+    DOCKER_VIDEOS instead, where every container that mounts the same
+    videos sees it. None there when nothing is mounted: the search reports
+    the missing mount."""
+    if _in_docker():
+        videos = Path(DOCKER_VIDEOS)
+        return videos / LOCK_NAME if videos.is_dir() else None
+    return Path(__file__).resolve().parent / LOCK_NAME
+
+
+def _open_lock(path: Path, create: bool) -> int | None:
+    """Open the lock file at path read-only, which is all a lock needs, and
+    return its descriptor; None if it doesn't exist and create is false.
+    With create, others can read it (see _let_others_read()), so a later
+    run as another user (root one night, the media's owner the next) can
+    open and lock it too. On Linux and macOS a symlink at path is refused
+    (O_NOFOLLOW), so a run as root can't be made to create a file
+    elsewhere. Raises OSError if it can't be opened."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | (os.O_CREAT if create else 0)
+    try:
+        fd = os.open(path, flags, 0o644)
+    except FileNotFoundError:
+        if create:
+            raise
+        return None
+    if create:
+        _let_others_read(fd)
+    return fd
+
+
+def _let_others_read(fd: int) -> None:
+    """Give the group and others read access to the lock file fd, if this
+    user owns it, keeping the rest of its mode. A umask such as 077, which
+    hardened systems use, leaves a new file 0600 whatever mode it's created
+    with, and a lock file an earlier run made that way is opened up the
+    next time its owner runs. The file is empty, so reading it shows
+    nothing. A failure is ignored: it only keeps other users' runs from
+    seeing this one, and they say so. Windows has no such permissions."""
+    if sys.platform == "win32":
+        return
+    with contextlib.suppress(OSError):
+        st = os.fstat(fd)
+        if st.st_uid == os.geteuid():
+            os.fchmod(fd, stat.S_IMODE(st.st_mode) | 0o044)
+
+
+def _try_lock(fd: int) -> bool:
+    """Lock the open file fd for this process, without waiting: True if it's
+    now held, False if another process holds it. The operating system
+    releases it when the process ends, however it ends, so a run that was
+    killed never leaves a stale lock. Raises OSError if the file system
+    can't lock (e.g. NFS without its lock daemon)."""
+    try:
+        if msvcrt is not None:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        elif fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:
+            raise OSError(errno.ENOLCK, "No locks available")
+    except OSError as exc:
+        if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+            return False
+        raise
+    return True
+
+
+def _lock_run(opts: Options) -> int | None:
+    """Take the run lock (see _lock_path()) and return its open file, which
+    _unlock_run() closes, releasing it; None when there's no lock to hold.
+    Raises Busy if another run holds it. A dry run takes no lock and
+    creates no lock file: it only notes another run that holds it, since
+    that run can change what it previews. A lock that can't be used (a
+    script folder that isn't writable, NFS without its lock daemon, a
+    symlink at the name) gets a warning, and the run carries on without
+    it."""
+    path = _lock_path()
+    if path is None:
+        return None
+    fd = None
+    try:
+        fd = _open_lock(path, create=not opts.dry_run)
+        locked = fd is None or _try_lock(fd)
+    except OSError as exc:
+        _unlock_run(fd)
+        log.warning(f"Couldn't lock {path} ({exc.strerror or exc}), so another run at the same time "
+                    f"can't be detected")
+        return None
+    except BaseException:
+        _unlock_run(fd)
+        raise
+    if opts.dry_run:
+        _unlock_run(fd)
+        if not locked:
+            log.warning("Another run of the script is working, so this preview can change while it runs.")
+        return None
+    if not locked:
+        _unlock_run(fd)
+        raise Busy(path)
+    return fd
+
+
+def _unlock_run(fd: int | None) -> None:
+    """Close the run lock's file, if it's open, releasing the lock."""
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the command line: find the files, process each one, and print a
     summary. Returns the exit code: 0 when done, 1 if no files were found,
-    a tool is missing or any file had an error, or 128 + the signal number
+    a tool is missing or any file had an error, 75 if another run of the
+    script is working (see _lock_run()), or 128 + the signal number
     when stopped (130 for Ctrl+C, 143 for SIGTERM). Invalid options exit
     with 2 straight from parse_args(), and a --log-file that can't be
     written (no permission, or a folder rather than a file) returns 2 too.
@@ -2494,7 +3094,7 @@ def main(argv: list[str] | None = None) -> int:
     MKV files to process.
 
     When stopped while files are being processed, the stop handler has
-    already killed every remux and each one has removed its temp file.
+    already killed every remux and each one has removed its temp folder.
     What's left is a partial summary that counts unfinished files as
     cancelled. A stop while looking for files, or at the backup question,
     ends the run with no summary, since nothing has changed. Once every
@@ -2526,9 +3126,11 @@ def main(argv: list[str] | None = None) -> int:
     previous = {sig: signal.signal(sig, _stop_handler) for sig in (signal.SIGINT, signal.SIGTERM)}
     previous_hook = sys.unraisablehook
     sys.unraisablehook = lambda unraisable: _unraisable(unraisable, previous_hook)
+    _watch_console(True)
     try:
         return _run(opts)
     finally:
+        _watch_console(False)
         sys.unraisablehook = previous_hook
         for sig, handler in previous.items():
             signal.signal(sig, handler)
@@ -2554,17 +3156,23 @@ def _run(opts: Options) -> int:
     all of it, so a stop can't arrive between two of them and go
     unhandled; stage says what it interrupted, which decides the message
     and whether there's a partial summary to print. After each phase,
-    _check_stop() catches a stop whose exception was lost."""
+    _check_stop() catches a stop whose exception was lost. Before the
+    search, the run lock is taken (see _lock_run()), so another run that
+    holds it is reported at once, with BUSY_EXIT; the lock is released
+    when the run ends, however it ends."""
     files: list[Path] = []
+    held: int | None = None
     stats: Counter[Outcome] = Counter()
     list_folder = Path(opts.log_file).parent if opts.log_file else Path.cwd()
     stage = "search"
     try:
         if not check_tools(need_mkvmerge=False):
             return 1
+        held = _lock_run(opts)
         files = find_files(opts)
         _check_stop()
         if not files:
+            _tell_leftovers(opts)
             log.error("No matching files found.")
             return 1
         if any(f.suffix.lower() in MKV_EXTS for f in files) and not check_tools(need_mkvmerge=True):
@@ -2576,7 +3184,8 @@ def _run(opts: Options) -> int:
             answer = choose_backup_mode(opts, files)
             _check_stop()
             if answer == "quit":
-                _tell(opts, "Quit before changing any files.")
+                _tell_leftovers(opts)
+                _tell(opts, "Quit before changing any video files.")
                 return 0
             opts = dataclasses.replace(opts, existing_backups=answer)
 
@@ -2584,15 +3193,21 @@ def _run(opts: Options) -> int:
         process_all(files, opts, stats)
         _check_stop()
         _ignore_stops()
+    except Busy as exc:
+        log.error(f"Another run of the script is already working (it holds {exc.path}); try again when it "
+                  f"has finished.")
+        return BUSY_EXIT
     except KeyboardInterrupt as exc:
         _ignore_stops()
         signum, reason = _stop_reason(exc)
         if stage == "search":
-            log.error(f"{reason} while looking for files. No files were changed.")
+            log.error(f"{reason} while looking for files. No video files were changed.")
+            _tell_leftovers(opts)
             return 128 + signum
         print()
         if stage == "question":
-            log.error(f"{reason}. No files were changed.")
+            log.error(f"{reason}. No video files were changed.")
+            _tell_leftovers(opts)
             return 128 + signum
         log.error(f"{reason}. In-flight remuxes were stopped and their "
                   "partial temp files removed; already-finished files are unaffected.")
@@ -2602,6 +3217,8 @@ def _run(opts: Options) -> int:
         finished = sum(stats[k] for k in ("changed", "unchanged", "skipped", "error"))
         print_summary(stats, opts, partial=True, cancelled=len(files) - finished)
         return 128 + signum
+    finally:
+        _unlock_run(held)
 
     report_ownership_failures(list_folder)
     report_warned_files()
