@@ -135,7 +135,7 @@ Ctrl+C and SIGTERM (the signal that `docker stop`, `kill`, and systemd send) sto
 
 After the first Ctrl+C or SIGTERM, the script ignores the next ones until it stops. So a second Ctrl+C does not stop the script sooner. The script usually stops within a few seconds. If it writes a file to a slow disk at that moment, it waits until the write is complete. To stop the script at once, use `kill -9`, or end the process in Task Manager on Windows. Then temporary files can stay, as the next paragraph tells.
 
-Sometimes the script stops without time to clean up. Examples are `kill -9`, a power failure, or a container that does not stop in time. Then a temporary folder can stay next to the original. Its name is `set_stereo_default.tmp.` and 8 random characters, and it holds the unfinished new file. If the script was making a backup, a `<name>.bak.tmp_remux.<ext>` file can stay instead. Earlier versions of the script left a `<name>.tmp_remux.<ext>` file. Ctrl+C or SIGTERM at an exact moment can also leave an empty temporary folder.
+Sometimes the script stops without time to clean up. Examples are `kill -9`, a power failure, or a container that does not stop in time. Then a temporary folder can stay next to the original. Its name is `set_stereo_default.tmp.` and 8 random characters, and it holds the unfinished new file. If the script was making a backup, a `<name>.bak.tmp_remux.<ext>` file can stay instead. Earlier versions of the script left a `<name>.tmp_remux.<ext>` file.
 
 The next run skips these leftovers and shows a warning. You can safely delete them. Only a finished file that passed all the tests replaces the original. A backup gets its real name only when it is complete.
 

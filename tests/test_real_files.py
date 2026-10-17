@@ -36,13 +36,10 @@ TMP_DIR_PREFIX = "set_stereo_default.tmp."
 """How the script's private temp folder's name starts."""
 
 
-def leftovers(folder, recursive=False, allow_empty_folder=False):
-    """Temp files and temp folders in folder (and below, with recursive).
-    With allow_empty_folder, an empty temp folder doesn't count: a stop
-    landing between a swap and the folder's removal leaves one, by design."""
+def leftovers(folder, recursive=False):
+    """Temp files and temp folders in folder (and below, with recursive)."""
     glob = folder.rglob if recursive else folder.glob
-    found = [*glob("*" + TMP_MARKER + "*"), *glob(TMP_DIR_PREFIX + "*")]
-    return [p for p in found if not (allow_empty_folder and p.is_dir() and not any(p.iterdir()))]
+    return [*glob("*" + TMP_MARKER + "*"), *glob(TMP_DIR_PREFIX + "*")]
 
 
 LAYOUTS = {1: "mono", 2: "stereo", 6: "5.1"}
@@ -965,7 +962,7 @@ def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files,
     report = f"{how}\n{output}"
 
     assert "Traceback" not in output, report
-    assert not leftovers(folder, allow_empty_folder=True), f"temp file left behind\n{report}"
+    assert not leftovers(folder), f"temp file left behind\n{report}"
     if code == 0:
         assert counts == {"changed": 6, "unchanged": 0, "skipped": 0, "error": 0}, report
         assert "Partial" not in output, report
@@ -991,7 +988,7 @@ def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files,
     counts = summary(output)
     assert counts["changed"] + counts["unchanged"] == 6 and counts["changed"] + fixed == 6, report
     assert counts["error"] == 0 and counts["skipped"] == 0, report
-    assert not leftovers(folder, allow_empty_folder=True), f"temp file left behind\n{report}"
+    assert not leftovers(folder), f"temp file left behind\n{report}"
     for name in stop_files.digests:
         assert contents(folder / name) == stop_files.contents[name], f"{name} isn't whole\n{report}"
         assert audio_defaults(folder / name) == FIXED, f"{name} isn't fixed\n{report}"

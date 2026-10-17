@@ -8,6 +8,7 @@ import ctypes
 import errno
 import io
 import json
+import linecache
 import logging
 import os
 import shlex
@@ -2411,12 +2412,9 @@ def remux(request, tmp_path, monkeypatch):
     return lambda: apply(video), video, set_outcome
 
 
-def leftover_temp_files(video, allow_empty_folder=False):
-    """Any temp files or temp folders left next to video. With
-    allow_empty_folder, an empty temp folder doesn't count: a stop landing
-    between the swap and the folder's removal leaves one, by design."""
-    found = [*video.parent.glob("*" + ssd.TMP_MARKER + "*"), *video.parent.glob(ssd.TMP_DIR_PREFIX + "*")]
-    return [p for p in found if not (allow_empty_folder and p.is_dir() and not any(p.iterdir()))]
+def leftover_temp_files(video):
+    """Any temp files or temp folders left next to video."""
+    return [*video.parent.glob("*" + ssd.TMP_MARKER + "*"), *video.parent.glob(ssd.TMP_DIR_PREFIX + "*")]
 
 
 def remux_output(cmd):
@@ -2722,6 +2720,33 @@ def test_a_remux_that_cant_be_written_to_disk_keeps_the_original(remux, monkeypa
     assert "unexpected error" not in caplog.text
 
 
+@pytest.mark.parametrize("outcome", ["swapped", "tool failed"])
+def test_a_stop_during_the_temp_folders_removal_still_removes_it(remux, monkeypatch, outcome):
+    """A run's first stop can land while its temp folder is being removed,
+    after a swap or after the tool failed with a partial remux in it. The
+    removal is then done again (later stops are ignored, so nothing can
+    break into that), and the stop goes on: nothing is left behind."""
+    apply, video, set_outcome = remux
+    if outcome == "tool failed":
+        set_outcome("fail")
+    real_remove = ssd._remove_tmp_dir
+    calls = []
+
+    def stopped_the_first_time(plan):
+        calls.append(plan.tmp_dir)
+        if len(calls) == 1:
+            raise ssd.Stopped(signal.SIGINT)
+        real_remove(plan)
+    monkeypatch.setattr(ssd, "_remove_tmp_dir", stopped_the_first_time)
+
+    with pytest.raises(KeyboardInterrupt):
+        apply()
+
+    assert video.read_bytes() == (b"remuxed" if outcome == "swapped" else b"original")
+    assert not leftover_temp_files(video)
+    assert len(calls) == 2
+
+
 def test_a_stop_once_the_backup_is_made_leaves_the_file_as_it_was(remux, monkeypatch):
     """With --jobs, a stop doesn't interrupt a worker thread, which only
     sees it as a request (_cancelled). A worker with a checked remux and a
@@ -2809,9 +2834,13 @@ def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_stray_file(tmp_p
     file and the backup's staging file must be gone afterwards, and the
     original either untouched, with no backup suggesting otherwise, or
     replaced by the checked remux, with its backup holding the original.
-    Each line of each function involved is tried in turn."""
+    Each line of each function involved is tried in turn, but a bare
+    "try:": the trace function could raise there, but a real signal can't,
+    since Python runs signal handlers only at calls, function starts and
+    loops (a "try:" is a no-op from 3.11, and 3.10 exempts setting one up)."""
     code = getattr(ssd, function).__code__
-    lines = sorted({line for _, _, line in code.co_lines() if line is not None and line > code.co_firstlineno})
+    lines = sorted({line for _, _, line in code.co_lines() if line is not None and line > code.co_firstlineno
+                    and linecache.getline(code.co_filename, line).strip() != "try:"})
 
     def remux(cmd, *args, **kwargs):
         remux_output(cmd).write_bytes(b"remuxed")
@@ -2833,8 +2862,7 @@ def test_a_stop_at_any_line_once_the_remux_is_written_leaves_no_stray_file(tmp_p
             reached.append(line)
         finally:
             sys.settrace(previous)
-        assert not leftover_temp_files(video, allow_empty_folder=video.read_bytes() == b"remuxed"), \
-            f"{function} line {line}: {leftover_temp_files(video)}"
+        assert not leftover_temp_files(video), f"{function} line {line}: {leftover_temp_files(video)}"
         backups = {p.name: p.read_bytes() for p in folder.glob("*.bak*")}
         if video.read_bytes() == b"original":
             assert backups == {}, f"{function} line {line}: backup of an unchanged file"

@@ -1935,10 +1935,11 @@ def _remux_and_swap(plan: Plan, make_cmd: Callable[[Path], list[str]], parse_pct
     alone. One try covers everything from making the folder to swapping the
     remux in, check_and_swap_in() included, and its finally removes the
     folder whatever happens: a success, a failure, a stop (Ctrl+C,
-    SIGTERM) or an unexpected error. Only a stop landing between the swap
-    and that removal leaves the folder, empty, for the next run to report.
-    Until check_and_swap_in() has checked the remux, the original isn't
-    touched.
+    SIGTERM) or an unexpected error. A stop that lands during that removal
+    can only be the run's first, since _stop_handler() ignores the ones
+    after it, so the removal is then done again, uninterrupted, before the
+    stop goes on: nothing is left behind. Until check_and_swap_in() has
+    checked the remux, the original isn't touched.
 
     A file with Windows' read-only attribute (see _read_only()) is reported
     as an error before anything else, in a dry run too, so the dry run
@@ -1980,7 +1981,11 @@ def _remux_and_swap(plan: Plan, make_cmd: Callable[[Path], list[str]], parse_pct
 
         return check_and_swap_in(plan, opts, tool_warnings)
     finally:
-        _remove_tmp_dir(plan)
+        try:
+            _remove_tmp_dir(plan)
+        except KeyboardInterrupt:
+            _remove_tmp_dir(plan)
+            raise
 
 
 def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bool:
