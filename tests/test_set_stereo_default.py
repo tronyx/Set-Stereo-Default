@@ -4500,7 +4500,8 @@ def test_a_file_that_finishes_while_a_stop_waits_for_it_is_counted(tmp_path, mon
     is counted as what happened to it, not as cancelled. Here e00.mkv asks
     for the stop once every file is queued and is changed after it;
     e01.mkv finishes first, which is when the main thread sees the stop;
-    later files are cancelled."""
+    later files are cancelled. They wait for the stop to be recorded, as
+    the main thread may take a while to get to it on a busy machine."""
     make_videos(tmp_path, 4)
 
     def fake_process_file(path, args, on_progress=None):
@@ -4509,8 +4510,10 @@ def test_a_file_that_finishes_while_a_stop_waits_for_it_is_counted(tmp_path, mon
             _thread.interrupt_main(signal.SIGINT)
             time.sleep(0.5)
             return "changed"
-        time.sleep(0.1)
-        return "cancelled" if ssd._cancelled.is_set() else "unchanged"
+        if path.name == "e01.mkv":
+            time.sleep(0.1)
+            return "cancelled" if ssd._cancelled.is_set() else "unchanged"
+        return "cancelled" if ssd._cancelled.wait(5) else "unchanged"
 
     monkeypatch.setattr(ssd, "check_tools", lambda need_mkvmerge: True)
     monkeypatch.setattr(ssd, "process_file", fake_process_file)
