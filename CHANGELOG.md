@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+### Fixed
+
+- With `--jobs`, a stop sometimes counted a file as `Error`, with the message `ffprobe failed`. The list at the end then showed the file as a file that the script did not fix. Ctrl+C in a terminal, or a stop for the whole process group, also reaches ffprobe, ffmpeg, and mkvmerge, and they stop at once. The script noticed the stop a moment later. In that moment, a file whose tool had stopped looked like a failure. Now the script waits up to half a second for a stop after a tool fails, and it counts the file as `Cancelled`. The file always stayed as it was. The random stop tests on GitHub found the problem. New tests make sure that the script does this.
+
 ### Project
 
 - A new real-file test on Windows sends Ctrl+C to a run with `--jobs 3` in a console of its own, as a person at the keyboard does. Each file in progress must count as `Cancelled` and stay as it was. On GitHub, the script runs with Python 3.10 in this test, because only Python 3.13 and older can show the problem that #28 fixed. Before, only a check outside the test suite did this.

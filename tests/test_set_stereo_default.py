@@ -2905,6 +2905,86 @@ def test_a_remux_killed_by_a_stop_raises_cancelled(remux, caplog):
     assert "remux failed" not in caplog.text
 
 
+REAL_STOP_GRACE = ssd.STOP_GRACE
+"""The script's wait for a stop after a failed command, which conftest.py
+sets to 0 for every test and stop_later puts back."""
+
+
+@pytest.fixture
+def stop_later(monkeypatch):
+    """Records a stop 50 ms later, from another thread, as the main thread's
+    handler does a moment after Ctrl+C has already killed a tool: soon()
+    from now, after_each_command() after each command run() starts has
+    ended, with the script's real wait for a stop (REAL_STOP_GRACE). Every
+    timer is joined when the test ends, so a stop can't land in the next
+    test."""
+    monkeypatch.setattr(ssd, "STOP_GRACE", REAL_STOP_GRACE)
+    timers = []
+
+    def soon():
+        timers.append(threading.Timer(0.05, ssd._cancelled.set))
+        timers[-1].start()
+
+    class StoppedAfterwards(subprocess.Popen):
+        def communicate(self, *args, **kwargs):
+            output = super().communicate(*args, **kwargs)
+            soon()
+            return output
+
+    def after_each_command():
+        monkeypatch.setattr(subprocess, "Popen", StoppedAfterwards)
+    yield types.SimpleNamespace(soon=soon, after_each_command=after_each_command)
+    for timer in timers:
+        timer.join()
+
+
+def test_a_command_a_stop_killed_is_cancelled_though_the_stop_is_recorded_later(stop_later):
+    """Ctrl+C reaches a tool in the terminal, or in the process group a kill
+    is sent to, as it reaches the script, so the tool can fail before the
+    main thread has recorded the stop. Its failure is still the stop's."""
+    stop_later.after_each_command()
+    with pytest.raises(ssd.Cancelled):
+        ssd.run(python_cmd("import sys; sys.exit(1)"))
+
+
+def test_a_command_that_fails_with_no_stop_is_a_failure():
+    assert ssd.run(python_cmd("import sys; sys.exit(3)")).returncode == 3
+
+
+def test_a_command_that_succeeded_before_a_stop_keeps_its_result(stop_later):
+    """Only a failure waits for a stop: a command that finished fine is done,
+    and waiting after each one would slow every run down."""
+    stop_later.after_each_command()
+    assert ssd.run(python_cmd("print('done')")).stdout.strip() == "done"
+
+
+def test_a_remux_a_stop_killed_is_cancelled_though_the_stop_is_recorded_later(remux, caplog, stop_later):
+    apply, video, set_outcome = remux
+    set_outcome("fail")
+    stop_later.soon()
+    with pytest.raises(ssd.Cancelled):
+        apply()
+    assert video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+    assert "remux failed" not in caplog.text
+
+
+def test_a_file_whose_probe_a_stop_killed_is_cancelled_not_failed(tmp_path, monkeypatch, caplog, stop_later):
+    """With --jobs, a stop to the whole process group can kill a worker's
+    ffprobe before the stop is recorded. The file is cancelled, not listed
+    as one ffprobe couldn't read."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    real_run = ssd.run
+    monkeypatch.setattr(ssd, "run", lambda cmd: real_run(python_cmd("import sys; sys.exit(1)")))
+    stop_later.after_each_command()
+
+    assert ssd.process_file(video, file_args()) == "cancelled"
+
+    assert ssd._failed_files == {}
+    assert "ffprobe failed" not in caplog.text
+
+
 @pytest.mark.parametrize("name", ["v.mkv", "v.mp4"])
 def test_a_remux_killed_by_a_stop_whose_exception_was_lost_counts_as_cancelled(tmp_path, monkeypatch,
                                                                                caplog, name):

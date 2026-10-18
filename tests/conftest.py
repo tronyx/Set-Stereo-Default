@@ -33,10 +33,14 @@ def clean_module_state(monkeypatch):
     outside the Docker image, even when they run inside it, and each one
     checks mkvmerge's options afresh. Runs take no run lock, so no test
     leaves a lock file next to the script; the tests of the lock give it a
-    place of their own. Whatever the test patched is put back before the
-    reset afterwards, since the reset uses the script's own functions."""
+    place of their own. A failed command isn't followed by the wait for a
+    stop (STOP_GRACE), which would add half a second to every test of a
+    failure; the tests of that wait put it back. Whatever the test patched
+    is put back before the reset afterwards, since the reset uses the
+    script's own functions."""
     monkeypatch.delenv(ssd.IN_DOCKER_VAR, raising=False)
     monkeypatch.setattr(ssd, "_lock_path", lambda: None)
+    monkeypatch.setattr(ssd, "STOP_GRACE", 0.0)
     original_handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     _reset()
     yield
