@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-18 · [#30](https://github.com/tronyx/Set-Stereo-Default/pull/30)
+
 ### Project
 
 - The tests that stop the script at random moments now also run on Windows. There, they press Ctrl+C in a hidden console of the script's own, as a person at the keyboard does, with Python 3.10 on GitHub. Before, these tests ran only on Linux and macOS. Against the script before #28, 18 of 100 random stops on Windows failed, with files counted as `Error`.
