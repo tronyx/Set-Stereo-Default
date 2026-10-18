@@ -10,6 +10,8 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 - A new real-file test on Windows sends Ctrl+C to a run with `--jobs 3` in a console of its own, as a person at the keyboard does. Each file in progress must count as `Cancelled` and stay as it was. On GitHub, the script runs with Python 3.10 in this test, because only Python 3.13 and older can show the problem that #28 fixed. Before, only a check outside the test suite did this.
 - The license badge in the README sometimes showed "invalid" on a gray background. shields.io asked GitHub for the license each time, showed this when the request failed, and then kept the failed badge for 4 hours. Now the badge is static, so it always shows MIT.
+- New tests cover six error paths of the script that no test reached before. Examples are a leftover that the script cannot delete, and a stop while the script takes the run lock. The test of a lock that cannot be used now makes the lock call of the system fail, instead of replacing the function of the script that locks.
+- GitHub now combines the coverage that the logic tests measure on Linux, macOS, and Windows. So code that runs on only one system counts where it runs, for example the handler for Ctrl+C on Windows. The coverage badge shows the combined total. Before, it showed the coverage on Linux only, which went from 99% to 98% with the code that #28 added.
 
 ## 2026-10-17 · [#28](https://github.com/tronyx/Set-Stereo-Default/pull/28)
 

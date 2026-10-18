@@ -869,6 +869,27 @@ def test_delete_leftovers_keeps_a_temp_folder_it_cant_look_into(tmp_path, monkey
     assert ssd._warned_files == [(str(leftover), "leftover", why)]
 
 
+def test_delete_leftovers_keeps_a_leftover_it_cant_delete(tmp_path, monkeypatch, caplog):
+    """A leftover that passes every check can still refuse to go, such as a
+    file a virus scanner holds on Windows. It's kept with the reason, isn't
+    counted as deleted, and the search carries on."""
+    leftover = make_leftover_folder(tmp_path, 7200)
+    (tmp_path / "a.mkv").write_bytes(b"")
+
+    def refused(path):
+        raise PermissionError(errno.EACCES, "Permission denied", str(path))
+    monkeypatch.setattr(ssd, "_delete_leftover", refused)
+
+    found = list(ssd.iter_files([tmp_path], ssd.DEFAULT_EXTS, True, leftovers="delete"))
+
+    why = "couldn't delete it: Permission denied"
+    assert found == [tmp_path / "a.mkv"]
+    assert leftover.exists()
+    assert f"Kept leftover temp folder ({why}): {leftover}" in caplog.text
+    assert ssd._warned_files == [(str(leftover), "leftover", why)]
+    assert ssd._leftovers_disposed == []
+
+
 def test_delete_leftovers_never_follows_a_symlink(tmp_path, caplog):
     """A symlink with a temp folder's name is kept, and what it points to is
     never touched."""
@@ -2798,6 +2819,57 @@ def test_a_remux_that_isnt_a_regular_file_is_never_swapped_in(tmp_path, monkeypa
                              "    v.mkv: the remux isn't a regular file, keeping original untouched"]
     assert not video.is_symlink() and video.read_bytes() == b"original"
     assert not leftover_temp_files(video)
+
+
+def test_a_remux_that_isnt_a_regular_file_is_refused_without_warnings_too(tmp_path, monkeypatch, caplog):
+    """The same when mkvmerge gave no warnings: only the refusal is logged."""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_bytes(b"keep me")
+
+    def remux_through_a_planted_symlink(cmd, *args, **kwargs):
+        tmp = remux_output(cmd)
+        try:
+            tmp.symlink_to(elsewhere)
+        except OSError as exc:
+            pytest.skip(f"can't create symlinks here: {exc}")
+        tmp.write_bytes(b"remuxed")
+        return 0, ""
+    monkeypatch.setattr(ssd, "run_with_progress", remux_through_a_planted_symlink)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is False
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert messages[-1] == "    v.mkv: the remux isn't a regular file, keeping original untouched"
+    assert "finished with warnings" not in caplog.text
+    assert not video.is_symlink() and video.read_bytes() == b"original"
+    assert not leftover_temp_files(video)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows clears the read-only attribute and tries again")
+def test_a_remux_that_cant_be_deleted_stays_for_the_next_run_to_report(remux, monkeypatch):
+    """Outside Windows, a refusal to delete the remux (e.g. a file system that
+    keeps the file immutable) isn't retried. The original is untouched, and
+    the temp folder stays for the next run to report as a leftover."""
+    apply, video, set_outcome = remux
+    set_outcome("fail")
+    real_unlink = Path.unlink
+    tries = []
+
+    def refused(self, missing_ok=False):
+        if self.parent.name.startswith(ssd.TMP_DIR_PREFIX):
+            tries.append(self)
+            raise PermissionError(errno.EPERM, "Operation not permitted", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+    monkeypatch.setattr(Path, "unlink", refused)
+
+    assert apply() is False
+
+    assert len(tries) == 1
+    assert video.read_bytes() == b"original"
+    assert [p.name[:len(ssd.TMP_DIR_PREFIX)] for p in leftover_temp_files(video)] == [ssd.TMP_DIR_PREFIX]
 
 
 def test_successful_remux_replaces_the_original_and_backs_it_up(remux):
@@ -4971,14 +5043,54 @@ def test_a_lock_that_cant_be_used_gets_a_warning_and_the_run_carries_on(tmp_path
     """NFS without its lock daemon can't lock, and a script's folder may not
     be writable. The run carries on, saying it can't detect another run."""
     make_videos(tmp_path, 1)
-
-    def no_locks(fd):
-        raise OSError(errno.ENOLCK, "No locks available")
-    monkeypatch.setattr(ssd, "_try_lock", no_locks)
+    break_locking(monkeypatch, OSError(errno.ENOLCK, "No locks available"))
 
     assert quick_run(tmp_path) == 0
     assert (f"Couldn't lock {run_lock} (No locks available), so another run at the same time can't be "
             f"detected") in capsys.readouterr().out
+
+
+def break_locking(monkeypatch, exc):
+    """Make the system's call that locks a file (msvcrt.locking on Windows,
+    fcntl.flock elsewhere) raise exc."""
+    def failing(*args):
+        raise exc
+    if ssd.msvcrt is not None:
+        monkeypatch.setattr(ssd.msvcrt, "locking", failing)
+    else:
+        monkeypatch.setattr(ssd.fcntl, "flock", failing)
+
+
+def test_a_lock_in_a_missing_folder_gets_a_warning_and_the_run_carries_on(tmp_path, monkeypatch, quick_run,
+                                                                         capsys):
+    """The lock file can't be made in a folder that's gone, such as a share
+    that dropped. The run carries on, saying it can't detect another run."""
+    make_videos(tmp_path, 1)
+    lock = tmp_path / "gone" / ssd.LOCK_NAME
+    monkeypatch.setattr(ssd, "_lock_path", lambda: lock)
+
+    assert quick_run(tmp_path) == 0
+    assert f"Couldn't lock {lock} (No such file or directory)" in capsys.readouterr().out
+
+
+def test_a_stop_while_the_lock_is_taken_closes_the_lock_file(tmp_path, run_lock, monkeypatch):
+    """Ctrl+C can land while the lock is being taken. The lock file is closed
+    before the stop goes on, rather than held open until the process ends."""
+    opened = []
+    real_open = ssd._open_lock
+
+    def recorded(path, create):
+        fd = real_open(path, create)
+        opened.append(fd)
+        return fd
+    monkeypatch.setattr(ssd, "_open_lock", recorded)
+    break_locking(monkeypatch, KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        ssd._lock_run(ssd.parse_args([str(tmp_path)]))
+
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
 
 
 def test_the_run_lock_is_next_to_the_script():

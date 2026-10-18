@@ -65,6 +65,6 @@ python -m coverage run -m pytest
 python -m coverage report
 ```
 
-GitHub does the same on each run and shows the result on the summary page of the run. The result is for information only, and it never makes a build fail. The coverage badge in the [README](../README.md) shows the total for the newest push to `master`.
+GitHub does the same on Linux, macOS, and Windows on each run. Then it combines the three results, because some code of the script runs on only one system, for example the handler for Ctrl+C on Windows. GitHub shows the combined result on the summary page of the run. The result is for information only, and it never makes a build fail. The coverage badge in the [README](../README.md) shows the total for the newest push to `master`.
 
 Coverage counts only the code that runs in the test process. The logic tests reach almost every line. They run the code of the script that starts ffmpeg and mkvmerge, but with the small Python stand-ins instead of the tools. The real-file tests run the script as a separate program, so they do not add to the number.
