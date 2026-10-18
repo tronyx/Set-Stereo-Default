@@ -913,34 +913,14 @@ def stop_files(tmp_path_factory):
                      {f.name: contents(f) for f in files}, seconds)
 
 
-@pytest.mark.skipif(sys.platform == "win32",
-                    reason="Windows has no SIGTERM, and Ctrl+C can't be sent to one process")
-@pytest.mark.parametrize("case", range(STOP_CASES),
-                         ids=[f"seed={FUZZ_SEED}-{i}" for i in range(STOP_CASES)])
-def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files, case):
-    """Ctrl+C or SIGTERM at a random moment of a run, sent the way a
-    terminal does (to the script and its remux alike) or the way docker
-    stop and kill do (to the script alone), with a random --jobs and
-    sometimes --backup. Wherever it lands, the script must exit with that
-    signal's code and a partial summary, or with 0 if it had finished, and
-    never with a traceback; leave no temp file; leave every file either as
-    it was or properly fixed, and every backup a copy of the original; and
-    a second run must finish the job. Replay a failing case with
-    SSD_FUZZ_SEED set to the seed in its ID."""
-    rng = random.Random(f"{FUZZ_SEED}-stop-{case}")
-    folder = tmp_path / "videos"
-    shutil.copytree(stop_files.folder, folder)
-    jobs = rng.choice([1, 1, 2, 3])
-    backup = ["--backup", "--existing-backups", "replace"] if rng.random() < 0.3 else []
-    sig = rng.choice([signal.SIGINT, signal.SIGTERM])
-    whole_group = rng.random() < 0.5
-    delay = rng.uniform(0, stop_files.seconds)
-    how = (f"{sig.name} to the {'whole group' if whole_group else 'script only'} {delay:.2f}s "
-           f"after the search, --jobs {jobs}{' --backup' if backup else ''}")
-
-    proc = subprocess.Popen([sys.executable, "-u", str(SCRIPT), "--no-progress", "--jobs", str(jobs),
-                             *backup, str(folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, start_new_session=True)
+def stop_by_signal(args, sig, whole_group, delay, how):
+    """Run the script with args, and send it sig delay seconds after it said
+    how many files it found: to its whole process group, as a terminal's
+    Ctrl+C reaches the remux too, or to the script only, as docker stop and
+    kill do. how describes the case for a failure. Returns (exit code,
+    output, whether the signal was sent)."""
+    proc = subprocess.Popen([sys.executable, "-u", str(SCRIPT), *args], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, start_new_session=True)
     lines = []
     reader = threading.Thread(target=lambda: lines.extend(iter(proc.stdout.readline, "")), daemon=True)
     reader.start()
@@ -957,7 +937,41 @@ def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files,
     finally:
         proc.kill()
     reader.join(timeout=10)
-    code, output = proc.returncode, "".join(lines)
+    return proc.returncode, "".join(lines), stopped
+
+
+@pytest.mark.parametrize("case", range(STOP_CASES),
+                         ids=[f"seed={FUZZ_SEED}-{i}" for i in range(STOP_CASES)])
+def test_a_stop_at_a_random_moment_leaves_every_file_whole(tmp_path, stop_files, case):
+    """Ctrl+C or SIGTERM at a random moment of a run, sent the way a
+    terminal does (to the script and its remux alike) or the way docker
+    stop and kill do (to the script alone), with a random --jobs and
+    sometimes --backup. Windows has no SIGTERM, and Ctrl+C there always
+    reaches the whole console, so there it's always that (see
+    stop_in_the_console()). Wherever it lands, the script must exit with that
+    signal's code and a partial summary, or with 0 if it had finished, and
+    never with a traceback; leave no temp file; leave every file either as
+    it was or properly fixed, and every backup a copy of the original; and
+    a second run must finish the job. Replay a failing case with
+    SSD_FUZZ_SEED set to the seed in its ID."""
+    rng = random.Random(f"{FUZZ_SEED}-stop-{case}")
+    folder = tmp_path / "videos"
+    shutil.copytree(stop_files.folder, folder)
+    jobs = rng.choice([1, 1, 2, 3])
+    backup = ["--backup", "--existing-backups", "replace"] if rng.random() < 0.3 else []
+    sig = rng.choice([signal.SIGINT, signal.SIGTERM])
+    whole_group = rng.random() < 0.5
+    delay = rng.uniform(0, stop_files.seconds)
+    if sys.platform == "win32":
+        sig, whole_group = signal.SIGINT, True
+    how = (f"{sig.name} to the {'whole group' if whole_group else 'script only'} {delay:.2f}s "
+           f"after the search, --jobs {jobs}{' --backup' if backup else ''}")
+    args = ["--no-progress", "--jobs", str(jobs), *backup, str(folder)]
+
+    if sys.platform == "win32":
+        code, output, stopped = stop_in_the_console(folder, tmp_path / "output.txt", f"found={delay}", *args)
+    else:
+        code, output, stopped = stop_by_signal(args, sig, whole_group, delay, how)
     counts = summary(output)
     report = f"{how}\n{output}"
 
@@ -1299,17 +1313,17 @@ def test_a_run_killed_outright_leaves_a_temp_folder_the_next_run_reports(tmp_pat
 
 
 CTRL_C_PYTHON = os.environ.get("SSD_CTRL_C_PYTHON") or sys.executable
-"""The Python that runs the script in the console Ctrl+C test. CI sets it to
-the oldest one supported: on Windows, Python 3.13 and older can't
-interrupt the main thread's wait for the --jobs workers, which the test
-needs to catch the stop being recorded too late. 3.14 and newer can, so
-under them it passes either way."""
+"""The Python that runs the script when a test presses Ctrl+C in its console
+(see stop_in_the_console()). CI sets it to the oldest one supported: on
+Windows, Python 3.13 and older can't interrupt the main thread's wait for
+the --jobs workers, which a test needs to catch the stop being recorded
+too late. 3.14 and newer can, so under them it passes either way."""
 
 CONSOLE_CTRL_C = """\
-import ctypes, subprocess, sys, time
+import ctypes, re, subprocess, sys, time
 from pathlib import Path
 
-python, script, folder, output = sys.argv[1:5]
+python, folder, output, wait, *args = sys.argv[1:]
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 
@@ -1320,26 +1334,53 @@ def running():
         return 0
 
 
+def found():
+    try:
+        text = Path(output).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return re.search("^Found [0-9]+ file", text, re.MULTILINE) is not None
+
+
+kind, _, value = wait.partition("=")
+ready = (lambda: running() >= int(value)) if kind == "remuxes" else found
 kernel32.SetConsoleCtrlHandler(None, False)
 with open(output, "w", encoding="utf-8") as out:
-    run = subprocess.Popen([python, script, folder, "--jobs", "3", "--no-progress"],
-                           stdout=out, stderr=subprocess.STDOUT)
+    run = subprocess.Popen([python, "-u", *args], stdout=out, stderr=subprocess.STDOUT)
     kernel32.SetConsoleCtrlHandler(None, True)
     deadline = time.monotonic() + 120
-    while run.poll() is None and time.monotonic() < deadline:
-        if running() >= 3:
-            kernel32.GenerateConsoleCtrlEvent(0, 0)
-            break
+    while run.poll() is None and time.monotonic() < deadline and not ready():
         time.sleep(0.01)
+    if kind == "found":
+        time.sleep(float(value))
+    if run.poll() is None:
+        Path(output + ".sent").touch()
+        kernel32.GenerateConsoleCtrlEvent(0, 0)
     sys.exit(run.wait(timeout=120))
 """
-"""Runs the script with --jobs 3 in this program's console, then presses
-Ctrl+C there once three remuxes are running, as a person at the keyboard
-would: Windows sends it to every program in the console. argv: the Python
-to run the script with, the script, the folder, and the file for its
-output; exits with the script's exit code. A process inherits "ignore
-Ctrl+C" from its parent (Git Bash passes it on), so this turns it off
-before starting the script, and on for itself only after."""
+"""Runs the script in this program's console, then presses Ctrl+C there as
+a person at the keyboard would: Windows sends it to every program in the
+console, the remuxes too. argv: the Python to run the script with, the
+folder it works on, the file for its output, when to press Ctrl+C, and
+the script with its arguments. When is "remuxes=N", once N remuxes are
+running, or "found=S", S seconds after the script said how many files it
+found. Ctrl+C is only pressed if the script is still running, and then
+the file <output>.sent is made. Exits with the script's exit code. A
+process inherits "ignore Ctrl+C" from its parent (Git Bash passes it on),
+so this turns it off before starting the script, and on for itself only
+after."""
+
+
+def stop_in_the_console(folder, output, wait, *args):
+    """Run the script with args on Windows, in a hidden console of its own,
+    and press Ctrl+C there when wait says (see CONSOLE_CTRL_C). Returns (exit
+    code, output, whether Ctrl+C was pressed)."""
+    hidden = subprocess.STARTUPINFO(dwFlags=subprocess.STARTF_USESHOWWINDOW, wShowWindow=0)
+    run = subprocess.run([sys.executable, "-I", "-c", CONSOLE_CTRL_C, CTRL_C_PYTHON, str(folder), str(output),
+                          wait, str(SCRIPT), *map(str, args)],
+                         creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=hidden, timeout=300, check=False,
+                         env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    return run.returncode, output.read_text(encoding="utf-8"), Path(f"{output}.sent").exists()
 
 
 @pytest.fixture(scope="module")
@@ -1376,15 +1417,11 @@ def test_ctrl_c_in_the_console_cancels_the_files_in_progress(tmp_path, long_vide
     for name in names:
         shutil.copyfile(long_video, folder / name)
     original = digest(long_video)
-    output = tmp_path / "output.txt"
-    hidden = subprocess.STARTUPINFO(dwFlags=subprocess.STARTF_USESHOWWINDOW, wShowWindow=0)
 
-    run = subprocess.run([sys.executable, "-I", "-c", CONSOLE_CTRL_C, CTRL_C_PYTHON, str(SCRIPT), str(folder),
-                          str(output)],
-                         creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=hidden, timeout=300, check=False)
+    code, out, _ = stop_in_the_console(folder, tmp_path / "output.txt", "remuxes=3",
+                                       folder, "--jobs", "3", "--no-progress")
 
-    out = output.read_text(encoding="utf-8")
-    assert run.returncode == 130, f"exit code {run.returncode}\n{out}"
+    assert code == 130, f"exit code {code}\n{out}"
     assert summary(out) == {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0, "cancelled": 3}, out
     assert "couldn't be fixed" not in out and "remux failed" not in out, out
     for name in names:
