@@ -32,6 +32,8 @@ Each run also tries 30 random layouts, and GitHub tries 300 layouts every week. 
 
 On Linux and macOS, the tests also stop the script with Ctrl+C or SIGTERM at 10 random moments of a run. The weekly run uses 100 moments. The tests use a random `--jobs` value, and sometimes `--backup`. They make sure that the script stops safely, and that each file is unchanged or correctly fixed. They also make sure that a second run completes the work.
 
+On Windows, Ctrl+C goes to every program in the console. So a test gives the script a hidden console of its own, starts it with `--jobs 3`, and sends Ctrl+C there while three remuxes run. Each file must count as `Cancelled` and stay unchanged, and no temporary folder must stay. On Windows, Python 3.13 and older notice the Ctrl+C later than newer versions. Only with these versions can the test find a stop that the script records too late. So GitHub runs the script in this test with Python 3.10. To do the same, set `SSD_CTRL_C_PYTHON` to the path of an older Python.
+
 The layouts and the moments come from a seed (a start value for the random numbers). The ID of each test shows its seed. To run a failure again, set `SSD_FUZZ_SEED=<seed>`. To set the number of tries, set `SSD_FUZZ_CASES=<count>`.
 
 When the tests do not run as root, they also try a folder without write permission and a file without read permission. In the Docker image, GitHub runs the tests as `nobody`. There, the tests also try a disk of 2 MB that is too small for the remux. To try the full disk on a different system, set `SSD_FULL_DISK` to a folder on a small file system. In each of these cases, the script must report the problem, leave the file as it was, and leave no files behind.
@@ -63,6 +65,6 @@ python -m coverage run -m pytest
 python -m coverage report
 ```
 
-GitHub does the same on each run and shows the result on the summary page of the run. The result is for information only, and it never makes a build fail. The coverage badge in the [README](../README.md) shows the total for the newest push to `master`.
+GitHub does the same on Linux, macOS, and Windows on each run. Then it combines the three results, because some code of the script runs on only one system, for example the handler for Ctrl+C on Windows. GitHub shows the combined result on the summary page of the run. The result is for information only, and it never makes a build fail. The coverage badge in the [README](../README.md) shows the total for the newest push to `master`.
 
 Coverage counts only the code that runs in the test process. The logic tests reach almost every line. They run the code of the script that starts ffmpeg and mkvmerge, but with the small Python stand-ins instead of the tools. The real-file tests run the script as a separate program, so they do not add to the number.

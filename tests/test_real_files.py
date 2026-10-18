@@ -1298,6 +1298,100 @@ def test_a_run_killed_outright_leaves_a_temp_folder_the_next_run_reports(tmp_pat
     assert sorted(p.name for p in folder.glob("*.bak")) == ([f"{n}.bak" for n in names] if backup else [])
 
 
+CTRL_C_PYTHON = os.environ.get("SSD_CTRL_C_PYTHON") or sys.executable
+"""The Python that runs the script in the console Ctrl+C test. CI sets it to
+the oldest one supported: on Windows, Python 3.13 and older can't
+interrupt the main thread's wait for the --jobs workers, which the test
+needs to catch the stop being recorded too late. 3.14 and newer can, so
+under them it passes either way."""
+
+CONSOLE_CTRL_C = """\
+import ctypes, subprocess, sys, time
+from pathlib import Path
+
+python, script, folder, output = sys.argv[1:5]
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def running():
+    try:
+        return sum(1 for p in Path(folder).glob("set_stereo_default.tmp.*") if any(p.iterdir()))
+    except OSError:
+        return 0
+
+
+kernel32.SetConsoleCtrlHandler(None, False)
+with open(output, "w", encoding="utf-8") as out:
+    run = subprocess.Popen([python, script, folder, "--jobs", "3", "--no-progress"],
+                           stdout=out, stderr=subprocess.STDOUT)
+    kernel32.SetConsoleCtrlHandler(None, True)
+    deadline = time.monotonic() + 120
+    while run.poll() is None and time.monotonic() < deadline:
+        if running() >= 3:
+            kernel32.GenerateConsoleCtrlEvent(0, 0)
+            break
+        time.sleep(0.01)
+    sys.exit(run.wait(timeout=120))
+"""
+"""Runs the script with --jobs 3 in this program's console, then presses
+Ctrl+C there once three remuxes are running, as a person at the keyboard
+would: Windows sends it to every program in the console. argv: the Python
+to run the script with, the script, the folder, and the file for its
+output; exits with the script's exit code. A process inherits "ignore
+Ctrl+C" from its parent (Git Bash passes it on), so this turns it off
+before starting the script, and on for itself only after."""
+
+
+@pytest.fixture(scope="module")
+def long_video(tmp_path_factory):
+    """A video with 300,000 tiny frames, so that mkvmerge takes seconds to
+    remux it: one minute at 100 frames a second, joined to itself 50 times
+    by mkvmerge, which takes seconds where making it all with ffmpeg takes
+    minutes. Its default audio track is the 5.1 one, so it needs a remux."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    folder = tmp_path_factory.mktemp("long")
+    clip, video = folder / "clip.mkv", folder / "long.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=16x16:r=100:d=60",
+                    "-f", "lavfi", "-t", "60", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+                    "-f", "lavfi", "-t", "60", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "rawvideo", "-pix_fmt", "yuv420p",
+                    "-c:a", "ac3", "-disposition:a:0", "default", "-disposition:a:1", "0", str(clip)],
+                   check=True)
+    subprocess.run(["mkvmerge", "-q", "-o", str(video), str(clip), *["+", str(clip)] * 49], check=True)
+    return video
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows sends Ctrl+C to the whole console")
+def test_ctrl_c_in_the_console_cancels_the_files_in_progress(tmp_path, long_video):
+    """On Windows, Ctrl+C reaches every program in the console, so the
+    remuxes stop at once, while with --jobs the script's main thread is
+    waiting for its workers. Each worker whose remux stopped must still
+    find the stop recorded, and count its file as cancelled, not as a
+    failed remux to list at the end. The run gets a hidden console of its
+    own (see CONSOLE_CTRL_C), which a stand-in for the person at the
+    keyboard presses Ctrl+C in once three remuxes are running."""
+    folder = tmp_path / "videos"
+    folder.mkdir()
+    names = [f"movie{i}.mkv" for i in range(3)]
+    for name in names:
+        shutil.copyfile(long_video, folder / name)
+    original = digest(long_video)
+    output = tmp_path / "output.txt"
+    hidden = subprocess.STARTUPINFO(dwFlags=subprocess.STARTF_USESHOWWINDOW, wShowWindow=0)
+
+    run = subprocess.run([sys.executable, "-I", "-c", CONSOLE_CTRL_C, CTRL_C_PYTHON, str(SCRIPT), str(folder),
+                          str(output)],
+                         creationflags=subprocess.CREATE_NEW_CONSOLE, startupinfo=hidden, timeout=300, check=False)
+
+    out = output.read_text(encoding="utf-8")
+    assert run.returncode == 130, f"exit code {run.returncode}\n{out}"
+    assert summary(out) == {"changed": 0, "unchanged": 0, "skipped": 0, "error": 0, "cancelled": 3}, out
+    assert "couldn't be fixed" not in out and "remux failed" not in out, out
+    for name in names:
+        assert digest(folder / name) == original, f"{name} was touched\n{out}"
+    assert leftovers(folder) == [], out
+
+
 AUDIO_CODECS = {
     "aac": (("aac",), "aac"),
     "e-ac3": (("eac3",), "eac3"),

@@ -704,6 +704,24 @@ class Cancelled(Exception):
     killed command as a failure."""
 
 
+STOP_GRACE = 0.5
+"""How long, in seconds, the script waits for a stop to be recorded when a
+command fails, before it reports the failure (see _stopped_meanwhile())."""
+
+
+def _stopped_meanwhile() -> bool:
+    """True if a stop is recorded within STOP_GRACE seconds: for a command
+    that failed, the sign that the stop killed it. Ctrl+C reaches the tools
+    in the terminal, and a kill of the whole process group reaches them, at
+    the same moment as the script, and a tool dies of it at once. Python
+    records the stop only when the main thread runs _stop_handler(), a
+    moment later, so a --jobs worker that sees its tool fail in that moment
+    would otherwise report a failure the stop caused. A real failure is
+    reported STOP_GRACE seconds later. On Windows, _console_ctrl() records
+    a console Ctrl+C at once."""
+    return _cancelled.wait(STOP_GRACE)
+
+
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     """Run a quick command (e.g. ffprobe) and capture its output. Remuxes use
     run_with_progress() instead.
@@ -711,8 +729,9 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     Like a remux, the process is listed in _active_procs while it runs, so a
     stop kills it rather than waiting for it (e.g. ffprobe on a network
     share that has stopped answering), and it's killed straight away if a
-    stop was already requested. If a stop is requested while it runs,
-    Cancelled is raised once it has ended.
+    stop was already requested. If a stop is requested while it runs, or
+    just after it failed (see _stopped_meanwhile()), Cancelled is raised
+    once it has ended.
 
     Output is read as UTF-8, which ffprobe, ffmpeg and mkvmerge (given
     --output-charset UTF-8) all write, rather than in the system's own
@@ -734,7 +753,7 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     finally:
         with _active_procs_lock:
             _active_procs.discard(proc)
-    if _cancelled.is_set():
+    if _cancelled.is_set() or (proc.returncode != 0 and _stopped_meanwhile()):
         raise Cancelled
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
@@ -2034,7 +2053,7 @@ def _remux_and_swap(plan: Plan, make_cmd: Callable[[Path], list[str]], parse_pct
         returncode, output = run_with_progress(cmd, path.name, parse_pct, progress)
         with_warnings = returncode == warnings_exit and not _cancelled.is_set()
         if (returncode != 0 and not with_warnings) or not plan.tmp_path.exists():
-            if _cancelled.is_set():
+            if _stopped_meanwhile():
                 raise Cancelled
             log.error(f"    {path.name}: {cmd[0]} remux failed: {output.strip()}")
             return False

@@ -52,6 +52,9 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.15"
             experimental: true
+    env:
+      # Each job's own coverage data file, for the coverage job to combine.
+      COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -65,16 +68,47 @@ jobs:
       # Coverage is for information only: a lower number never fails the job.
       - run: python -m coverage run -m pytest
       - run: python -m coverage report
+      # The pre-release is left out, so a run where it fails can't change the
+      # total. The data file's name starts with a dot, which upload-artifact
+      # skips unless told otherwise.
+      - uses: actions/upload-artifact@v7
+        if: ${{ !matrix.experimental }}
+        with:
+          name: coverage-data-${{ matrix.os }}-${{ matrix.python-version }}
+          path: ${{ env.COVERAGE_FILE }}
+          include-hidden-files: true
+          retention-days: 1
+
+  # Combines the coverage the logic tests measured on Linux, macOS and
+  # Windows, so code that only runs on one system (the Windows console
+  # handler, say) counts where it runs. Puts the report on the run's summary
+  # page, and saves the total for the badge.
+  coverage:
+    name: Combine the coverage
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-data-*
+          merge-multiple: true
+      - run: python -m coverage combine
+      - run: python -m coverage report
       - name: Add the coverage report to the run's summary page
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
         run: |
-          echo "### Coverage of set_stereo_default.py (logic tests)" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Coverage of set_stereo_default.py (logic tests on Linux, macOS and Windows)" \
+            >> "$GITHUB_STEP_SUMMARY"
           python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
       - name: Save the coverage total for the badge
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
         run: python -m coverage report --format=total > coverage-total.txt
       - uses: actions/upload-artifact@v7
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
         with:
           name: coverage-total
           path: coverage-total.txt
@@ -120,11 +154,11 @@ jobs:
   # Writes the coverage total to coverage-<branch>.json on the badges branch,
   # which the README's coverage badge reads through shields.io (master's; the
   # README doesn't show develop's, but it's kept up to date too). Only runs
-  # for pushes to master and develop, once the logic tests (which measure
-  # the coverage) have passed.
+  # for pushes to master and develop, once the coverage job has combined the
+  # coverage of the logic tests.
   coverage-badge:
     name: Update the coverage badge
-    needs: test
+    needs: coverage
     if: github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'develop')
     runs-on: ubuntu-latest
     permissions:
@@ -272,6 +306,14 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
+      # The console Ctrl+C test runs the script with the oldest Python
+      # supported: on Windows, 3.13 and older can't interrupt the main
+      # thread's wait for the --jobs workers, which that test needs. Set up
+      # first, so that 3.14 below stays the default python.
+      - uses: actions/setup-python@v7
+        id: oldest-python
+        with:
+          python-version: "3.10"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
@@ -309,7 +351,12 @@ jobs:
           ffmpeg -version | head -n 1
           mkvmerge --version
           python --version
+          "$SSD_CTRL_C_PYTHON" --version
+        env:
+          SSD_CTRL_C_PYTHON: ${{ steps.oldest-python.outputs.python-path }}
       - run: python -m pytest tests/test_real_files.py -v
+        env:
+          SSD_CTRL_C_PYTHON: ${{ steps.oldest-python.outputs.python-path }}
 
   # The real-file tests on macOS, with Homebrew's ffmpeg and MKVToolNix: the
   # newest releases, built the way most Mac users get them.
