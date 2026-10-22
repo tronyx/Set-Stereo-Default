@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-10-22 · [#31](https://github.com/tronyx/Set-Stereo-Default/pull/31)
+
 ### Project
 
 - The scans of the Docker images now use Trivy 0.76.1. Trivy downloads its list of known vulnerabilities over an encrypted connection. Version 0.76.1 no longer trusts the certificates of the eMudhra intermediate certificate authority (CA), whose keys were compromised.
