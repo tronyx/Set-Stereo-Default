@@ -26,7 +26,7 @@ jobs:
       security-events: write
     env:
       # The same pin as the docker job in tests.yml; Dependabot can't update it.
-      TRIVY: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+      TRIVY: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
       IMAGE: docker.io/tronyx/set-stereo-default:${{ matrix.tag }}
     steps:
       # Only to know the branch's current commit, which the results are filed under.
