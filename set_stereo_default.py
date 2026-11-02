@@ -117,7 +117,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType, ModuleType
-from typing import Any, BinaryIO, Literal, NoReturn
+from typing import Any, BinaryIO, Literal
 
 try:
     from tqdm import tqdm
@@ -445,6 +445,11 @@ _active_procs_lock = threading.RLock()
 """Guards _active_procs. Reentrant because the stop handler takes it in the
 main thread, which may be the thread it interrupted while holding it."""
 
+_starting = threading.local()
+"""Its "now" is true in a thread while it starts a tool and lists it in
+_active_procs (see _start()). _stop_handler() runs in the main thread,
+so it reads the main thread's."""
+
 _cancelled = threading.Event()
 """Set once Ctrl+C or SIGTERM arrives, so files that haven't started are skipped."""
 
@@ -592,9 +597,12 @@ class Stopped(KeyboardInterrupt):
         self.signum = signum
 
 
-def _stop_handler(signum: int, frame: FrameType | None) -> NoReturn:
+def _stop_handler(signum: int, frame: FrameType | None) -> None:
     """Handle Ctrl+C (SIGINT) and SIGTERM: kill every running remux, then
-    raise Stopped in the main thread.
+    raise Stopped in the main thread. Not while the main thread is starting
+    a tool (see _start()), though: raised there, Stopped would leave the
+    tool running on its own. The stop is then only recorded, and the run
+    ends as it does when Python drops the exception (see _check_stop()).
 
     The remuxes have to be killed here for two reasons. Python raises the
     exception only in the main thread, so with --jobs > 1 a worker waiting
@@ -612,6 +620,8 @@ def _stop_handler(signum: int, frame: FrameType | None) -> NoReturn:
     _cancelled.set()
     _ignore_stops()
     _terminate_active_procs()
+    if getattr(_starting, "now", False):
+        return
     raise Stopped(signum)
 
 
@@ -722,14 +732,41 @@ def _stopped_meanwhile() -> bool:
     return _cancelled.wait(STOP_GRACE)
 
 
+def _start(cmd: list[str], stderr: int, bufsize: int = -1) -> subprocess.Popen[str]:
+    """Start cmd with its output piped and read as UTF-8 (see run()), and
+    list it in _active_procs, so a stop kills it. If a stop was already
+    requested, it's killed straight away. stderr and bufsize are passed on
+    to Popen.
+
+    A stop can arrive the moment the tool has started, even inside Popen,
+    before it's listed. Stopped raised there would leave it running on its
+    own, out of the stop's reach: an orphaned mkvmerge writes its whole
+    remux, making the temp folder again after the script removed it. So
+    while this runs, _stop_handler() only records the stop (see
+    _starting), and the tool is killed here as one started after a stop
+    is. The stop handler sets _cancelled before reading the list, so a
+    tool a --jobs worker starts as a stop arrives is killed too."""
+    _starting.now = True
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=stderr, encoding="utf-8",
+                                errors="replace", bufsize=bufsize)
+        with _active_procs_lock:
+            _active_procs.add(proc)
+        if _cancelled.is_set():
+            proc.kill()
+    finally:
+        _starting.now = False
+    return proc
+
+
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     """Run a quick command (e.g. ffprobe) and capture its output. Remuxes use
     run_with_progress() instead.
 
-    Like a remux, the process is listed in _active_procs while it runs, so a
-    stop kills it rather than waiting for it (e.g. ffprobe on a network
-    share that has stopped answering), and it's killed straight away if a
-    stop was already requested. If a stop is requested while it runs, or
+    Like a remux, the process is started by _start(), so a stop kills it
+    rather than waiting for it (e.g. ffprobe on a network share that has
+    stopped answering), and it's killed straight away if a stop was
+    already requested. If a stop is requested while it runs, or
     just after it failed (see _stopped_meanwhile()), Cancelled is raised
     once it has ended.
 
@@ -738,13 +775,8 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     encoding: on Windows that's usually cp1252, which garbles non-English
     track names or fails on them outright. A byte that isn't valid UTF-8
     is replaced rather than stopping the run."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            encoding="utf-8", errors="replace")
+    proc = _start(cmd, subprocess.PIPE)
     try:
-        with _active_procs_lock:
-            _active_procs.add(proc)
-        if _cancelled.is_set():
-            proc.kill()
         stdout, stderr = proc.communicate()
     except BaseException:
         proc.kill()
@@ -773,25 +805,18 @@ def run_with_progress(cmd: list[str], label: str, parse_pct: Callable[[str], int
     100 on success; process_all() uses it to move the overall bar. Output
     is read as UTF-8, as in run().
 
-    The process is listed in _active_procs while it runs and is killed if
-    anything goes wrong, so it's never left running on its own. If a stop
-    was already requested, it's killed straight away. It's listed before
-    that check, and the stop handler sets _cancelled before reading the
-    list, so a remux starting at the same moment as a stop can't slip
-    through."""
+    The process is started by _start(), so a stop kills it, and it's killed
+    straight away if a stop was already requested. It's also killed if
+    anything goes wrong while it runs, so it's never left running on its
+    own."""
     progress = progress or Progress()
     bar = None
     last_pct = 0
     lines: deque[str] = deque(maxlen=50)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             encoding="utf-8", errors="replace", bufsize=1)
+    proc = _start(cmd, subprocess.STDOUT, bufsize=1)
     stdout = proc.stdout
     assert stdout is not None
     try:
-        with _active_procs_lock:
-            _active_procs.add(proc)
-        if _cancelled.is_set():
-            proc.kill()
         if progress.show and HAVE_TQDM:
             bar = tqdm(total=100, desc=f"  {_escape_controls(label)}"[:40], unit="%", leave=False, position=0)
         for line in stdout:

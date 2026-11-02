@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- A stop sometimes left a temporary folder next to an MKV file. Ctrl+C or SIGTERM sometimes arrived just as the script started mkvmerge. Then mkvmerge kept running after the script stopped. It made the temporary folder again and wrote a complete new file in it, and the next run reported the folder as a leftover. ffmpeg and ffprobe also kept running in this case, but they left no files. Now the script also stops a tool that starts at the moment of the stop. The original file always stayed as it was. The random stop tests on Windows found the problem. A new test makes sure that the script stops the tool.
 
 ## 2026-10-22 · [#31](https://github.com/tronyx/Set-Stereo-Default/pull/31)
 

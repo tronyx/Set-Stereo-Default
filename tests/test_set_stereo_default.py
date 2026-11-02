@@ -4193,6 +4193,40 @@ def test_a_quick_command_started_after_a_stop_is_killed_straight_away():
     assert not ssd._active_procs
 
 
+@pytest.mark.parametrize("start", [
+    lambda: ssd.run_with_progress(SLOW_CMD, "x", parse_pct_line),
+    lambda: ssd.run(SLOW_CMD),
+], ids=["remux", "quick command"])
+def test_a_stop_as_a_tool_starts_still_kills_it(monkeypatch, start):
+    """A stop can arrive the moment a tool has started, before it's listed
+    in _active_procs for a stop to kill, even inside Popen. The tool must
+    still be killed, not left running on its own: an orphaned mkvmerge
+    writes its whole remux, making the temp folder again after the script
+    removed it. Seen on Windows, where a tool started just after a Ctrl+C
+    doesn't get it, but a SIGTERM to the script alone does the same."""
+    started = []
+
+    def popen_then_stop(*args, real_popen=subprocess.Popen, **kwargs):
+        started.append(real_popen(*args, **kwargs))
+        ssd._stop_handler(signal.SIGINT, None)
+        return started[-1]
+
+    monkeypatch.setattr(ssd.subprocess, "Popen", popen_then_stop)
+    try:
+        start()
+    except (ssd.Stopped, ssd.Cancelled):
+        pass
+    finally:
+        left_running = started[0].poll() is None
+        started[0].kill()
+        started[0].wait()
+        if started[0].stdout:
+            started[0].stdout.close()
+    assert not left_running, "the tool was left running"
+    assert ssd._cancelled.is_set()
+    assert not ssd._active_procs
+
+
 def test_a_quick_command_is_only_listed_while_it_runs():
     assert ssd.run(python_cmd("print('done')")).stdout == "done\n"
     assert not ssd._active_procs
