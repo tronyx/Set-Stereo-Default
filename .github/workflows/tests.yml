@@ -253,7 +253,7 @@ jobs:
           VERSION: ${{ matrix.old-mkvmerge }}
         run: |
           cd /opt
-          curl -sSLf -o mkvtoolnix.AppImage \
+          curl -sSLf --retry 5 --retry-delay 15 -o mkvtoolnix.AppImage \
             "https://mkvtoolnix.download/appimage/MKVToolNix_GUI-$VERSION-x86_64.AppImage"
           chmod +x mkvtoolnix.AppImage
           ./mkvtoolnix.AppImage --appimage-extract > /dev/null
@@ -264,23 +264,29 @@ jobs:
           LD_LIBRARY_PATH=/opt/mkvtoolnix/usr/lib exec /opt/mkvtoolnix/usr/bin/mkvmerge "$@"
           WRAPPER
           chmod +x /usr/local/bin/mkvmerge
-      # https://github.com/BtbN/FFmpeg-Builds publishes builds of the newest
-      # release branches in each day's release (e.g. a file named
+      # https://github.com/FFmpeg-Builds/FFmpeg-Builds publishes builds of the
+      # newest release branches in each day's release (e.g. a file named
       # ffmpeg-n9.0.2-22-g46d8f462ee-linux64-gpl-9.0.tar.xz), so pick the
       # highest version in the newest release rather than pinning one. File and
       # folder names have changed before, so the download link is taken as
       # listed and ffmpeg is found wherever the archive puts it.
+      # Every download retries, because GitHub and mkvtoolnix.download
+      # sometimes answer with a brief error such as 504. Each archive goes to a
+      # file first: a retry starts the file again, but it can't take back what
+      # a pipe has already passed on to tar.
       - name: Install static ffmpeg
         if: matrix.static-ffmpeg
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          url=$(curl -sSLf -H "Authorization: Bearer $GH_TOKEN" \
-              https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
+          url=$(curl -sSLf --retry 5 --retry-delay 15 -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/FFmpeg-Builds/FFmpeg-Builds/releases/latest \
             | grep -o 'https://[^"]*/ffmpeg-n[0-9][^"/]*-linux64-gpl-[0-9.]*\.tar\.xz' | sort -uV | tail -n 1)
           test -n "$url" || { echo "No ffmpeg release build found"; exit 1; }
           echo "Using $url"
-          curl -sSLf "$url" | tar -xJ -C /opt
+          curl -sSLf --retry 5 --retry-delay 15 -o /tmp/ffmpeg.tar.xz "$url"
+          tar -xJf /tmp/ffmpeg.tar.xz -C /opt
+          rm /tmp/ffmpeg.tar.xz
           bin=$(find /opt -maxdepth 3 -type f -name ffmpeg -path '*/bin/*' | head -n 1)
           test -n "$bin" || { echo "No ffmpeg in the download"; exit 1; }
           dirname "$bin" >> "$GITHUB_PATH"
@@ -326,23 +332,24 @@ jobs:
         run: |
           tools="$(cygpath -u "$RUNNER_TEMP")/tools"
           mkdir -p "$tools" && cd "$tools"
-          # The same newest ffmpeg release build as the static-build job above.
-          url=$(curl -sSLf -H "Authorization: Bearer $GH_TOKEN" \
-              https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest \
+          # The same newest ffmpeg release build as the static-build job above,
+          # with the same retries.
+          url=$(curl -sSLf --retry 5 --retry-delay 15 -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/FFmpeg-Builds/FFmpeg-Builds/releases/latest \
             | grep -o 'https://[^"]*/ffmpeg-n[0-9][^"/]*-win64-gpl-[0-9.]*\.zip' | sort -uV | tail -n 1)
           test -n "$url" || { echo "No ffmpeg release build found"; exit 1; }
           echo "Using $url"
-          curl -sSLf -o ffmpeg.zip "$url"
+          curl -sSLf --retry 5 --retry-delay 15 -o ffmpeg.zip "$url"
           unzip -q ffmpeg.zip
           bin=$(find "$tools" -maxdepth 3 -type f -name ffmpeg.exe -path '*/bin/*' | head -n 1)
           test -n "$bin" || { echo "No ffmpeg in the download"; exit 1; }
           cygpath -w "$(dirname "$bin")" >> "$GITHUB_PATH"
           # Windows' own tar can unpack the .7z (Git Bash's tar can't).
-          version=$(curl -sSLf https://mkvtoolnix.download/latest-release.xml \
+          version=$(curl -sSLf --retry 5 --retry-delay 15 https://mkvtoolnix.download/latest-release.xml \
             | grep -o '<latest-source>.*</latest-source>' | grep -o '<version>[^<]*' | cut -d'>' -f2)
           test -n "$version" || { echo "No MKVToolNix release found"; exit 1; }
           echo "Using MKVToolNix $version"
-          curl -sSLf -o mkvtoolnix.7z \
+          curl -sSLf --retry 5 --retry-delay 15 -o mkvtoolnix.7z \
             "https://mkvtoolnix.download/windows/releases/$version/mkvtoolnix-64-bit-$version.7z"
           /c/Windows/System32/tar.exe -xf mkvtoolnix.7z
           cygpath -w "$tools/mkvtoolnix" >> "$GITHUB_PATH"

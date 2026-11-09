@@ -6,7 +6,9 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
-Nothing yet.
+### Project
+
+- The real-file CI jobs that download ffmpeg or MKVToolNix now try each download again, up to five times. On 2026-11-09, GitHub answered both ffmpeg downloads with an HTTP 504 error for a short time, and both jobs stopped before any test ran. The static-build job also saves the ffmpeg archive to a file before it unpacks it. Then a download that starts again can't break the archive. The jobs also use the new name of the ffmpeg builds' repository, `FFmpeg-Builds/FFmpeg-Builds`. The old name, `BtbN/FFmpeg-Builds`, works only through a redirect from GitHub.
 
 ## 2026-11-02 · [#34](https://github.com/tronyx/Set-Stereo-Default/pull/34)
 
