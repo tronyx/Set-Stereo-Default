@@ -61,6 +61,7 @@ To send the list through a pipe (the output of one command sent to another) inst
 | `--skip-symlinks` | Skip the files that are symlinks (links to another file). By default, the script fixes the file that the link points to, and the link continues to work |
 | `--follow-symlinks` | Also search the subfolders that are symlinks. By default, the script skips them. It always searches the folders that you name on the command line |
 | `--avi-reorder` | For `.avi` files, move the stereo track to the front (see [AVI files](how-it-works.md#-changing-the-file)) |
+| `--sub-charset CHARSET` | For `.mkv` and `.webm` files: the character set of the text subtitles that are not valid UTF-8, for example `windows-1252`. mkvmerge converts only these subtitle tracks to UTF-8 (see [Troubleshooting](troubleshooting.md)) |
 | `--force` | Also remux (copy the tracks into a new file) the files that are already correct, for example to restore their thumbnails (see [Troubleshooting](troubleshooting.md)) |
 | `--delete-leftovers` | Delete the temporary files and folders that an interrupted run left behind, when nothing in them changed in the last hour. The summary shows how many. With `--dry-run`, only list them (see [Leftover temp files](how-it-works.md#-leftover-temp-files)) |
 | `--keep-dates` | Give each changed file the modification date of the original, so that the file does not look newly changed (see [File dates](how-it-works.md#-file-dates)) |

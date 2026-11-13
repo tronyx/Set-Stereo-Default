@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+### Added
+
+- `--sub-charset CHARSET` converts MKV text subtitles that are not valid UTF-8 to UTF-8, for example `--sub-charset windows-1252`. When mkvmerge reports such a subtitle track, the script remuxes the file again and converts only that track. A track that is already UTF-8 stays as it is. At the end of the run, the script lists the files that it converted, so that you can make sure that the characters are correct. If mkvmerge does not know the character set, the script does not change the file. See [Troubleshooting](docs/troubleshooting.md).
+
 ### Fixed
 
 - The script no longer damages MKV subtitles that are not valid UTF-8. Some older files have text subtitles in another character set, for example Windows-1252. mkvmerge 59 and newer replace each of these characters with "�" when they remux the file. Before, the script used this new file and only showed the warning of mkvmerge. Now it does not change the file, names the subtitle track, and lists the file at the end of the run. See [Troubleshooting](docs/troubleshooting.md) for how to convert the subtitles. With mkvmerge 58 and older, which copy the characters without a change, nothing changes. The script now also tells mkvmerge to show its messages in English, so that the script can recognize this warning on every system.

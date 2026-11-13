@@ -37,7 +37,7 @@ If a test fails, the script keeps the original and counts the file as an `Error`
 
 In MP4, M4V, and MOV files, ffmpeg also sets one flag by itself. If no subtitle track has the default flag, ffmpeg gives it to the first subtitle track. It does the same with video tracks. The script cannot prevent this, so it uses the new file and shows a warning (see [Troubleshooting](troubleshooting.md)).
 
-Text subtitles in an MKV file must be in UTF-8. If a subtitle track has characters in another character set, mkvmerge 59 and newer replace each of these characters with "�". So the script does not use the new file, and it counts the file as an `Error` (see [Troubleshooting](troubleshooting.md)). mkvmerge 58 and older copy these characters without a change. With them, the script uses the new file and shows the warning of mkvmerge.
+Text subtitles in an MKV file must be in UTF-8. If a subtitle track has characters in another character set, mkvmerge 59 and newer replace each of these characters with "�". So the script does not use the new file, and it counts the file as an `Error` (see [Troubleshooting](troubleshooting.md)). mkvmerge 58 and older copy these characters without a change. With them, the script uses the new file and shows the warning of mkvmerge. With `--sub-charset`, mkvmerge converts these subtitle tracks to UTF-8 instead, and the script uses the new file.
 
 The script also does not use the new file if the original changed during the remux. For example, Sonarr or Radarr can import an upgrade (a better version of the video) over the original. The new file does not have this change. So the script leaves the file as it is and counts it as an `Error`. The next run fixes the new version.
 

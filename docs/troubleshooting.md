@@ -17,6 +17,7 @@ Before this list, the script shows a list of the files that got a warning. Each 
 - Files in which ffmpeg gave the default flag to a subtitle or video track.
 - Files that lost flags that ffmpeg cannot write to MP4, M4V, MOV, or AVI files.
 - Files for which mkvmerge showed warnings.
+- Files with text subtitles that the script converted to UTF-8 with `--sub-charset`.
 - Leftover temp files and folders from an interrupted run, which the script skipped or kept.
 - Folders with a name that starts like a temporary folder of the script, but that the script did not make.
 
@@ -109,12 +110,25 @@ The two tools do not agree about the file. The script does not guess which track
 
 Text subtitles in an MKV file must be in UTF-8. Some older files have subtitles in another character set, for example Windows-1252. mkvmerge 59 and newer replace each character that is not valid UTF-8 with "�". So the new file would lose these characters, and the script does not change the file. N is the number of the subtitle track. mkvmerge 58 and older copy these characters without a change. With them, the script fixes the file and shows the warning of mkvmerge.
 
-To convert the subtitles to UTF-8:
+To convert the subtitles to UTF-8, run the script again with `--sub-charset` and the character set of the subtitles. Subtitles in English and other Western European languages usually use Windows-1252, so start with `--sub-charset windows-1252`. mkvmerge then converts only the subtitle tracks that are not valid UTF-8, and the script fixes the file. At the end of the run, the script lists the files that it converted. Play them, and make sure that the subtitles show the correct characters.
+
+> [!TIP]
+> If you are not sure about the character set, also give `--backup`. If the characters are wrong, you can then put the original back and try another character set.
+
+To convert one file by hand instead:
 
 1. Find the character set of the subtitles. Subtitles in English and other Western European languages usually use Windows-1252.
 2. Remux the file with mkvmerge. Give it the track number from the message and the character set, for example `mkvmerge -o fixed.mkv --sub-charset 2:windows-1252 original.mkv`.
 3. Play `fixed.mkv`, and make sure that the subtitles show the correct characters. If they do not, try again with another character set.
 4. Replace the original with `fixed.mkv`. Then run the script again.
+
+## `mkvmerge doesn't know the character set "CHARSET" that --sub-charset gives, so it's left as it was`
+
+mkvmerge does not know the name that you gave with `--sub-charset`. So it cannot convert the subtitles, and the script does not change the file. Make sure that the name is correct, for example `windows-1252`, `iso-8859-1`, or `cp1250`. Then run the script again.
+
+## `converted subtitle track N from CHARSET to UTF-8`
+
+The script fixed the file, and mkvmerge converted the subtitles with `--sub-charset`. The character set is the same for all files in the run, but the subtitles of one file can use another character set. So play the file, and make sure that the subtitles show the correct characters. If they do not, put back the original from your backup, and run the script on it again with the correct character set.
 
 ## `Couldn't give remuxed files their original owner`
 
