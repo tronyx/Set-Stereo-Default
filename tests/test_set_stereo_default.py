@@ -6,6 +6,7 @@ import _thread
 import contextlib
 import ctypes
 import errno
+import functools
 import io
 import json
 import linecache
@@ -30,14 +31,20 @@ real_mkvmerge_tracks = ssd.mkvmerge_tracks
 
 real_lock_path = ssd._lock_path
 
+real_mkvmerge_english = ssd.mkvmerge_english
+
 
 @pytest.fixture(autouse=True)
 def mkvmerge_ids(monkeypatch):
     """mkvmerge never runs in these tests, so mkvmerge_tracks() reports a
     video track (ID 0) and audio tracks with IDs 1 and 2, the indexes the
     ffprobe stand-ins use. Set mkvmerge_ids.value to other audio track IDs,
-    or to None to make mkvmerge fail to read the file."""
+    or to None to make mkvmerge fail to read the file. mkvmerge_english()
+    gives "en_US", the name Linux and macOS builds use, and is cached like
+    the real one, which main() clears; the tests of it use
+    real_mkvmerge_english."""
     stand_in = types.SimpleNamespace(value=[1, 2])
+    monkeypatch.setattr(ssd, "mkvmerge_english", functools.cache(lambda: "en_US"))
 
     def tracks(path):
         if stand_in.value is None:
@@ -3829,14 +3836,49 @@ def test_mkvmerge_is_told_to_write_utf8(tmp_path, caplog):
     assert args[args.index("--output-charset") + 1] == "UTF-8"
 
 
-def test_mkvmerge_is_told_to_answer_in_english(tmp_path, caplog):
+@pytest.mark.parametrize("english", ["en_US", "en", None], ids=["Linux and macOS", "Windows", "no English"])
+def test_mkvmerge_is_told_to_answer_in_english(tmp_path, monkeypatch, caplog, english):
     """The script recognises some of mkvmerge's warnings by their English
     text (see INVALID_UTF8_SUBTITLE_RE), so mkvmerge must not translate
-    them. en_US is the one language every mkvmerge has."""
+    them. It's given English by the name it lists (see
+    mkvmerge_english()), or, if it lists none, no --ui-language at all,
+    which no mkvmerge refuses."""
+    monkeypatch.setattr(ssd, "mkvmerge_english", lambda: english)
     caplog.set_level("INFO")
     ssd.apply_mkv(ssd.Plan(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2), file_args())
     args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
-    assert args[args.index("--ui-language") + 1] == "en_US"
+    if english is None:
+        assert "--ui-language" not in args
+    else:
+        assert args[args.index("--ui-language") + 1] == english
+
+
+LINUX_TRANSLATIONS = "Available translations:\n  en_US (English)\n"
+"""What mkvmerge --ui-language list shows on Linux and macOS (MKVToolNix 99)."""
+
+WINDOWS_TRANSLATIONS = ("Available translations:\n  en (English)\n  eu (Basque)\n  de (German)\n"
+                        "  sr_RS@latin (Serbian Latin)\n")
+"""Part of what the Windows build of mkvmerge 103 shows for --ui-language
+list: there, English is "en", and "en_US" is refused."""
+
+
+@pytest.mark.parametrize("listed, expected", [
+    (LINUX_TRANSLATIONS, "en_US"),
+    (WINDOWS_TRANSLATIONS, "en"),
+    ("Available translations:\n  de (German)\n  fr (French)\n", None),
+    ("", None),
+], ids=["Linux and macOS", "Windows", "no English", "nothing listed"])
+def test_mkvmerge_english(monkeypatch, listed, expected):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=0, stdout=listed, stderr=""))
+    assert real_mkvmerge_english() == expected
+
+
+def test_mkvmerge_english_without_mkvmerge(monkeypatch):
+    def missing(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory")
+    monkeypatch.setattr(ssd, "run", missing)
+    assert real_mkvmerge_english() is None
 
 
 def font(mimetype):

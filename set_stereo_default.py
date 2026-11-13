@@ -556,9 +556,9 @@ def _reset_run_state() -> None:
     request (which would cancel every file), files that couldn't keep their
     owner, files it warned about and files it couldn't fix (which would be
     reported again), the leftovers it deleted (which would be counted
-    again), the headers printed last, and this mkvmerge's version and
-    whether it can keep legacy font types. No remux outlives its run, so
-    _active_procs is already empty."""
+    again), the headers printed last, and this mkvmerge's version, its name
+    for English, and whether it can keep legacy font types. No remux
+    outlives its run, so _active_procs is already empty."""
     _cancelled.clear()
     with _ownership_lock:
         _ownership_failures.clear()
@@ -571,6 +571,7 @@ def _reset_run_state() -> None:
     _file_context.header = None
     mkvmerge_can_keep_legacy_font_types.cache_clear()
     mkvmerge_version.cache_clear()
+    mkvmerge_english.cache_clear()
 
 
 def _terminate_active_procs() -> None:
@@ -1944,6 +1945,22 @@ def mkvmerge_version() -> tuple[int, ...] | None:
     return tuple(int(part) for part in found.group(1).split(".")) if found else None
 
 
+@functools.cache
+def mkvmerge_english() -> str | None:
+    """The name this mkvmerge gives English for --ui-language, as
+    "mkvmerge --ui-language list" shows it: "en_US" in the Linux and macOS
+    builds, "en" in the Windows ones, which refuse "en_US". None if it
+    lists neither, or can't be run: the option is then left out, and
+    mkvmerge answers in the system's language, as it did before the option
+    was given. Checked once per run."""
+    try:
+        listed = {line.split()[0] for line in run(["mkvmerge", "--ui-language", "list"]).stdout.splitlines()
+                  if line[:1].isspace() and line.strip()}
+    except OSError:
+        return None
+    return next((name for name in ("en_US", "en") if name in listed), None)
+
+
 MKVMERGE_REPLACES_INVALID_UTF8 = (59,)
 """The first mkvmerge (59.0.0) that replaces each byte of a text subtitle
 that isn't valid UTF-8 with U+FFFD when it remuxes an MKV. Older ones copy
@@ -1951,8 +1968,8 @@ the bytes as they are, and only warn."""
 
 INVALID_UTF8_SUBTITLE_RE = re.compile(r"track (\d+): This text subtitle track contains invalid 8-bit characters")
 """mkvmerge's warning about a text subtitle track that isn't valid UTF-8,
-with the track's ID. mkvmerge is told to answer in English (--ui-language
-en_US, see apply_mkv()), so the text is the same on every system."""
+with the track's ID. mkvmerge is told to answer in English (see
+mkvmerge_english()), so the text is the same on every system."""
 
 
 def _and_list(items: list[str]) -> str:
@@ -2197,7 +2214,9 @@ def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bo
                   f"leaving the file alone")
         return False
 
-    head = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "--ui-language", "en_US"]
+    head = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8"]
+    if english := mkvmerge_english():
+        head += ["--ui-language", english]
     if (any(s.mimetype.lower() in LEGACY_FONT_MIME_TYPES for s in plan.layout)
             and mkvmerge_can_keep_legacy_font_types()):
         head.append("--enable-legacy-font-mime-types")
