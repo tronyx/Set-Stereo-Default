@@ -464,8 +464,11 @@ by report_ownership_failures()."""
 _ownership_lock = threading.Lock()
 """Guards _ownership_failures, which several --jobs threads add to at once."""
 
-Failure = Literal["damaged", "in use", "changed", "other"]
+Failure = Literal["damaged", "in use", "changed", "subtitles", "other"]
 """Why a file couldn't be fixed, as report_failed_files() groups them."""
+
+TROUBLESHOOTING_URL = "https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/troubleshooting.md"
+"""The docs page that says what each warning and error means."""
 
 FAILURE_GROUPS: dict[Failure, str] = {
     "damaged": ("Damaged or incomplete downloads. Replace each (e.g. search for it again in Sonarr "
@@ -475,6 +478,9 @@ FAILURE_GROUPS: dict[Failure, str] = {
                "writable, then run the script again:"),
     "changed": ("Changed by another program during the run, so left as it is now. Run the script "
                 "again to fix the new version:"),
+    "subtitles": ("Text subtitles that aren't valid UTF-8, which this mkvmerge would change. Convert "
+                  f"the subtitle tracks named above to UTF-8 ({TROUBLESHOOTING_URL} says how), then run "
+                  "the script again:"),
     "other": "Something else went wrong; the line about each file above says what:",
 }
 """The heading report_failed_files() gives each kind of failure, saying what
@@ -513,9 +519,6 @@ and exFAT drives, e.g. "._Movie.mkv", holding Finder metadata, not the
 file's content. The search skips one (see _video_file()), and
 --delete-leftovers disregards one in a temp folder (see _os_file())."""
 
-TROUBLESHOOTING_URL = "https://github.com/tronyx/Set-Stereo-Default/blob/master/docs/troubleshooting.md"
-"""The docs page that says what each warning and error means."""
-
 WARNING_GROUPS: dict[Warned, str] = {
     "default": ("Fixed, but the default flag of a subtitle or video track changed. ffmpeg gives the flag "
                 "to the first track of each kind in MP4, M4V and MOV files when none has it, so a player "
@@ -553,9 +556,9 @@ def _reset_run_state() -> None:
     request (which would cancel every file), files that couldn't keep their
     owner, files it warned about and files it couldn't fix (which would be
     reported again), the leftovers it deleted (which would be counted
-    again), the headers printed last, and whether this mkvmerge
-    can keep legacy font types. No remux outlives its run, so _active_procs
-    is already empty."""
+    again), the headers printed last, and this mkvmerge's version and
+    whether it can keep legacy font types. No remux outlives its run, so
+    _active_procs is already empty."""
     _cancelled.clear()
     with _ownership_lock:
         _ownership_failures.clear()
@@ -567,6 +570,7 @@ def _reset_run_state() -> None:
     _last_header.clear()
     _file_context.header = None
     mkvmerge_can_keep_legacy_font_types.cache_clear()
+    mkvmerge_version.cache_clear()
 
 
 def _terminate_active_procs() -> None:
@@ -1928,6 +1932,47 @@ def mkvmerge_can_keep_legacy_font_types() -> bool:
         return False
 
 
+@functools.cache
+def mkvmerge_version() -> tuple[int, ...] | None:
+    """This mkvmerge's version, e.g. (99, 0) for "mkvmerge v99.0 ('Buka')
+    64-bit", or None if mkvmerge can't be run or its answer can't be read.
+    Checked once per run."""
+    try:
+        found = re.search(r"\bv(\d+(?:\.\d+)*)", run(["mkvmerge", "--version"]).stdout)
+    except OSError:
+        return None
+    return tuple(int(part) for part in found.group(1).split(".")) if found else None
+
+
+MKVMERGE_REPLACES_INVALID_UTF8 = (59,)
+"""The first mkvmerge (59.0.0) that replaces each byte of a text subtitle
+that isn't valid UTF-8 with U+FFFD when it remuxes an MKV. Older ones copy
+the bytes as they are, and only warn."""
+
+INVALID_UTF8_SUBTITLE_RE = re.compile(r"track (\d+): This text subtitle track contains invalid 8-bit characters")
+"""mkvmerge's warning about a text subtitle track that isn't valid UTF-8,
+with the track's ID. mkvmerge is told to answer in English (--ui-language
+en_US, see apply_mkv()), so the text is the same on every system."""
+
+
+def _and_list(items: list[str]) -> str:
+    """items as words, e.g. "3", "3 and 5", or "3, 5 and 7"."""
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _subtitles_mkvmerge_would_change(output: str) -> list[str]:
+    """The IDs of the text subtitle tracks that this mkvmerge's output says
+    aren't valid UTF-8, if this mkvmerge replaces those bytes (see
+    MKVMERGE_REPLACES_INVALID_UTF8), in the order it named them. An
+    mkvmerge whose version can't be read is taken to replace them, so a
+    subtitle is never changed by mistake."""
+    ids = list(dict.fromkeys(INVALID_UTF8_SUBTITLE_RE.findall(output)))
+    version = mkvmerge_version()
+    if version is not None and version < MKVMERGE_REPLACES_INVALID_UTF8:
+        return []
+    return ids
+
+
 def _announce(intro: str | None, line: str | None = None) -> None:
     """Log a file's intro (what's about to happen to it, from
     _process_file()) and line together, as one message. With --jobs > 1,
@@ -2084,6 +2129,12 @@ def _remux_and_swap(plan: Plan, make_cmd: Callable[[Path], list[str]], parse_pct
             return False
 
         tool_warnings = None
+        if with_warnings and (changed := _subtitles_mkvmerge_would_change(output)):
+            log.error(f"    {path.name}: mkvmerge would replace the characters in subtitle "
+                      f"track{'s' if len(changed) > 1 else ''} {_and_list(changed)} that aren't valid "
+                      f"UTF-8 with \"�\", so it's left as it was")
+            _note_failure(path, "subtitles")
+            return False
         if with_warnings:
             warnings = _collapse_repeats([_MKVMERGE_WARNING_PREFIX_RE.sub("", line.strip())
                                           for line in output.splitlines() if "warning" in line.lower()])
@@ -2146,7 +2197,7 @@ def apply_mkv(plan: Plan, opts: Options, progress: Progress | None = None) -> bo
                   f"leaving the file alone")
         return False
 
-    head = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8"]
+    head = ["mkvmerge", "--gui-mode", "--output-charset", "UTF-8", "--ui-language", "en_US"]
     if (any(s.mimetype.lower() in LEGACY_FONT_MIME_TYPES for s in plan.layout)
             and mkvmerge_can_keep_legacy_font_types()):
         head.append("--enable-legacy-font-mime-types")

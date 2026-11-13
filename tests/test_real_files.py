@@ -523,6 +523,49 @@ def test_two_default_subtitle_tracks_both_keep_the_flag(tmp_path):
     assert contents(video) == before
 
 
+def test_a_subtitle_that_isnt_utf8_keeps_its_bytes(tmp_path):
+    """An MKV subtitle track whose text is in Latin-1 rather than UTF-8, as
+    in some older downloads. mkvmerge 59 and newer replace each byte that
+    isn't valid UTF-8 with U+FFFD, so with one of them the script must leave
+    the file as it was and name the track. mkvmerge 58 and older copy the
+    bytes as they are, so with one of them the file is fixed and the bytes
+    are still there.
+
+    The track is copied into the file without ffmpeg decoding it, since
+    ffmpeg's decoder rejects text that isn't UTF-8. The file is checked
+    first, so a tool that converted the text can't make the test pass."""
+    need("ffmpeg", "ffprobe", "mkvmerge")
+    latin1 = b"Caf\xe9 au lait"
+    srt = tmp_path / "subs.srt"
+    srt.write_bytes(b"1\n00:00:00,000 --> 00:00:01,000\n" + latin1 + b"\n")
+    video = tmp_path / "latin1 subtitles.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc=size=64x48:rate=5:duration=1",
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=5.1:sample_rate=48000",
+                    "-f", "lavfi", "-t", "1", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-i", str(srt),
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s",
+                    "-c:v", "mpeg4", "-c:a", "ac3", "-c:s", "copy",
+                    "-disposition:a:0", "default", "-disposition:a:1", "0", str(video)],
+                   check=True, capture_output=True, text=True)
+    assert latin1 in video.read_bytes()
+    original = digest(video)
+
+    code, output = run_script(video)
+
+    if mkvmerge_version() >= 59:
+        assert code == 1, output
+        assert summary(output)["error"] == 1, output
+        assert "subtitle track 3 that aren't valid UTF-8" in output, output
+        assert digest(video) == original
+        assert not leftovers(tmp_path), "temp file left behind"
+        return
+    assert code == 0, output
+    assert summary(output)["changed"] == 1, output
+    assert audio_defaults(video) == [(6, False), (2, True)]
+    assert latin1 in video.read_bytes()
+
+
 @pytest.mark.parametrize("ext", [".mp4", ".mov"])
 @pytest.mark.parametrize("subtitle_on", [False, True], ids=["subtitles off", "a subtitle on"])
 def test_a_subtitle_ffmpeg_flags_default_is_warned_about(tmp_path, ext, subtitle_on):

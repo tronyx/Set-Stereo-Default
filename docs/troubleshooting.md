@@ -9,6 +9,7 @@ At the end of the run, before the summary, the script shows a list of the files 
 - Damaged files.
 - Files that another program has open, and read-only files.
 - Files that another program changed during the run.
+- Files with text subtitles that are not valid UTF-8.
 - All other files.
 
 Before this list, the script shows a list of the files that got a warning. Each file has a short note about its warning. The script puts these files into groups by the type of warning:
@@ -103,6 +104,17 @@ Then restart the computer, and run the script again.
 ## `mkvmerge sees N audio track(s), but ffprobe sees M`
 
 The two tools do not agree about the file. The script does not guess which track is which, so it does not change the file. Please [open an issue](https://github.com/tronyx/Set-Stereo-Default/issues), and include the `mkvmerge -J` output for the file.
+
+## `mkvmerge would replace the characters in subtitle track N that aren't valid UTF-8 with "�", so it's left as it was`
+
+Text subtitles in an MKV file must be in UTF-8. Some older files have subtitles in another character set, for example Windows-1252. mkvmerge 59 and newer replace each character that is not valid UTF-8 with "�". So the new file would lose these characters, and the script does not change the file. N is the number of the subtitle track. mkvmerge 58 and older copy these characters without a change. With them, the script fixes the file and shows the warning of mkvmerge.
+
+To convert the subtitles to UTF-8:
+
+1. Find the character set of the subtitles. Subtitles in English and other Western European languages usually use Windows-1252.
+2. Remux the file with mkvmerge. Give it the track number from the message and the character set, for example `mkvmerge -o fixed.mkv --sub-charset 2:windows-1252 original.mkv`.
+3. Play `fixed.mkv`, and make sure that the subtitles show the correct characters. If they do not, try again with another character set.
+4. Replace the original with `fixed.mkv`. Then run the script again.
 
 ## `Couldn't give remuxed files their original owner`
 
