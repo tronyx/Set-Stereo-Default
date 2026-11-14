@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-11-14 · [#35](https://github.com/tronyx/Set-Stereo-Default/pull/35)
+
 ### Added
 
 - `--sub-charset CHARSET` converts MKV text subtitles that are not valid UTF-8 to UTF-8, for example `--sub-charset windows-1252`. When mkvmerge reports such a subtitle track, the script remuxes the file again and converts only that track. A track that is already UTF-8 stays as it is. At the end of the run, the script lists the files that it converted, so that you can make sure that the characters are correct. If mkvmerge does not know the character set, the script does not change the file. See [Troubleshooting](docs/troubleshooting.md).
