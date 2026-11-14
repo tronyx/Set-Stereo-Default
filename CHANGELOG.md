@@ -8,6 +8,20 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 Nothing yet.
 
+## 2026-11-14 · [#35](https://github.com/tronyx/Set-Stereo-Default/pull/35)
+
+### Added
+
+- `--sub-charset CHARSET` converts MKV text subtitles that are not valid UTF-8 to UTF-8, for example `--sub-charset windows-1252`. When mkvmerge reports such a subtitle track, the script remuxes the file again and converts only that track. A track that is already UTF-8 stays as it is. At the end of the run, the script lists the files that it converted, so that you can make sure that the characters are correct. If mkvmerge does not know the character set, the script does not change the file. See [Troubleshooting](docs/troubleshooting.md).
+
+### Fixed
+
+- The script no longer damages MKV subtitles that are not valid UTF-8. Some older files have text subtitles in another character set, for example Windows-1252. mkvmerge 59 and newer replace each of these characters with "�" when they remux the file. Before, the script used this new file and only showed the warning of mkvmerge. Now it does not change the file, names the subtitle track, and lists the file at the end of the run. See [Troubleshooting](docs/troubleshooting.md) for how to convert the subtitles. With mkvmerge 58 and older, which copy the characters without a change, nothing changes. The script now also tells mkvmerge to show its messages in English, so that the script can recognize this warning on every system.
+
+### Project
+
+- The real-file CI jobs that download ffmpeg or MKVToolNix now try each download again, up to five times. On 2026-11-09, GitHub answered both ffmpeg downloads with an HTTP 504 error for a short time, and both jobs stopped before any test ran. The static-build job also saves the ffmpeg archive to a file before it unpacks it. Then a download that starts again can't break the archive. The jobs also use the new name of the ffmpeg builds' repository, `FFmpeg-Builds/FFmpeg-Builds`. The old name, `BtbN/FFmpeg-Builds`, works only through a redirect from GitHub.
+
 ## 2026-11-02 · [#34](https://github.com/tronyx/Set-Stereo-Default/pull/34)
 
 ### Fixed

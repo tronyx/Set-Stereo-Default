@@ -6,6 +6,7 @@ import _thread
 import contextlib
 import ctypes
 import errno
+import functools
 import io
 import json
 import linecache
@@ -30,14 +31,20 @@ real_mkvmerge_tracks = ssd.mkvmerge_tracks
 
 real_lock_path = ssd._lock_path
 
+real_mkvmerge_english = ssd.mkvmerge_english
+
 
 @pytest.fixture(autouse=True)
 def mkvmerge_ids(monkeypatch):
     """mkvmerge never runs in these tests, so mkvmerge_tracks() reports a
     video track (ID 0) and audio tracks with IDs 1 and 2, the indexes the
     ffprobe stand-ins use. Set mkvmerge_ids.value to other audio track IDs,
-    or to None to make mkvmerge fail to read the file."""
+    or to None to make mkvmerge fail to read the file. mkvmerge_english()
+    gives "en_US", the name Linux and macOS builds use, and is cached like
+    the real one, which main() clears; the tests of it use
+    real_mkvmerge_english."""
     stand_in = types.SimpleNamespace(value=[1, 2])
+    monkeypatch.setattr(ssd, "mkvmerge_english", functools.cache(lambda: "en_US"))
 
     def tracks(path):
         if stand_in.value is None:
@@ -3316,6 +3323,198 @@ def test_a_warning_that_repeats_comes_out_on_one_line(tmp_path, monkeypatch, cap
         "    v.mkv: mkvmerge finished with warnings: Still resyncing at position 100 (and 11 more like it)"
 
 
+def invalid_utf8_warning(track_id):
+    """mkvmerge's warning, in --gui-mode, about a text subtitle track that
+    isn't valid UTF-8."""
+    return (f"#GUI#warning 'v.mkv' track {track_id}: This text subtitle track contains invalid 8-bit "
+            f"characters outside valid multi-byte UTF-8 sequences. Please specify the correct encoding "
+            f"for this track.\n")
+
+
+@pytest.mark.parametrize("version, rejected", [
+    ((58, 0, 0), False),
+    ((59, 0, 0), True),
+    ((99, 0), True),
+    (None, True),
+], ids=["mkvmerge 58 keeps the bytes", "mkvmerge 59 replaces them", "newer", "version unknown"])
+def test_a_subtitle_that_isnt_utf8_is_left_alone_where_mkvmerge_would_change_it(
+        tmp_path, monkeypatch, caplog, version, rejected):
+    """mkvmerge 59 and newer replace each byte of a text subtitle that isn't
+    valid UTF-8 with U+FFFD, so the remux would lose those characters for
+    good: the remux is rejected, the track named for the fix, and the file
+    listed with the files to fix that way. mkvmerge 58 and older copy the
+    bytes as they are, so their remux is used, with the warning. If the
+    version can't be read, the remux is rejected, to be safe."""
+    def fake_mkvmerge(cmd, *args, **kwargs):
+        remux_output(cmd).write_bytes(b"remuxed")
+        return 1, invalid_utf8_warning(3)
+    monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
+    monkeypatch.setattr(ssd, "mkvmerge_version", lambda: version)
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is not rejected
+
+    assert not leftover_temp_files(video)
+    if rejected:
+        assert video.read_bytes() == b"original"
+        assert caplog.records[-1].levelname == "ERROR"
+        assert caplog.records[-1].getMessage() == (
+            "    v.mkv: mkvmerge would replace the characters in subtitle track 3 that aren't valid "
+            "UTF-8 with \"�\", so it's left as it was")
+        assert ssd._failed_files == {str(video): "subtitles"}
+    else:
+        assert video.read_bytes() == b"remuxed"
+        assert "invalid 8-bit characters" in caplog.text
+        assert ssd._failed_files == {}
+
+
+def test_every_subtitle_track_that_isnt_utf8_is_named(tmp_path, monkeypatch, caplog):
+    def fake_mkvmerge(cmd, *args, **kwargs):
+        remux_output(cmd).write_bytes(b"remuxed")
+        return 1, invalid_utf8_warning(3) + "#GUI#warning odd timestamps\n" + invalid_utf8_warning(5)
+    monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
+    monkeypatch.setattr(ssd, "mkvmerge_version", lambda: (99, 0))
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2), file_args(dry_run=False)) is False
+    assert "in subtitle tracks 3 and 5 that aren't valid UTF-8" in caplog.records[-1].getMessage()
+
+
+def mkvmerge_runs(monkeypatch, *outcomes):
+    """Make each mkvmerge run in turn write a remux and give the next of
+    outcomes, (exit code, output). Returns the list of commands it got."""
+    commands = []
+
+    def fake_mkvmerge(cmd, *args, **kwargs):
+        commands.append(cmd)
+        remux_output(cmd).write_bytes(b"remuxed")
+        return outcomes[len(commands) - 1]
+    monkeypatch.setattr(ssd, "run_with_progress", fake_mkvmerge)
+    monkeypatch.setattr(ssd, "verify_remux", lambda *a, **k: ssd.Verification())
+    return commands
+
+
+@pytest.mark.parametrize("version", [(58, 0, 0), (99, 0)], ids=["mkvmerge 58", "mkvmerge 99"])
+def test_sub_charset_remuxes_again_converting_the_tracks_mkvmerge_named(tmp_path, monkeypatch, caplog, version):
+    """With --sub-charset, the remux runs again with --sub-charset for the
+    tracks that mkvmerge said aren't valid UTF-8, and only those: given for
+    a track that is UTF-8 already, it would encode the text twice. It goes
+    just before the input file, which mkvmerge applies it to. The
+    conversion is logged and listed with the warnings, since the character
+    set is a guess for the whole run. Any mkvmerge converts: with 58 and
+    older, which would keep the bytes, the option still asks for UTF-8."""
+    monkeypatch.setattr(ssd, "mkvmerge_version", lambda: version)
+    commands = mkvmerge_runs(monkeypatch, (1, invalid_utf8_warning(3) + invalid_utf8_warning(5)), (0, ""))
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2),
+                         file_args(dry_run=False, sub_charset="windows-1252")) is True
+
+    first, second = commands
+    assert "--sub-charset" not in first
+    assert second == [*first[:-1], "--sub-charset", "3:windows-1252", "--sub-charset", "5:windows-1252",
+                      first[-1]]
+    assert video.read_bytes() == b"remuxed"
+    converted = "converted subtitle tracks 3 and 5 from windows-1252 to UTF-8"
+    assert caplog.records[-1].getMessage() == f"    v.mkv: {converted}"
+    assert ssd._warned_files == [(str(video), "charset", converted)]
+    assert not leftover_temp_files(video)
+
+
+def test_sub_charset_isnt_used_when_every_subtitle_is_utf8(tmp_path, monkeypatch):
+    commands = mkvmerge_runs(monkeypatch, (0, ""))
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2),
+                         file_args(dry_run=False, sub_charset="windows-1252")) is True
+    assert len(commands) == 1
+    assert "--sub-charset" not in commands[0]
+
+
+UNKNOWN_CHARSET_WARNING = (
+    "#GUI#warning Could not initialize the iconv library for the conversion from no-such to UTF-8. Some "
+    "strings will not be converted to UTF-8 and the resulting Matroska file might not comply with the "
+    "Matroska specs (error: 22, Invalid argument).\n"
+    "#GUI#warning Could not initialize the iconv library for the conversion from UTF-8 to no-such. Some "
+    "strings cannot be converted from UTF-8 and might be displayed incorrectly (error: 22, Invalid argument).\n")
+"""What mkvmerge 99 says, in --gui-mode, for --sub-charset 3:no-such."""
+
+
+def test_a_character_set_mkvmerge_doesnt_know_leaves_the_file_alone(tmp_path, monkeypatch, caplog):
+    """mkvmerge doesn't stop for a character set it doesn't know: it warns
+    and writes the file without converting. So the warning must reject the
+    remux, or a typo in --sub-charset would go unnoticed."""
+    monkeypatch.setattr(ssd, "mkvmerge_version", lambda: (99, 0))
+    mkvmerge_runs(monkeypatch, (1, invalid_utf8_warning(3)), (1, UNKNOWN_CHARSET_WARNING))
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2),
+                         file_args(dry_run=False, sub_charset="no-such")) is False
+
+    assert video.read_bytes() == b"original"
+    assert caplog.records[-1].levelname == "ERROR"
+    assert caplog.records[-1].getMessage() == (
+        "    v.mkv: mkvmerge doesn't know the character set \"no-such\" that --sub-charset gives, "
+        "so it's left as it was")
+    assert ssd._warned_files == []
+    assert not leftover_temp_files(video)
+
+
+def test_a_track_still_not_utf8_after_the_conversion_leaves_the_file_alone(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(ssd, "mkvmerge_version", lambda: (99, 0))
+    mkvmerge_runs(monkeypatch, (1, invalid_utf8_warning(3)), (1, invalid_utf8_warning(3)))
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"original")
+
+    assert ssd.apply_mkv(ssd.Plan(video, ORIGINAL_AUDIO, 2),
+                         file_args(dry_run=False, sub_charset="utf-16")) is False
+
+    assert video.read_bytes() == b"original"
+    assert "in subtitle track 3 that aren't valid UTF-8" in caplog.records[-1].getMessage()
+    assert ssd._failed_files == {str(video): "subtitles"}
+    assert not leftover_temp_files(video)
+
+
+def test_sub_charset_is_read_from_the_command_line(tmp_path):
+    assert ssd.parse_args([str(tmp_path), "--sub-charset", "windows-1252"]).sub_charset == "windows-1252"
+    assert ssd.parse_args([str(tmp_path)]).sub_charset is None
+
+
+def test_sub_charset_cant_be_empty(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["set_stereo_default.py", str(tmp_path), "--sub-charset", " "])
+
+    with pytest.raises(SystemExit) as exit_info:
+        ssd.main()
+
+    assert exit_info.value.code == 2
+    assert "--sub-charset needs the name of a character set" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("output, expected", [
+    ("mkvmerge v99.0 ('Buka') 64-bit\n", (99, 0)),
+    ("mkvmerge v58.0.0 ('Supper’s Ready') 64-bit\n", (58, 0, 0)),
+    ("something else\n", None),
+], ids=["two parts", "three parts", "unreadable"])
+def test_mkvmerge_version(monkeypatch, output, expected):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=0, stdout=output, stderr=""))
+    assert ssd.mkvmerge_version() == expected
+
+
+def test_mkvmerge_version_without_mkvmerge(monkeypatch):
+    def missing(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory")
+    monkeypatch.setattr(ssd, "run", missing)
+    assert ssd.mkvmerge_version() is None
+
+
 @pytest.mark.parametrize("verdict, shown", [
     (ssd.Verification(), True),
     (ssd.Verification("stream count changed from 4 to 3"), True),
@@ -3748,6 +3947,51 @@ def test_mkvmerge_is_told_to_write_utf8(tmp_path, caplog):
     ssd.apply_mkv(ssd.Plan(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2), file_args())
     args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
     assert args[args.index("--output-charset") + 1] == "UTF-8"
+
+
+@pytest.mark.parametrize("english", ["en_US", "en", None], ids=["Linux and macOS", "Windows", "no English"])
+def test_mkvmerge_is_told_to_answer_in_english(tmp_path, monkeypatch, caplog, english):
+    """The script recognises some of mkvmerge's warnings by their English
+    text (see INVALID_UTF8_SUBTITLE_RE), so mkvmerge must not translate
+    them. It's given English by the name it lists (see
+    mkvmerge_english()), or, if it lists none, no --ui-language at all,
+    which no mkvmerge refuses."""
+    monkeypatch.setattr(ssd, "mkvmerge_english", lambda: english)
+    caplog.set_level("INFO")
+    ssd.apply_mkv(ssd.Plan(tmp_path / "v.mkv", ORIGINAL_AUDIO, 2), file_args())
+    args = shlex.split(caplog.text.split("[dry-run] ", 1)[1])
+    if english is None:
+        assert "--ui-language" not in args
+    else:
+        assert args[args.index("--ui-language") + 1] == english
+
+
+LINUX_TRANSLATIONS = "Available translations:\n  en_US (English)\n"
+"""What mkvmerge --ui-language list shows on Linux and macOS (MKVToolNix 99)."""
+
+WINDOWS_TRANSLATIONS = ("Available translations:\n  en (English)\n  eu (Basque)\n  de (German)\n"
+                        "  sr_RS@latin (Serbian Latin)\n")
+"""Part of what the Windows build of mkvmerge 103 shows for --ui-language
+list: there, English is "en", and "en_US" is refused."""
+
+
+@pytest.mark.parametrize("listed, expected", [
+    (LINUX_TRANSLATIONS, "en_US"),
+    (WINDOWS_TRANSLATIONS, "en"),
+    ("Available translations:\n  de (German)\n  fr (French)\n", None),
+    ("", None),
+], ids=["Linux and macOS", "Windows", "no English", "nothing listed"])
+def test_mkvmerge_english(monkeypatch, listed, expected):
+    monkeypatch.setattr(ssd, "run", lambda cmd, **kw: types.SimpleNamespace(
+        returncode=0, stdout=listed, stderr=""))
+    assert real_mkvmerge_english() == expected
+
+
+def test_mkvmerge_english_without_mkvmerge(monkeypatch):
+    def missing(cmd, **kw):
+        raise FileNotFoundError(2, "No such file or directory")
+    monkeypatch.setattr(ssd, "run", missing)
+    assert real_mkvmerge_english() is None
 
 
 def font(mimetype):
