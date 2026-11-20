@@ -6,6 +6,10 @@ The project doesn't use version numbers. Each entry is one merge into `master`, 
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-11-20 · [#36](https://github.com/tronyx/Set-Stereo-Default/pull/36)
+
 ### Project
 
 - The scans of the Docker images now use Trivy 0.76.2. The image of Trivy 0.76.1 has known vulnerabilities in `musl`, in `libcurl` (24 CVEs, one of them high), and in two Go modules. Trivy 0.76.2 fixes them.
