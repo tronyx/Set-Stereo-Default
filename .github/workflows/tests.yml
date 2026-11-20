@@ -419,7 +419,7 @@ jobs:
     env:
       IMAGE: set-stereo-default:ci
       # Pinned by digest, like actionlint; Dependabot can't update it.
-      TRIVY: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+      TRIVY: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
       SSD_FUZZ_SEED: ${{ github.run_id }}-docker-${{ matrix.arch }}
       PUBLISH: >-
         ${{ github.repository == 'tronyx/Set-Stereo-Default'
